@@ -14,10 +14,10 @@
 - [x] Binary smoke test successful
 
 ## Milestone 2: RAG Engine
-- [ ] Extractor trait + Markdown/Code/PDF implementations
-- [ ] Chunker trait + Markdown/Code/Fallback implementations
-- [ ] Embedder trait + Ollama + ONNX fallback
-- [ ] Unit tests for all RAG components
+- [x] Extractor trait + Markdown/Code/PDF implementations
+- [x] Chunker trait + Markdown/Code/Fallback implementations
+- [x] Embedder trait + Ollama + ONNX fallback
+- [x] Unit tests for all RAG components
 
 ## Milestone 3: File Watch & CLI
 - [ ] notify-based file watcher with debouncing
