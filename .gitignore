@@ -1,0 +1,59 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# Node.js
+node_modules/
+dist/
+build/
+.out/
+.next/
+.nuxt/
+.turbo/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Go
+bin/
+vendor/
+*.exe
+*.test
+*.out
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Claude harness
+.claude/
+
+# Logs and databases
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Coverage
+coverage/
+*.lcov
+
+# Temporary files
+tmp/
+temp/
+*.tmp
