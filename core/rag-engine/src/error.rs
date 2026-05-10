@@ -9,3 +9,9 @@ pub enum ExtractError {
     #[error("Unsupported file type: {0}")]
     Unsupported(String),
 }
+
+#[derive(Error, Debug)]
+pub enum ChunkError {
+    #[error("Tree-sitter parsing failed: {0}")]
+    Parse(String),
+}
