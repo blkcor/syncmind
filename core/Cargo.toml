@@ -1,9 +1,11 @@
 [workspace]
 members = [
-    "mcp-server",
     "file-watcher",
+    "mcp-server",
     "rag-engine",
     "storage",
+    "syncmind",
+    "syncmind-core",
 ]
 resolver = "2"
 
@@ -15,10 +17,15 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/blkcor-bt/syncmind"
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
+dirs = "6"
+thiserror = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+sqlite-vec = "0.1.9"
+zerocopy = { version = "0.8", features = ["derive"] }
