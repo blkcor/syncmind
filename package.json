@@ -1,0 +1,20 @@
+{
+  "name": "syncmind",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Privacy-first, fully offline proactive local context engine",
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r dev",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}
