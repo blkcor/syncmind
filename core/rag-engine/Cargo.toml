@@ -11,3 +11,10 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
+pulldown-cmark = "0.12"
+pdf-extract = "0.7"
+thiserror = { workspace = true }
+syncmind-core = { path = "../syncmind-core" }
+
+[dev-dependencies]
+tempfile = "3"
