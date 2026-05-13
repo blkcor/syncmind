@@ -1,17 +1,25 @@
 use std::path::Path;
 
 use crate::error::ChunkError;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Chunk {
-    pub chunk_index: usize,
-    pub start_line: usize,
-    pub end_line: usize,
-    pub content: String,
-}
+pub use syncmind_core::Chunk;
 
 pub trait Chunker: Send + Sync {
     fn chunk(&self, text: &str, path: &Path) -> Vec<Chunk>;
+}
+
+/// Returns true if `line` is a CommonMark ATX heading (1–6 `#` followed by space).
+fn is_heading(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let mut chars = trimmed.chars();
+    if chars.next() != Some('#') {
+        return false;
+    }
+    let hash_count = 1 + chars.take_while(|&c| c == '#').count();
+    if hash_count > 6 {
+        return false;
+    }
+    let after_hashes = &trimmed[hash_count..];
+    after_hashes.starts_with(' ')
 }
 
 // ── FallbackChunker ──────────────────────────────────────────────────────────
@@ -130,12 +138,7 @@ impl Chunker for MarkdownChunker {
         let lines: Vec<&str> = text.lines().collect();
 
         // Check if there are any headings.
-        let has_headings = lines.iter().any(|l| {
-            let trimmed = l.trim_start();
-            !trimmed.is_empty()
-                && trimmed.as_bytes()[0] == b'#'
-                && trimmed[1..].starts_with(' ')
-        });
+        let has_headings = lines.iter().any(|l| is_heading(l));
 
         if !has_headings {
             let fb = FallbackChunker::new(self.chunk_size, self.chunk_overlap);
@@ -148,12 +151,7 @@ impl Chunker for MarkdownChunker {
         let mut current_lines: Vec<&str> = Vec::new();
 
         for (idx, line) in lines.iter().enumerate() {
-            let trimmed = line.trim_start();
-            let is_heading = !trimmed.is_empty()
-                && trimmed.as_bytes()[0] == b'#'
-                && trimmed[1..].starts_with(' ');
-
-            if is_heading {
+            if is_heading(line) {
                 if let Some(start) = current_start {
                     sections.push((start, current_lines));
                 }

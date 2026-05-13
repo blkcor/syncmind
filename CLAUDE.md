@@ -236,24 +236,25 @@ These rules guide how Agent(Claude Code) should operate inside this repository.
 
 ### 1. Spec-First Planning (OpenSpec Standard)
 
-For any multi-step feature or refactor, create an OpenSpec-style change folder in `docs/spec/` **before writing implementation code**.
+For any multi-step feature or refactor, use the OpenSpec workflow **before writing implementation code**.
 
-**Structure per change:**
+**Location:** `openspec/changes/<change-name>/` (managed by the `openspec` CLI).
 
-```
-docs/spec/<change-name>/
-  proposal.md   # Why we're doing this, what's changing
-  specs/        # Requirements and scenarios
-  design.md     # Technical approach
-  tasks.md      # Implementation checklist
-```
+**Artifacts per change:**
+
+- `proposal.md` — Why we're doing this, what's changing
+- `design.md` — Technical approach
+- `tasks.md` — Implementation checklist
+- `.openspec.yaml` — Change metadata (managed by CLI)
 
 **Process:**
 
-1. Propose the change by creating the spec folder.
-2. Get user approval on the spec.
-3. Implement against `tasks.md`.
-4. After merge, archive the spec to `docs/spec/archive/YYYY-MM-DD-<change-name>/`.
+1. **Propose:** Run `/opsx:propose <change-name>` to scaffold the change and generate artifacts.
+2. **Get user approval** on the generated proposal and design.
+3. **Apply:** Run `/opsx:apply <change-name>` to implement against `tasks.md`.
+4. **Archive:** After merge, run `/opsx:archive <change-name>` to move the change to `openspec/changes/archive/YYYY-MM-DD-<change-name>/`.
+
+**Note:** The legacy `docs/spec/` directory contains pre-OpenSpec specs (e.g. `001-headless-mcp-core`). New work must use the OpenSpec workflow in `openspec/changes/`.
 
 ### 2. Read the PRD Before Coding
 

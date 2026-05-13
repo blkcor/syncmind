@@ -29,3 +29,7 @@ thiserror = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 sqlite-vec = "0.1.9"
 zerocopy = { version = "0.8", features = ["derive"] }
+async-trait = "0.1"
+tokenizers = "0.21"
+ndarray = "0.17"
+parking_lot = "0.12"

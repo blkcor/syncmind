@@ -1,34 +1,67 @@
 use crate::error::StorageError;
 use crate::models::{Chunk, FileMeta, SearchResult};
 use rusqlite::{params, Connection, OptionalExtension};
-use sqlite_vec::sqlite3_vec_init;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use zerocopy::IntoBytes;
 
+/// Raw SQLite extension entry point signature expected by `sqlite3_auto_extension`.
+type SqliteInitFn = unsafe extern "C" fn(
+    db: *mut rusqlite::ffi::sqlite3,
+    pz_err_msg: *mut *const std::os::raw::c_char,
+    p_api: *const rusqlite::ffi::sqlite3_api_routines,
+) -> std::os::raw::c_int;
+
+/// Register the sqlite-vec extension so it is automatically loaded into every
+/// new database connection. This is `unsafe` because SQLite invokes the
+/// function pointer from C code.
+fn register_vec_extension() -> Result<(), StorageError> {
+    // Reference the crate's symbol to ensure the #[link(name = "sqlite_vec0")]
+    // attribute is activated and the extension is linked into the binary.
+    let _ensure_linked = sqlite_vec::sqlite3_vec_init as *const ();
+
+    // Declare the init function with the exact C ABI SQLite expects.
+    // sqlite-vec is compiled with SQLITE_CORE and exports this standard
+    // extension entry point. The signatures match, so the pointer cast is safe.
+    extern "C" {
+        fn sqlite3_vec_init(
+            db: *mut rusqlite::ffi::sqlite3,
+            pz_err_msg: *mut *const std::os::raw::c_char,
+            p_api: *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> std::os::raw::c_int;
+    }
+
+    let result = unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(sqlite3_vec_init as SqliteInitFn))
+    };
+
+    if result != rusqlite::ffi::SQLITE_OK {
+        return Err(StorageError::ExtensionRegistrationFailed);
+    }
+    Ok(())
+}
+
 pub struct VectorStore {
-    conn: Connection,
+    conn: Mutex<Connection>,
     embedding_dim: usize,
 }
 
 impl VectorStore {
     pub fn new(db_path: &Path, embedding_dim: usize) -> Result<Self, StorageError> {
-        #[allow(clippy::missing_transmute_annotations)]
-        unsafe {
-            let result = rusqlite::ffi::sqlite3_auto_extension(Some(
-                std::mem::transmute(sqlite3_vec_init as *const ()),
-            ));
-            if result != rusqlite::ffi::SQLITE_OK {
-                return Err(StorageError::ExtensionRegistrationFailed);
-            }
-        }
+        register_vec_extension()?;
         let conn = Connection::open(db_path)?;
-        let store = Self { conn, embedding_dim };
+        conn.execute("PRAGMA foreign_keys = ON", [])?;
+        let store = Self {
+            conn: Mutex::new(conn),
+            embedding_dim,
+        };
         store.init_schema()?;
         Ok(store)
     }
 
     fn init_schema(&self) -> Result<(), StorageError> {
-        self.conn.execute_batch(
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY,
                 absolute_path TEXT UNIQUE NOT NULL,
@@ -53,13 +86,13 @@ impl VectorStore {
             );",
             self.embedding_dim
         );
-        self.conn.execute(&vec_table_sql, [])?;
+        conn.execute(&vec_table_sql, [])?;
 
         Ok(())
     }
 
     pub fn upsert_file(
-        &mut self,
+        &self,
         meta: &FileMeta,
         chunks: &[Chunk],
         embeddings: &[Vec<f32>],
@@ -71,7 +104,8 @@ impl VectorStore {
             });
         }
 
-        let tx = self.conn.transaction()?;
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
 
         let file_id: Option<i64> = tx
             .query_row(
@@ -82,7 +116,13 @@ impl VectorStore {
             .optional()?;
 
         if let Some(id) = file_id {
-            tx.execute("DELETE FROM vec_chunks WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id = ?)", [id])?;
+            let chunk_ids: Vec<i64> = tx
+                .prepare("SELECT id FROM chunks WHERE file_id = ?")?
+                .query_map([id], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for chunk_id in chunk_ids {
+                tx.execute("DELETE FROM vec_chunks WHERE chunk_id = ?", [chunk_id])?;
+            }
             tx.execute("DELETE FROM chunks WHERE file_id = ?", [id])?;
             tx.execute("DELETE FROM files WHERE id = ?", [id])?;
         }
@@ -112,9 +152,9 @@ impl VectorStore {
                  VALUES (?, ?, ?, ?, ?)",
                 params![
                     file_id,
-                    chunk.chunk_index,
-                    chunk.start_line,
-                    chunk.end_line,
+                    chunk.chunk_index as i64,
+                    chunk.start_line as i64,
+                    chunk.end_line as i64,
                     &chunk.content,
                 ],
             )?;
@@ -142,7 +182,8 @@ impl VectorStore {
             });
         }
 
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
             "SELECT
                 c.id,
                 c.start_line,
@@ -177,11 +218,10 @@ impl VectorStore {
     }
 
     pub fn get_stats(&self) -> Result<(usize, usize), StorageError> {
-        let file_count: usize = self
-            .conn
+        let conn = self.conn.lock().unwrap();
+        let file_count: usize = conn
             .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
-        let chunk_count: usize = self
-            .conn
+        let chunk_count: usize = conn
             .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
         Ok((file_count, chunk_count))
     }
@@ -200,7 +240,7 @@ mod tests {
     #[test]
     fn store_init_and_upsert() {
         let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
-        let mut store = VectorStore::new(&db_path, 4).unwrap();
+        let store = VectorStore::new(&db_path, 4).unwrap();
 
         let meta = FileMeta {
             absolute_path: PathBuf::from("/tmp/test.md"),
@@ -228,7 +268,7 @@ mod tests {
     #[test]
     fn store_search_returns_results() {
         let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
-        let mut store = VectorStore::new(&db_path, 4).unwrap();
+        let store = VectorStore::new(&db_path, 4).unwrap();
 
         let meta = FileMeta {
             absolute_path: PathBuf::from("/tmp/test.md"),
@@ -267,7 +307,7 @@ mod tests {
     #[test]
     fn store_upsert_replaces_existing_file() {
         let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
-        let mut store = VectorStore::new(&db_path, 4).unwrap();
+        let store = VectorStore::new(&db_path, 4).unwrap();
 
         let meta = FileMeta {
             absolute_path: PathBuf::from("/tmp/test.md"),

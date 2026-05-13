@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::Path;
 
-use pulldown_cmark::{Event, Parser};
 use tracing::warn;
 
 use crate::error::ExtractError;
@@ -18,6 +17,29 @@ impl Clone for Box<dyn Extractor> {
     }
 }
 
+/// Validate that `path` is an absolute regular file.
+/// Resolves symlinks to prevent escaping via symlinks.
+fn validate_path(path: &Path) -> Result<std::path::PathBuf, ExtractError> {
+    if !path.is_absolute() {
+        return Err(ExtractError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Path must be absolute: {}", path.display()),
+        )));
+    }
+
+    let canonical = fs::canonicalize(path).map_err(ExtractError::Io)?;
+
+    let metadata = fs::metadata(&canonical).map_err(ExtractError::Io)?;
+    if !metadata.is_file() {
+        return Err(ExtractError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Not a regular file: {}", path.display()),
+        )));
+    }
+
+    Ok(canonical)
+}
+
 #[derive(Debug, Clone)]
 pub struct MarkdownExtractor;
 
@@ -27,17 +49,10 @@ impl Extractor for MarkdownExtractor {
     }
 
     fn extract(&self, path: &Path) -> Result<String, ExtractError> {
+        let path = validate_path(path)?;
         let content = fs::read_to_string(path)?;
         let text = strip_frontmatter(&content);
-        let parser = Parser::new(text);
-        let mut extracted = String::new();
-        for event in parser {
-            if let Event::Text(t) = event {
-                extracted.push_str(&t);
-                extracted.push('\n');
-            }
-        }
-        Ok(extracted.trim().to_string())
+        Ok(text.to_string())
     }
 
     fn can_handle(&self, path: &Path) -> bool {
@@ -52,6 +67,12 @@ fn strip_frontmatter(content: &str) -> &str {
     if let Some(after_open) = content.strip_prefix("---\n") {
         if let Some(end) = after_open.find("\n---\n") {
             let after = end + "\n---\n".len();
+            return after_open[after..].trim_start();
+        }
+    }
+    if let Some(after_open) = content.strip_prefix("---\r\n") {
+        if let Some(end) = after_open.find("\r\n---\r\n") {
+            let after = end + "\r\n---\r\n".len();
             return after_open[after..].trim_start();
         }
     }
@@ -72,6 +93,7 @@ impl Extractor for CodeExtractor {
     }
 
     fn extract(&self, path: &Path) -> Result<String, ExtractError> {
+        let path = validate_path(path)?;
         fs::read_to_string(path).map_err(Into::into)
     }
 
@@ -92,6 +114,7 @@ impl Extractor for PdfExtractor {
     }
 
     fn extract(&self, path: &Path) -> Result<String, ExtractError> {
+        let path = validate_path(path)?;
         let bytes = fs::read(path)?;
         pdf_extract::extract_text_from_mem(&bytes)
             .map_err(|e| ExtractError::Pdf(format!("{e:?}")))
@@ -148,27 +171,24 @@ impl Extractor for CompositeExtractor {
     }
 
     fn extract(&self, path: &Path) -> Result<String, ExtractError> {
-        let mut remaining = 0usize;
-        for extractor in &self.extractors {
-            if extractor.can_handle(path) {
-                remaining += 1;
-            }
-        }
+        let candidates: Vec<&dyn Extractor> = self
+            .extractors
+            .iter()
+            .filter(|e| e.can_handle(path))
+            .map(|e| e.as_ref())
+            .collect();
 
-        for extractor in &self.extractors {
-            if extractor.can_handle(path) {
-                remaining -= 1;
-                match extractor.extract(path) {
-                    Ok(text) => return Ok(text),
-                    Err(e) => {
-                        if remaining > 0 {
-                            warn!(
-                                "Extractor failed for {}: {}, continuing search",
-                                path.display(),
-                                e
-                            );
-                        }
-                        continue;
+        let total = candidates.len();
+        for (idx, extractor) in candidates.into_iter().enumerate() {
+            match extractor.extract(path) {
+                Ok(text) => return Ok(text),
+                Err(e) => {
+                    if idx + 1 < total {
+                        warn!(
+                            "Extractor failed for {}: {}, continuing search",
+                            path.display(),
+                            e
+                        );
                     }
                 }
             }
@@ -205,9 +225,9 @@ mod tests {
         let extractor = MarkdownExtractor;
         let text = extractor.extract(&path).unwrap();
         assert!(!text.contains("title: Hello"));
-        assert!(text.contains("Heading"));
+        assert!(text.contains("# Heading"));
         assert!(text.contains("Some paragraph text"));
-        assert!(text.contains("item one"));
+        assert!(text.contains("- item one"));
     }
 
     #[test]
@@ -314,5 +334,17 @@ mod tests {
         let extractor = MarkdownExtractor;
         let text = extractor.extract(&path).unwrap();
         assert!(text.contains("Some text after a horizontal rule"));
+    }
+
+    #[test]
+    fn test_frontmatter_windows_line_endings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("win.md");
+        fs::write(&path, "---\r\ntitle: Hello\r\n---\r\n# Heading\r\n").unwrap();
+
+        let extractor = MarkdownExtractor;
+        let text = extractor.extract(&path).unwrap();
+        assert!(!text.contains("title: Hello"));
+        assert!(text.contains("# Heading"));
     }
 }
