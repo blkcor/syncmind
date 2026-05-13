@@ -31,18 +31,18 @@
 
 ## 3. File Watch & CLI
 
-- [ ] 3.1 Implement `notify`-based file watcher with debouncing
-- [ ] 3.2 Implement `register` / `unregister` CLI commands
-- [ ] 3.3 Implement config hot-reload on register/unregister
-- [ ] 3.4 Implement `status` CLI command
-- [ ] 3.5 Implement `search` CLI command
-- [ ] 3.6 File watcher integration tests
+- [x] 3.1 Implement `notify`-based file watcher with debouncing
+- [x] 3.2 Implement `register` / `unregister` CLI commands
+- [x] 3.3 Implement config hot-reload on register/unregister
+- [x] 3.4 Implement `status` CLI command
+- [x] 3.5 Implement `search` CLI command
+- [x] 3.6 File watcher integration tests
 
 ## 4. MCP Server & E2E
 
-- [ ] 4.1 Implement MCP Stdio transport
-- [ ] 4.2 Implement MCP SSE transport
-- [ ] 4.3 Implement `search_knowledge` tool handler
-- [ ] 4.4 MCP integration tests
-- [ ] 4.5 Claude Code E2E test script
-- [ ] 4.6 Final workspace verification
+- [x] 4.1 Implement MCP Stdio transport
+- [x] 4.2 Implement MCP SSE transport
+- [x] 4.3 Implement `search_knowledge` tool handler
+- [x] 4.4 MCP integration tests
+- [x] 4.5 Claude Code E2E test script
+- [x] 4.6 Final workspace verification

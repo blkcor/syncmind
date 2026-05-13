@@ -18,3 +18,10 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 syncmind-core = { path = "../syncmind-core" }
 syncmind-storage = { path = "../storage" }
+syncmind-rag-engine = { path = "../rag-engine" }
+syncmind-file-watcher = { path = "../file-watcher" }
+syncmind-mcp-server = { path = "../mcp-server", features = ["sse"] }
+notify = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 pub use syncmind_core::Chunk;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct FileMeta {
     pub absolute_path: PathBuf,
     pub file_type: String,
@@ -10,7 +10,7 @@ pub struct FileMeta {
     pub last_indexed: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchResult {
     pub chunk_id: i64,
     pub file_path: PathBuf,
