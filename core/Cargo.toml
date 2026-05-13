@@ -17,7 +17,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/blkcor-bt/syncmind"
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "io-util", "io-std", "fs"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -33,3 +33,6 @@ async-trait = "0.1"
 tokenizers = "0.21"
 ndarray = "0.17"
 parking_lot = "0.12"
+notify = "7"
+serde_json = "1"
+axum = "0.7"
