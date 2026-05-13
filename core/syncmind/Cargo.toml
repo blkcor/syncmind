@@ -1,21 +1,20 @@
 [package]
-name = "syncmind-storage"
+name = "syncmind"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "syncmind"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-serde = { workspace = true }
-thiserror = { workspace = true }
-rusqlite = { workspace = true }
-sqlite-vec = { workspace = true }
-zerocopy = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
 syncmind-core = { path = "../syncmind-core" }
-
-[dev-dependencies]
-tempfile = "3"
+syncmind-storage = { path = "../storage" }
