@@ -1,0 +1,28 @@
+[package]
+name = "syncmind-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "syncmind_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+anyhow = "1"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syncmind-core = { path = "../../../core/syncmind-core" }
+syncmind-storage = { path = "../../../core/storage" }
+syncmind-rag-engine = { path = "../../../core/rag-engine" }
+syncmind-indexing = { path = "../../../core/syncmind-indexing" }
+syncmind-file-watcher = { path = "../../../core/file-watcher" }
