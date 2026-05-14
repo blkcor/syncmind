@@ -1,0 +1,10 @@
+database_url: "postgres://postgres:postgres@localhost:5432/syncmind?sslmode=disable"
+redis_addr: "localhost:6379"
+bind_addr: ":8080"
+tls_cert: ""
+tls_key: ""
+pairing_session_ttl: 300
+bundle_retention_days: 30
+max_bundle_size_mb: 100
+jwt_issuer: "syncmind-spine"
+jwt_audience: "syncmind-device"
