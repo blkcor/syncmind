@@ -1,6 +1,11 @@
 import { createStore } from 'solid-js/store';
 import type { SearchResult, Config, IndexingStatus } from '@syncmind/types';
 
+export interface RagLabState {
+  topK: number;
+  fileTypeFilters: string[];
+}
+
 export interface AppState {
   query: string;
   results: SearchResult[];
@@ -8,11 +13,11 @@ export interface AppState {
   loading: boolean;
   config: Config;
   indexingStatus: IndexingStatus;
-  ragLab: {
-    topK: number;
-    fileTypeFilters: string[];
-  };
+  ragLab: RagLabState;
   activeTab: 'search' | 'rag-lab' | 'settings';
+  copiedToast: boolean;
+  lastSearchLatencyMs: number | null;
+  lastRawResponse: unknown | null;
 }
 
 const defaultConfig: Config = {
@@ -45,4 +50,7 @@ export const [store, setStore] = createStore<AppState>({
     fileTypeFilters: [],
   },
   activeTab: 'search',
+  copiedToast: false,
+  lastSearchLatencyMs: null,
+  lastRawResponse: null,
 });
