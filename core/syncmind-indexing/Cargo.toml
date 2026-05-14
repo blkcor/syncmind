@@ -1,0 +1,13 @@
+[package]
+name = "syncmind-indexing"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+syncmind-core = { path = "../syncmind-core" }
+syncmind-rag-engine = { path = "../rag-engine" }
+syncmind-storage = { path = "../storage" }
+syncmind-file-watcher = { path = "../file-watcher" }

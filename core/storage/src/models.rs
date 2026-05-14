@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 pub use syncmind_core::Chunk;
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileMeta {
     pub absolute_path: PathBuf,
     pub file_type: String,

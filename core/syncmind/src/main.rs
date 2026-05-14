@@ -1,10 +1,9 @@
 use clap::{Parser, Subcommand};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
-use syncmind_rag_engine::extractor::Extractor;
 use notify::Watcher as _;
 
 #[derive(Parser)]
@@ -43,70 +42,6 @@ fn validate_and_canonicalize(path: &PathBuf) -> anyhow::Result<PathBuf> {
     Ok(canonical)
 }
 
-/// Index a single file through the full RAG pipeline.
-async fn index_file(
-    path: &Path,
-    extractor: &syncmind_rag_engine::extractor::CompositeExtractor,
-    chunker: &dyn syncmind_rag_engine::chunker::Chunker,
-    embedder: &dyn syncmind_rag_engine::embedder::Embedder,
-    store: &syncmind_storage::VectorStore,
-) -> anyhow::Result<()> {
-    let text = extractor.extract(path)?;
-    let chunks = chunker.chunk(&text, path);
-
-    if chunks.is_empty() {
-        return Ok(());
-    }
-
-    let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
-    let embeddings = embedder.embed(&texts).await?;
-
-    let metadata = std::fs::metadata(path)?;
-    let last_modified = metadata
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
-    let last_indexed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
-
-    let meta = syncmind_storage::FileMeta {
-        absolute_path: path.to_path_buf(),
-        file_type: path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("unknown")
-            .to_string(),
-        last_modified,
-        last_indexed,
-    };
-
-    store.upsert_file(&meta, &chunks, &embeddings)?;
-    Ok(())
-}
-
-/// Select the appropriate chunker for a file based on its extension.
-fn chunker_for_path(
-    path: &std::path::Path,
-    chunk_size: usize,
-    chunk_overlap: usize,
-) -> Box<dyn syncmind_rag_engine::chunker::Chunker> {
-    use syncmind_rag_engine::chunker::*;
-
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if ext.eq_ignore_ascii_case("md") {
-            return Box::new(MarkdownChunker::new(chunk_size, chunk_overlap));
-        }
-        if ["rs", "py", "ts", "js", "go", "java", "c", "cpp", "h", "hpp"]
-            .iter()
-            .any(|&e| e.eq_ignore_ascii_case(ext))
-        {
-            return Box::new(CodeChunker::new(chunk_size, chunk_overlap));
-        }
-    }
-    Box::new(FallbackChunker::new(chunk_size, chunk_overlap))
-}
-
 async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
     if foreground {
         tracing_subscriber::fmt::init();
@@ -124,7 +59,6 @@ async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
         config.embedding_dim,
     )?);
     let embedder = Arc::new(syncmind_rag_engine::embedder::AutoEmbedder::new(&config).await?);
-    let extractor = syncmind_rag_engine::extractor::CompositeExtractor::new();
 
     // Start MCP server.
     let mcp_server = Arc::new(syncmind_mcp_server::McpServer::new(
@@ -149,9 +83,10 @@ async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
     });
 
     // Index all registered files on startup.
+    let startup_extractor = syncmind_rag_engine::extractor::CompositeExtractor::new();
     for path in &config.registered_files {
-        let chunker = chunker_for_path(path, config.chunk_size, config.chunk_overlap);
-        if let Err(e) = index_file(path, &extractor, chunker.as_ref(), embedder.as_ref(), &store).await {
+        let chunker = syncmind_indexing::chunker_for_path(path, config.chunk_size, config.chunk_overlap);
+        if let Err(e) = syncmind_indexing::index_file(path, &startup_extractor, chunker.as_ref(), embedder.as_ref(), &store).await {
             warn!(path = %path.display(), error = %e, "failed to index file on startup");
         } else {
             info!(path = %path.display(), "indexed file");
@@ -159,7 +94,7 @@ async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
     }
 
     // Start file watcher for registered files.
-    let (file_tx, mut file_rx) = tokio::sync::mpsc::channel::<Vec<PathBuf>>(16);
+    let (file_tx, file_rx) = tokio::sync::mpsc::channel::<Vec<PathBuf>>(16);
     let mut file_watcher = syncmind_file_watcher::FileWatcher::new(
         config.registered_files.clone(),
         Duration::from_secs(1),
@@ -183,18 +118,19 @@ async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
 
     info!("Daemon initialized successfully");
 
+    let indexing_handle = {
+        let config = config.clone();
+        let store = store.clone();
+        let embedder = embedder.clone();
+        tokio::spawn(async move {
+            if let Err(e) = syncmind_indexing::run_indexing_pipeline(config, store, embedder, file_rx).await {
+                warn!(error = %e, "indexing pipeline exited");
+            }
+        })
+    };
+
     loop {
         tokio::select! {
-            Some(batch) = file_rx.recv() => {
-                for path in batch {
-                    let chunker = chunker_for_path(&path, config.chunk_size, config.chunk_overlap);
-                    if let Err(e) = index_file(&path, &extractor, chunker.as_ref(), embedder.as_ref(), &store).await {
-                        warn!(path = %path.display(), error = %e, "failed to re-index file");
-                    } else {
-                        info!(path = %path.display(), "re-indexed file");
-                    }
-                }
-            }
             Some(_event) = config_rx.recv() => {
                 // Debounce config reloads: wait a bit for the file to finish writing.
                 tokio::time::sleep(Duration::from_millis(500)).await;
@@ -221,6 +157,9 @@ async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
             }
         }
     }
+
+    drop(file_watcher);
+    let _ = indexing_handle.await;
 
     Ok(())
 }

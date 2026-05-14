@@ -2288,6 +2288,7 @@ dependencies = [
  "notify",
  "syncmind-core",
  "syncmind-file-watcher",
+ "syncmind-indexing",
  "syncmind-mcp-server",
  "syncmind-rag-engine",
  "syncmind-storage",
@@ -2318,6 +2319,19 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "syncmind-indexing"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "syncmind-core",
+ "syncmind-file-watcher",
+ "syncmind-rag-engine",
+ "syncmind-storage",
  "tokio",
  "tracing",
 ]
