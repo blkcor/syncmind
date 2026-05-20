@@ -20,6 +20,7 @@ syncmind-core = { path = "../syncmind-core" }
 syncmind-storage = { path = "../storage" }
 syncmind-rag-engine = { path = "../rag-engine" }
 syncmind-file-watcher = { path = "../file-watcher" }
+syncmind-indexing = { path = "../syncmind-indexing" }
 syncmind-mcp-server = { path = "../mcp-server", features = ["sse"] }
 notify = { workspace = true }
 

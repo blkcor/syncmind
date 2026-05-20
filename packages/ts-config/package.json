@@ -1,0 +1,9 @@
+{
+  "name": "@syncmind/tsconfig",
+  "version": "0.0.0",
+  "private": true,
+  "main": "tsconfig.base.json",
+  "files": [
+    "tsconfig.base.json"
+  ]
+}

@@ -6,6 +6,7 @@ members = [
     "storage",
     "syncmind",
     "syncmind-core",
+    "syncmind-indexing",
 ]
 resolver = "2"
 

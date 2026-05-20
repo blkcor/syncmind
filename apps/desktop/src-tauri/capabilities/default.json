@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/capability-schema.json",
+  "identifier": "default",
+  "description": "Default capability for the SyncMind desktop app",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "global-shortcut:allow-is-registered",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled",
+    "shell:allow-open",
+    "dialog:allow-open",
+    "core:window:allow-start-dragging",
+    "core:window:allow-hide"
+  ]
+}

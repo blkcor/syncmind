@@ -156,7 +156,6 @@ mod tests {
 
         // Modify both files in quick succession.
         let mut f = std::fs::OpenOptions::new()
-            .write(true)
             .append(true)
             .open(&file_a)
             .unwrap();
@@ -164,7 +163,6 @@ mod tests {
         drop(f);
 
         let mut f = std::fs::OpenOptions::new()
-            .write(true)
             .append(true)
             .open(&file_b)
             .unwrap();
@@ -203,7 +201,7 @@ mod tests {
         sleep(Duration::from_millis(300)).await;
 
         // Switch to watching file_b only.
-        watcher.update_paths(&[file_b.clone()]).unwrap();
+        watcher.update_paths(std::slice::from_ref(&file_b)).unwrap();
 
         sleep(Duration::from_millis(300)).await;
 
