@@ -20,31 +20,30 @@ fn cli_register_unregister_status() {
 
     let bin = syncmind_bin();
 
-    // Set XDG directories so we don't pollute the user's real config.
-    let env_xdg_config = config_dir.path().to_str().unwrap();
-    let env_xdg_data = data_dir.path().to_str().unwrap();
+    // SYNCMIND_* env overrides isolate the test from the user's real
+    // config/data, even on macOS where dirs::config_dir() ignores XDG_*.
+    let env_config = config_dir.path().to_str().unwrap();
+    let env_data = data_dir.path().to_str().unwrap();
 
-    // Register the file.
-    let output = Command::new(&bin)
-        .arg("register")
-        .arg(&file)
-        .env("XDG_CONFIG_HOME", env_xdg_config)
-        .env("XDG_DATA_HOME", env_xdg_data)
-        .output()
-        .expect("failed to run syncmind register");
+    let run = |args: &[&str]| {
+        Command::new(&bin)
+            .args(args)
+            .env("SYNCMIND_CONFIG_DIR", env_config)
+            .env("SYNCMIND_DATA_DIR", env_data)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run syncmind {:?}: {}", args, e))
+    };
+
+    let output = run(&["register", file.to_str().unwrap()]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("Registered") || stdout.contains("Already registered"),
         "unexpected register output: {}", stdout
     );
 
-    // Status should show 1 registered file.
-    let output = Command::new(&bin)
-        .arg("status")
-        .env("XDG_CONFIG_HOME", env_xdg_config)
-        .env("XDG_DATA_HOME", env_xdg_data)
-        .output()
-        .expect("failed to run syncmind status");
+    let output = run(&["status"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("Registered files: 1"),
@@ -52,14 +51,7 @@ fn cli_register_unregister_status() {
         stdout
     );
 
-    // Unregister the file.
-    let output = Command::new(&bin)
-        .arg("unregister")
-        .arg(&file)
-        .env("XDG_CONFIG_HOME", env_xdg_config)
-        .env("XDG_DATA_HOME", env_xdg_data)
-        .output()
-        .expect("failed to run syncmind unregister");
+    let output = run(&["unregister", file.to_str().unwrap()]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("Unregistered") || stdout.contains("Not registered"),
@@ -67,13 +59,7 @@ fn cli_register_unregister_status() {
         stdout
     );
 
-    // Status should show 0 registered files.
-    let output = Command::new(&bin)
-        .arg("status")
-        .env("XDG_CONFIG_HOME", env_xdg_config)
-        .env("XDG_DATA_HOME", env_xdg_data)
-        .output()
-        .expect("failed to run syncmind status");
+    let output = run(&["status"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("Registered files: 0"),

@@ -131,6 +131,176 @@ impl Embedder for OllamaEmbedder {
 const ONNX_MAX_SEQ_LEN: usize = 512;
 const ONNX_MAX_BATCH_SIZE: usize = 32;
 
+pub const DEFAULT_ONNX_MODEL_URL: &str =
+    "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/onnx/model.onnx";
+pub const DEFAULT_ONNX_TOKENIZER_URL: &str =
+    "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json";
+
+const ONNX_MODEL_FILENAME: &str = "bge-small-en-v1.5.onnx";
+const ONNX_TOKENIZER_FILENAME: &str = "tokenizer.json";
+
+/// Download `url` into `dest` atomically.
+///
+/// Writes to `<dest>.part`, fsyncs, and renames to the final path. A
+/// `<dest>.lock` file is held exclusively for the duration of the download
+/// so that two concurrent daemons do not race.
+async fn download_file(url: &str, dest: &std::path::Path) -> Result<(), EmbedError> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let parent = dest.parent().ok_or_else(|| {
+        EmbedError::Onnx(format!("Destination has no parent directory: {}", dest.display()))
+    })?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|e| EmbedError::Onnx(format!("Failed to create {}: {}", parent.display(), e)))?;
+
+    let lock_path = dest.with_extension("lock");
+    let part_path = dest.with_extension("part");
+
+    // Acquire (or wait for) the exclusive lock.
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| EmbedError::Onnx(format!("Failed to open lock file: {}", e)))?;
+    {
+        use fs2::FileExt as _;
+        // Poll for the lock to be available; bail after a generous timeout
+        // so a stuck process cannot wedge the daemon forever.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        loop {
+            match lock_file.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(_) => {
+                    if dest.exists()
+                        && tokio::fs::metadata(dest)
+                            .await
+                            .map(|m| m.len() > 0)
+                            .unwrap_or(false)
+                    {
+                        // Another process finished the download while we waited.
+                        return Ok(());
+                    }
+                    if std::time::Instant::now() > deadline {
+                        return Err(EmbedError::Onnx(
+                            "Timed out waiting for concurrent ONNX download".to_string(),
+                        ));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
+
+    // Double-check now that we hold the lock — another process may have
+    // finished the download while we were polling above.
+    if dest.exists() {
+        if let Ok(meta) = tokio::fs::metadata(dest).await {
+            if meta.len() > 0 {
+                let _ = std::fs::remove_file(&lock_path);
+                return Ok(());
+            }
+        }
+    }
+
+    tracing::info!(url = %url, dest = %dest.display(), "downloading ONNX asset");
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| EmbedError::Onnx(format!("Failed to build HTTP client: {}", e)))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| EmbedError::Onnx(format!("Failed to GET {}: {}", url, e)))?;
+    if !response.status().is_success() {
+        let _ = std::fs::remove_file(&lock_path);
+        return Err(EmbedError::Onnx(format!(
+            "Download failed: GET {} returned HTTP {}",
+            url,
+            response.status()
+        )));
+    }
+
+    let mut file = tokio::fs::File::create(&part_path)
+        .await
+        .map_err(|e| EmbedError::Onnx(format!("Failed to create {}: {}", part_path.display(), e)))?;
+
+    use futures_util::StreamExt as _;
+    let mut stream = response.bytes_stream();
+    let mut total: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk
+            .map_err(|e| EmbedError::Onnx(format!("Network error during download: {}", e)))?;
+        file.write_all(&bytes)
+            .await
+            .map_err(|e| EmbedError::Onnx(format!("Write error: {}", e)))?;
+        total += bytes.len() as u64;
+    }
+    file.flush()
+        .await
+        .map_err(|e| EmbedError::Onnx(format!("Flush error: {}", e)))?;
+    drop(file);
+
+    tokio::fs::rename(&part_path, dest)
+        .await
+        .map_err(|e| EmbedError::Onnx(format!(
+            "Failed to rename {} -> {}: {}",
+            part_path.display(),
+            dest.display(),
+            e
+        )))?;
+
+    tracing::info!(
+        bytes = total,
+        dest = %dest.display(),
+        "ONNX asset downloaded"
+    );
+
+    // Best-effort cleanup; ignore errors.
+    let _ = std::fs::remove_file(&lock_path);
+
+    Ok(())
+}
+
+/// Ensure the ONNX model and tokenizer are present at `model_dir`, downloading
+/// them if necessary. Returns `(model_path, tokenizer_path)`.
+pub async fn ensure_onnx_assets(
+    model_dir: &std::path::Path,
+    model_url: &str,
+    tokenizer_url: &str,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), EmbedError> {
+    tokio::fs::create_dir_all(model_dir).await.map_err(|e| {
+        EmbedError::Onnx(format!(
+            "Failed to create model dir {}: {}",
+            model_dir.display(),
+            e
+        ))
+    })?;
+
+    let model_path = model_dir.join(ONNX_MODEL_FILENAME);
+    let tokenizer_path = model_dir.join(ONNX_TOKENIZER_FILENAME);
+
+    let needs_model = !file_present(&model_path).await;
+    let needs_tokenizer = !file_present(&tokenizer_path).await;
+
+    if needs_model {
+        download_file(model_url, &model_path).await?;
+    }
+    if needs_tokenizer {
+        download_file(tokenizer_url, &tokenizer_path).await?;
+    }
+
+    Ok((model_path, tokenizer_path))
+}
+
+async fn file_present(path: &std::path::Path) -> bool {
+    matches!(tokio::fs::metadata(path).await, Ok(m) if m.len() > 0)
+}
+
 pub struct OnnxEmbedder {
     session: std::sync::Arc<parking_lot::Mutex<ort::session::Session>>,
     tokenizer: tokenizers::Tokenizer,
@@ -162,10 +332,19 @@ impl OnnxEmbedder {
         })
     }
 
-    pub fn from_config(config: &Config) -> Result<Self, EmbedError> {
+    pub async fn from_config(config: &Config) -> Result<Self, EmbedError> {
         let model_dir = syncmind_core::paths::model_cache_dir()
             .map_err(|e| EmbedError::Onnx(format!("Failed to resolve model cache dir: {}", e)))?;
-        let model_path = model_dir.join("bge-small-en-v1.5.onnx");
+        let model_url = config
+            .onnx_model_url
+            .as_deref()
+            .unwrap_or(DEFAULT_ONNX_MODEL_URL);
+        let tokenizer_url = config
+            .onnx_tokenizer_url
+            .as_deref()
+            .unwrap_or(DEFAULT_ONNX_TOKENIZER_URL);
+        let (model_path, _tokenizer_path) =
+            ensure_onnx_assets(&model_dir, model_url, tokenizer_url).await?;
         Self::new(model_path, config.embedding_dim)
     }
 }
@@ -366,7 +545,7 @@ impl AutoEmbedder {
         }
 
         tracing::info!("Ollama unavailable, falling back to ONNX embedder");
-        let embedder = OnnxEmbedder::from_config(config)?;
+        let embedder = OnnxEmbedder::from_config(config).await?;
         Ok(Self {
             inner: Box::new(embedder),
         })
@@ -479,20 +658,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_auto_embedder_falls_back_to_onnx() {
-        // Use a non-routable URL so Ollama probe fails.
+        // Use a non-routable URL so Ollama probe fails. Point ONNX download
+        // URLs at a closed local port so the fallback also fails fast — we
+        // are only verifying that AutoEmbedder routes to the ONNX branch.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_addr = listener.local_addr().unwrap();
+        drop(listener);
+
         let config = Config {
             ollama_url: "http://192.0.2.0:11434".to_string(), // TEST-NET-1, guaranteed unreachable
             ollama_model: "bge-m3".to_string(),
             embedding_dim: 384,
+            onnx_model_url: Some(format!("http://{}/model.onnx", closed_addr)),
+            onnx_tokenizer_url: Some(format!("http://{}/tokenizer.json", closed_addr)),
             ..Config::default()
         };
 
         let result = AutoEmbedder::new(&config).await;
-        // ONNX fallback will fail because the model file does not exist,
-        // but we can verify the error is from ONNX (not Ollama) by checking the variant.
         match result {
             Err(EmbedError::Onnx(_)) => {
-                // Expected: ONNX was attempted and failed (model missing).
+                // Expected: ONNX was attempted and failed (connection refused on closed port).
             }
             Err(EmbedError::OllamaUnavailable(_)) => {
                 // Also acceptable if the probe itself is the reported error.
@@ -501,8 +686,92 @@ mod tests {
                 panic!("Unexpected error variant: {:?}", other);
             }
             Ok(_) => {
-                // If somehow both succeeded (should not happen), that's fine too.
+                panic!("Both probes should have failed in this test");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_onnx_assets_downloads_missing_files() {
+        let model_body = b"FAKE_ONNX_BYTES";
+        let tokenizer_body = b"{\"fake\":\"tokenizer\"}";
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let app = axum::Router::new()
+            .route(
+                "/model.onnx",
+                axum::routing::get(move || async move { model_body.to_vec() }),
+            )
+            .route(
+                "/tokenizer.json",
+                axum::routing::get(move || async move { tokenizer_body.to_vec() }),
+            );
+
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let model_url = format!("http://{}/model.onnx", addr);
+        let tokenizer_url = format!("http://{}/tokenizer.json", addr);
+
+        let (model_path, tokenizer_path) =
+            ensure_onnx_assets(dir.path(), &model_url, &tokenizer_url)
+                .await
+                .unwrap();
+
+        let on_disk_model = std::fs::read(&model_path).unwrap();
+        let on_disk_tokenizer = std::fs::read(&tokenizer_path).unwrap();
+        assert_eq!(on_disk_model, model_body);
+        assert_eq!(on_disk_tokenizer, tokenizer_body);
+
+        // Second call must NOT re-download: shut the server down first.
+        server.abort();
+        let (_, _) = ensure_onnx_assets(dir.path(), &model_url, &tokenizer_url)
+            .await
+            .expect("second call should be a no-op since files exist");
+    }
+
+    #[tokio::test]
+    async fn ensure_onnx_assets_propagates_http_404() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let app = axum::Router::new()
+            .route(
+                "/missing.onnx",
+                axum::routing::get(|| async { (axum::http::StatusCode::NOT_FOUND, "nope") }),
+            )
+            .route(
+                "/missing-tokenizer.json",
+                axum::routing::get(|| async { (axum::http::StatusCode::NOT_FOUND, "nope") }),
+            );
+
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let result = ensure_onnx_assets(
+            dir.path(),
+            &format!("http://{}/missing.onnx", addr),
+            &format!("http://{}/missing-tokenizer.json", addr),
+        )
+        .await;
+
+        server.abort();
+
+        match result {
+            Err(EmbedError::Onnx(msg)) => {
+                assert!(
+                    msg.contains("404") || msg.to_lowercase().contains("not found"),
+                    "expected 404 mention, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected EmbedError::Onnx, got {:?}", other),
         }
     }
 
@@ -524,7 +793,7 @@ mod tests {
             embedding_dim: 384,
             ..Config::default()
         };
-        let embedder = OnnxEmbedder::from_config(&config).unwrap();
+        let embedder = OnnxEmbedder::from_config(&config).await.unwrap();
         let result = embedder.embed(&["hello world"]).await;
         assert!(result.is_ok());
         let embeddings = result.unwrap();

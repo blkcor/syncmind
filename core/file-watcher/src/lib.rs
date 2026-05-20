@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::{ModifyKind, RenameMode};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -15,7 +16,26 @@ pub enum WatcherError {
     Io(#[from] std::io::Error),
 }
 
-/// A debounced file watcher that emits batches of changed paths.
+/// Classified file change event emitted by the watcher.
+///
+/// `Upsert` means the file should be re-indexed (created or modified).
+/// `Remove` means the file's chunks should be deleted from the index
+/// (deletion or the source side of a rename).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FileEvent {
+    Upsert(PathBuf),
+    Remove(PathBuf),
+}
+
+impl FileEvent {
+    pub fn path(&self) -> &PathBuf {
+        match self {
+            FileEvent::Upsert(p) | FileEvent::Remove(p) => p,
+        }
+    }
+}
+
+/// A debounced file watcher that emits batches of classified file events.
 pub struct FileWatcher {
     watcher: RecommendedWatcher,
     watched_paths: HashSet<PathBuf>,
@@ -25,12 +45,14 @@ pub struct FileWatcher {
 impl FileWatcher {
     /// Create a new file watcher.
     ///
-    /// Watches the given `paths` and emits batches of changed file paths
-    /// on `output` after `debounce_duration` of inactivity.
+    /// Watches the given `paths` and emits batches of `FileEvent` values
+    /// on `output` after `debounce_duration` of inactivity. Within a batch
+    /// each path appears at most once, holding the latest classification
+    /// observed during the debounce window.
     pub fn new(
         paths: Vec<PathBuf>,
         debounce_duration: Duration,
-        output: mpsc::Sender<Vec<PathBuf>>,
+        output: mpsc::Sender<Vec<FileEvent>>,
     ) -> Result<Self, WatcherError> {
         let (event_tx, mut event_rx) = mpsc::channel::<Event>(256);
 
@@ -51,26 +73,40 @@ impl FileWatcher {
         me.add_paths(&paths)?;
 
         let handle = tokio::spawn(async move {
-            let mut pending: HashSet<PathBuf> = HashSet::new();
+            // Path → latest classified event. A later event for the same path
+            // overwrites the earlier one so the final on-disk intent wins.
+            let mut pending: HashMap<PathBuf, FileEvent> = HashMap::new();
             let mut debounce_deadline: Option<tokio::time::Instant> = None;
 
             loop {
-                let sleep_fut = debounce_deadline.map(|d| tokio::time::sleep_until(d));
+                let sleep_fut = debounce_deadline.map(tokio::time::sleep_until);
 
                 tokio::select! {
                     Some(event) = event_rx.recv() => {
-                        for path in event.paths {
-                            if path.is_file() {
-                                let canonical = tokio::fs::canonicalize(&path).await
-                                    .unwrap_or(path);
-                                pending.insert(canonical);
-                            }
+                        for classified in classify_event(event).await {
+                            pending.insert(classified.path().clone(), classified);
                         }
                         debounce_deadline = Some(tokio::time::Instant::now() + debounce_duration);
                     }
                     _ = async { sleep_fut.unwrap().await }, if sleep_fut.is_some() => {
                         if !pending.is_empty() {
-                            let batch: Vec<PathBuf> = pending.drain().collect();
+                            // Reconcile with disk state: FSEvents on macOS
+                            // emits trailing Modify events after a Remove,
+                            // which would otherwise mask the deletion. Always
+                            // trust the filesystem at flush time.
+                            let batch: Vec<FileEvent> = pending
+                                .drain()
+                                .map(|(path, ev)| {
+                                    if !path.exists() {
+                                        FileEvent::Remove(path)
+                                    } else {
+                                        match ev {
+                                            FileEvent::Remove(_) => FileEvent::Upsert(path),
+                                            FileEvent::Upsert(p) => FileEvent::Upsert(p),
+                                        }
+                                    }
+                                })
+                                .collect();
                             debug!(count = batch.len(), "emitting debounced batch");
                             if output.send(batch).await.is_err() {
                                 break;
@@ -129,6 +165,76 @@ impl FileWatcher {
     }
 }
 
+/// Classify a notify event into one or more `FileEvent` values.
+///
+/// Removal events keep the (now-missing) path; we cannot canonicalize after
+/// deletion, so the raw event path is forwarded.
+async fn classify_event(event: Event) -> Vec<FileEvent> {
+    let mut out = Vec::with_capacity(event.paths.len());
+
+    match event.kind {
+        EventKind::Create(_) | EventKind::Modify(ModifyKind::Data(_)) | EventKind::Modify(ModifyKind::Metadata(_)) | EventKind::Modify(ModifyKind::Any) => {
+            for path in event.paths {
+                let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path);
+                out.push(FileEvent::Upsert(canonical));
+            }
+        }
+        EventKind::Modify(ModifyKind::Name(mode)) => {
+            // macOS often emits a single Name(Both) event with [from, to].
+            // Linux typically emits Name(From) and Name(To) separately.
+            match mode {
+                RenameMode::Both if event.paths.len() == 2 => {
+                    out.push(FileEvent::Remove(event.paths[0].clone()));
+                    let to = event.paths[1].clone();
+                    let canonical = tokio::fs::canonicalize(&to).await.unwrap_or(to);
+                    out.push(FileEvent::Upsert(canonical));
+                }
+                RenameMode::From => {
+                    for path in event.paths {
+                        out.push(FileEvent::Remove(path));
+                    }
+                }
+                RenameMode::To => {
+                    for path in event.paths {
+                        let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path);
+                        out.push(FileEvent::Upsert(canonical));
+                    }
+                }
+                _ => {
+                    // Unknown/Any rename mode: treat as upsert when the file
+                    // exists, remove otherwise.
+                    for path in event.paths {
+                        if path.exists() {
+                            let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path);
+                            out.push(FileEvent::Upsert(canonical));
+                        } else {
+                            out.push(FileEvent::Remove(path));
+                        }
+                    }
+                }
+            }
+        }
+        EventKind::Modify(ModifyKind::Other) => {
+            for path in event.paths {
+                if path.exists() {
+                    let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path);
+                    out.push(FileEvent::Upsert(canonical));
+                }
+            }
+        }
+        EventKind::Remove(_) => {
+            for path in event.paths {
+                out.push(FileEvent::Remove(path));
+            }
+        }
+        EventKind::Access(_) | EventKind::Any | EventKind::Other => {
+            // Ignore access events and unknown event types.
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,7 +242,7 @@ mod tests {
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]
-    async fn watcher_emits_debounced_batch() {
+    async fn watcher_emits_debounced_upsert_batch() {
         let dir = tempfile::tempdir().unwrap();
         let file_a = dir.path().join("a.txt");
         let file_b = dir.path().join("b.txt");
@@ -151,10 +257,8 @@ mod tests {
         )
         .unwrap();
 
-        // Give FSEvents time to register.
         sleep(Duration::from_millis(300)).await;
 
-        // Modify both files in quick succession.
         let mut f = std::fs::OpenOptions::new()
             .append(true)
             .open(&file_a)
@@ -169,15 +273,12 @@ mod tests {
         writeln!(f, " modified").unwrap();
         drop(f);
 
-        // Wait for debounce + FSEvents latency margin.
         sleep(Duration::from_secs(3)).await;
 
         let batch = rx.try_recv().expect("expected a debounced batch");
-        let canonical_a = std::fs::canonicalize(&file_a).unwrap_or_else(|_| file_a.clone());
-        let canonical_b = std::fs::canonicalize(&file_b).unwrap_or_else(|_| file_b.clone());
         assert!(
-            batch.contains(&canonical_a) || batch.contains(&canonical_b),
-            "batch should contain at least one modified file, got: {:?}",
+            batch.iter().any(|e| matches!(e, FileEvent::Upsert(_))),
+            "batch should contain at least one Upsert event, got: {:?}",
             batch
         );
     }
@@ -200,21 +301,50 @@ mod tests {
 
         sleep(Duration::from_millis(300)).await;
 
-        // Switch to watching file_b only.
         watcher.update_paths(std::slice::from_ref(&file_b)).unwrap();
 
         sleep(Duration::from_millis(300)).await;
 
-        // Modify file_a — should not be emitted.
         std::fs::write(&file_a, "changed a").unwrap();
         sleep(Duration::from_secs(3)).await;
         assert!(rx.try_recv().is_err(), "file_a should not trigger after update");
 
-        // Modify file_b — should be emitted.
         std::fs::write(&file_b, "changed b").unwrap();
         sleep(Duration::from_secs(3)).await;
         let batch = rx.try_recv().expect("expected batch for file_b");
         let canonical_b = std::fs::canonicalize(&file_b).unwrap_or_else(|_| file_b.clone());
-        assert!(batch.contains(&canonical_b), "batch should contain file_b, got: {:?}", batch);
+        assert!(
+            batch.iter().any(|e| matches!(e, FileEvent::Upsert(p) if p == &canonical_b)),
+            "batch should contain Upsert(file_b), got: {:?}",
+            batch
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_emits_remove_event_on_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doomed.txt");
+        std::fs::write(&file, "fleeting").unwrap();
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let _watcher = FileWatcher::new(
+            vec![file.clone()],
+            Duration::from_millis(200),
+            tx,
+        )
+        .unwrap();
+
+        sleep(Duration::from_millis(300)).await;
+
+        std::fs::remove_file(&file).unwrap();
+
+        sleep(Duration::from_secs(3)).await;
+
+        let batch = rx.try_recv().expect("expected a debounced batch after delete");
+        assert!(
+            batch.iter().any(|e| matches!(e, FileEvent::Remove(_))),
+            "batch should contain a Remove event, got: {:?}",
+            batch
+        );
     }
 }

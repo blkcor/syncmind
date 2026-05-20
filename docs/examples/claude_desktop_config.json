@@ -1,10 +1,11 @@
 {
   "mcpServers": {
     "syncmind": {
+      "_comment_command": "Use an absolute path if 'syncmind' is not on PATH for the Claude Desktop process, e.g. '/usr/local/bin/syncmind' or '/Users/<you>/ai/project/syncmind/core/target/release/syncmind'.",
       "command": "syncmind",
       "args": ["daemon", "--foreground"],
       "env": {
-        "RUST_LOG": "info"
+        "RUST_LOG": "syncmind=info,syncmind_mcp_server=info"
       }
     }
   }
