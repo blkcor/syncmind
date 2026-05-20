@@ -292,6 +292,23 @@ pub fn run() {
                 .visible(is_first_run)
                 .build()?;
 
+            // Prevent macOS from jumping Spaces when the palette is shown.
+            // CanJoinAllSpaces (1 << 0) lets the window live on every Space;
+            // MoveToActiveSpace (1 << 1) ensures it appears on the current Space
+            // without triggering a Space switch.
+            #[cfg(target_os = "macos")]
+            {
+                use objc::runtime::Object;
+                use objc::{msg_send, sel, sel_impl};
+                unsafe {
+                    if let Ok(ns_window) = window.ns_window() {
+                        let ns_window = ns_window as *mut Object;
+                        let behavior: u64 = (1 << 0) | (1 << 1);
+                        let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
+                    }
+                }
+            }
+
             if is_first_run {
                 let _ = std::fs::File::create(&first_run_marker);
             }
