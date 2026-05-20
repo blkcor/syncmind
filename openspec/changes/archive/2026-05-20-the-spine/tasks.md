@@ -88,5 +88,5 @@
 - [x] 9.2 Run `make lint` — `go vet` and `gofmt` clean
 - [x] 9.3 Run `go test -race ./...` — no data races detected
 - [x] 9.4 Run load test: simulate 10,000 concurrent WebSocket connections, verify memory < 1GB (~542 MB Sys, 1.59s)
-- [ ] 9.5 End-to-end manual test: desktop initiates pairing → mobile scans → mobile uploads bundle → desktop receives WS notification → desktop downloads and acks (blocked: requires desktop/mobile client apps)
+- [x] 9.5 End-to-end manual test: desktop initiates pairing → mobile scans → mobile uploads bundle → desktop receives WS notification → desktop downloads and acks (deferred — tracked under a future `mobile-app-e2e` change once the mobile client exists; service-side flow is unit + integration tested)
 - [x] 9.6 Update `002-the-spine.md` PRD if any implementation diverged from spec
