@@ -1,8 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use syncmind_file_watcher::FileEvent;
 use syncmind_rag_engine::chunker::{Chunker, CodeChunker, FallbackChunker, MarkdownChunker};
 use syncmind_rag_engine::embedder::Embedder;
 use syncmind_rag_engine::extractor::{CompositeExtractor, Extractor};
@@ -74,32 +75,78 @@ pub async fn index_file(
     Ok(())
 }
 
-/// Run the indexing pipeline: receive file change events and index each changed file.
+/// Run the indexing pipeline: receive file change events and route each to
+/// either re-indexing or index cleanup based on the event kind.
 ///
-/// `on_result` is invoked after every per-file indexing attempt so callers
-/// (e.g. the desktop app) can update shared status state and emit events.
+/// `on_result` is invoked after every per-file Upsert indexing attempt so
+/// callers (e.g. the desktop app) can update shared status state and emit
+/// events. Remove events do not invoke the callback.
 pub async fn run_indexing_pipeline(
     config: syncmind_core::Config,
     store: Arc<syncmind_storage::VectorStore>,
     embedder: Arc<dyn Embedder>,
-    mut watcher_rx: mpsc::Receiver<Vec<PathBuf>>,
+    mut watcher_rx: mpsc::Receiver<Vec<FileEvent>>,
     on_result: Option<IndexResultCallback>,
 ) -> anyhow::Result<()> {
     let extractor = CompositeExtractor::new();
 
     while let Some(batch) = watcher_rx.recv().await {
-        for path in batch {
-            let chunker = chunker_for_path(&path, config.chunk_size, config.chunk_overlap);
-            let result = index_file(&path, &extractor, chunker.as_ref(), embedder.as_ref(), &store).await;
-            match &result {
-                Err(e) => warn!(path = %path.display(), error = %e, "failed to re-index file"),
-                Ok(()) => info!(path = %path.display(), "re-indexed file"),
-            }
-            if let Some(cb) = on_result.as_ref() {
-                cb(&path, result.as_ref().map(|_| ()));
+        for event in batch {
+            match event {
+                FileEvent::Upsert(path) => {
+                    let chunker = chunker_for_path(&path, config.chunk_size, config.chunk_overlap);
+                    let result = index_file(
+                        &path,
+                        &extractor,
+                        chunker.as_ref(),
+                        embedder.as_ref(),
+                        &store,
+                    )
+                    .await;
+                    match &result {
+                        Err(e) => warn!(path = %path.display(), error = %e, "failed to re-index file"),
+                        Ok(()) => info!(path = %path.display(), "re-indexed file"),
+                    }
+                    if let Some(cb) = on_result.as_ref() {
+                        cb(&path, result.as_ref().map(|_| ()));
+                    }
+                }
+                FileEvent::Remove(path) => match store.delete_file_by_path(&path) {
+                    Ok(true) => info!(path = %path.display(), "removed file from index"),
+                    Ok(false) => info!(path = %path.display(), "remove event for unknown file (no-op)"),
+                    Err(e) => warn!(path = %path.display(), error = %e, "failed to remove file from index"),
+                },
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // Compile-time check: `run_indexing_pipeline` accepts `Vec<FileEvent>`.
+    #[allow(dead_code, clippy::let_underscore_future)]
+    fn _signature_compiles(
+        rx: mpsc::Receiver<Vec<FileEvent>>,
+        store: Arc<syncmind_storage::VectorStore>,
+        embedder: Arc<dyn Embedder>,
+    ) {
+        let _ = run_indexing_pipeline(
+            syncmind_core::Config::default(),
+            store,
+            embedder,
+            rx,
+            None,
+        );
+    }
+
+    #[allow(dead_code)]
+    fn _file_event_variants_exist() {
+        let _ = FileEvent::Upsert(PathBuf::from("/tmp/a"));
+        let _ = FileEvent::Remove(PathBuf::from("/tmp/b"));
+    }
 }

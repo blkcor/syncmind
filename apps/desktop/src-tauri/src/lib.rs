@@ -240,7 +240,8 @@ pub fn run() {
             }
 
             // Start file watcher with 1-second debounce.
-            let (file_tx, file_rx) = mpsc::channel::<Vec<std::path::PathBuf>>(256);
+            let (file_tx, file_rx) =
+                mpsc::channel::<Vec<syncmind_file_watcher::FileEvent>>(256);
             let watcher = tauri::async_runtime::block_on(async {
                 syncmind_file_watcher::FileWatcher::new(
                     config.registered_files.clone(),
