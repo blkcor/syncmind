@@ -35,6 +35,10 @@ pub struct Config {
     pub log_to_file: bool,
     #[serde(default)]
     pub log_rotation: LogRotation,
+    #[serde(default)]
+    pub onnx_model_url: Option<String>,
+    #[serde(default)]
+    pub onnx_tokenizer_url: Option<String>,
 }
 
 fn default_log_level() -> String {
@@ -59,6 +63,8 @@ impl Default for Config {
             log_level: default_log_level(),
             log_to_file: default_log_to_file(),
             log_rotation: LogRotation::default(),
+            onnx_model_url: None,
+            onnx_tokenizer_url: None,
         }
     }
 }
@@ -128,6 +134,8 @@ mod tests {
             log_level: "debug".to_string(),
             log_to_file: false,
             log_rotation: LogRotation::Hourly,
+            onnx_model_url: Some("https://example.test/model.onnx".to_string()),
+            onnx_tokenizer_url: Some("https://example.test/tokenizer.json".to_string()),
         };
 
         let toml_str = toml::to_string_pretty(&original).unwrap();
@@ -158,6 +166,7 @@ chunk_overlap = 50
         assert_eq!(parsed.log_level, "info");
         assert!(parsed.log_to_file);
         assert_eq!(parsed.log_rotation, LogRotation::Daily);
+        assert!(parsed.onnx_model_url.is_none());
     }
 
     #[test]
