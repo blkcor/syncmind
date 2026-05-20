@@ -70,6 +70,6 @@
 - [x] 6.4 `bash scripts/e2e-phase1-realworld.sh` — all 4 scenarios green
 - [x] 6.5 Added `SYNCMIND_CONFIG_DIR` / `SYNCMIND_DATA_DIR` env overrides so tests (and multi-instance users) don't pollute the real user config on macOS (where the `dirs` crate ignores XDG_*)
 - [x] 6.6 Refactored existing `core/syncmind/tests/cli.rs` to use the new env overrides (was silently failing on machines with pre-existing user config)
-- [ ] 6.7 Commit per Gap with conventional commit messages (pending user direction)
-- [ ] 6.8 Open PR `feat(core): complete phase1 headless mcp gaps` (pending user direction)
-- [ ] 6.9 After merge: archive OpenSpec change to `openspec/changes/archive/2026-05-20-phase1-completion/`
+- [x] 6.7 Commit per Gap with conventional commit messages (6 commits on `feat/core/phase1-completion`)
+- [x] 6.8 Open PR `feat(core): complete phase1 headless mcp gaps` (https://github.com/blkcor/syncmind/pull/6)
+- [x] 6.9 After merge: archive OpenSpec change to `openspec/changes/archive/2026-05-20-phase1-completion/`
