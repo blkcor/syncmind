@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgGrad" x1="140" y1="120" x2="880" y2="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6E5BFF"/>
+      <stop offset="50%" stop-color="#8A7DFF"/>
+      <stop offset="100%" stop-color="#4DE2FF"/>
+    </linearGradient>
+
+    <linearGradient id="brainGrad" x1="350" y1="260" x2="720" y2="700" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFE4FB"/>
+      <stop offset="100%" stop-color="#FFD0F5"/>
+    </linearGradient>
+
+    <linearGradient id="glowGrad" x1="260" y1="200" x2="760" y2="860" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#B3F3FF" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#7F85FF" stop-opacity="0.35"/>
+    </linearGradient>
+
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="28" flood-color="#2B226B" flood-opacity="0.28"/>
+    </filter>
+
+    <filter id="softGlow">
+      <feGaussianBlur stdDeviation="18" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Squircle Base -->
+  <path d="
+    M256 120
+    C170 120 120 170 120 256
+    V768
+    C120 854 170 904 256 904
+    H768
+    C854 904 904 854 904 768
+    V256
+    C904 170 854 120 768 120
+    Z"
+    fill="url(#bgGrad)"
+    filter="url(#shadow)"/>
+
+  <!-- Inner Glow -->
+  <path d="
+    M286 170
+    C215 170 170 215 170 286
+    V738
+    C170 809 215 854 286 854
+    H738
+    C809 854 854 809 854 738
+    V286
+    C854 215 809 170 738 170
+    Z"
+    stroke="url(#glowGrad)"
+    stroke-width="12"
+    opacity="0.75"/>
+
+  <!-- Floating neural rings -->
+  <g opacity="0.7">
+    <circle cx="290" cy="305" r="16" fill="#C6F6FF"/>
+    <circle cx="734" cy="280" r="12" fill="#FFFFFF"/>
+    <circle cx="772" cy="694" r="14" fill="#C8D0FF"/>
+    <circle cx="240" cy="710" r="10" fill="#FFFFFF"/>
+  </g>
+
+  <!-- Chibi Brain -->
+  <g filter="url(#shadow)">
+    <path d="
+      M516 260
+      C616 250 708 320 734 420
+      C764 538 698 664 580 708
+      C552 720 528 726 512 728
+      C494 730 470 724 440 712
+      C320 662 256 540 288 420
+      C314 322 404 260 516 260Z"
+      fill="url(#brainGrad)"
+      stroke="#3B2D73"
+      stroke-width="14"
+      stroke-linejoin="round"/>
+  </g>
+
+  <!-- Brain folds -->
+  <g stroke="#FF9AE4" stroke-width="10" stroke-linecap="round" opacity="0.95">
+    <path d="M430 340C394 366 386 412 408 446"/>
+    <path d="M492 320C454 368 452 420 476 468"/>
+    <path d="M560 320C590 360 592 416 570 456"/>
+    <path d="M626 344C662 376 670 426 646 468"/>
+    <path d="M372 490C408 530 452 556 496 566"/>
+    <path d="M652 492C618 532 574 556 530 566"/>
+  </g>
+
+  <!-- Cute face -->
+  <g>
+    <ellipse cx="438" cy="514" rx="22" ry="28" fill="#2A2456"/>
+    <ellipse cx="590" cy="514" rx="22" ry="28" fill="#2A2456"/>
+
+    <circle cx="430" cy="506" r="7" fill="#FFFFFF"/>
+    <circle cx="582" cy="506" r="7" fill="#FFFFFF"/>
+
+    <path d="M468 594C496 626 532 626 560 594"
+          stroke="#2A2456"
+          stroke-width="12"
+          stroke-linecap="round"/>
+  </g>
+
+  <!-- Neural sync halo -->
+  <g filter="url(#softGlow)">
+    <path d="M332 724C426 796 598 796 694 724"
+          stroke="#9CF2FF"
+          stroke-width="16"
+          stroke-linecap="round"
+          opacity="0.8"/>
+  </g>
+
+  <!-- Sync Nodes -->
+  <g>
+    <circle cx="332" cy="724" r="20" fill="#A6F4FF"/>
+    <circle cx="694" cy="724" r="20" fill="#A6F4FF"/>
+    <circle cx="514" cy="776" r="22" fill="#FFFFFF"/>
+  </g>
+
+  <!-- Minimal S mark -->
+  <path d="M500 760C526 744 550 742 574 760"
+        stroke="#6C5BFF"
+        stroke-width="10"
+        stroke-linecap="round"/>
+
+</svg>

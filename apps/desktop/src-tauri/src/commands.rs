@@ -135,12 +135,44 @@ pub fn get_indexing_status(state: State<AppState>) -> Result<IndexingStatusDto, 
         .get_stats()
         .map_err(|e| format!("Failed to get stats: {}", e))?;
 
+    let indexing = state.indexing.lock().map_err(|e| format!("indexing state lock poisoned: {}", e))?;
+
     Ok(IndexingStatusDto {
         file_count,
         chunk_count,
-        last_updated: None,
-        recent_errors: Vec::new(),
+        last_updated: indexing.last_updated.map(iso8601_utc),
+        recent_errors: indexing
+            .recent_errors
+            .iter()
+            .map(|e| IndexingErrorDto {
+                file_path: e.file_path.to_string_lossy().into_owned(),
+                message: e.message.clone(),
+                timestamp: iso8601_utc(e.timestamp),
+            })
+            .collect(),
     })
+}
+
+/// Format a unix-seconds timestamp as ISO-8601 UTC (e.g. `2026-05-20T14:32:00Z`).
+/// Uses Howard Hinnant's civil_from_days algorithm to avoid a chrono dependency.
+fn iso8601_utc(ts: i64) -> String {
+    let secs = ts.max(0) as u64;
+    let days = secs / 86_400;
+    let hh = (secs % 86_400) / 3_600;
+    let mm = (secs % 3_600) / 60;
+    let ss = secs % 60;
+
+    let z = days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = era * 400 + yoe as i64 + if m <= 2 { 1 } else { 0 };
+
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hh, mm, ss)
 }
 
 #[tauri::command]
@@ -151,21 +183,24 @@ pub async fn trigger_reindex(
     let config = state.config.lock().unwrap().clone();
     let store = Arc::clone(&state.store);
     let embedder = Arc::clone(&state.embedder);
+    let on_result = Arc::clone(&state.on_index_result);
 
     let extractor = syncmind_rag_engine::extractor::CompositeExtractor::new();
 
     if let Some(path_str) = file_path {
         let path = std::path::PathBuf::from(path_str);
         let chunker = syncmind_indexing::chunker_for_path(&path, config.chunk_size, config.chunk_overlap);
-        syncmind_indexing::index_file(&path, &extractor, chunker.as_ref(), embedder.as_ref(), &store)
-            .await
-            .map_err(|e| format!("Re-index failed: {}", e))?;
+        let result = syncmind_indexing::index_file(&path, &extractor, chunker.as_ref(), embedder.as_ref(), &store).await;
+        on_result(&path, result.as_ref().map(|_| ()));
+        result.map_err(|e| format!("Re-index failed: {}", e))?;
     } else {
         for path in &config.registered_files {
             let chunker = syncmind_indexing::chunker_for_path(path, config.chunk_size, config.chunk_overlap);
-            if let Err(e) = syncmind_indexing::index_file(path, &extractor, chunker.as_ref(), embedder.as_ref(), &store).await {
+            let result = syncmind_indexing::index_file(path, &extractor, chunker.as_ref(), embedder.as_ref(), &store).await;
+            if let Err(e) = &result {
                 tracing::warn!(path = %path.display(), error = %e, "full re-index failed for file");
             }
+            on_result(path, result.as_ref().map(|_| ()));
         }
     }
 
@@ -249,4 +284,10 @@ pub fn set_auto_launch(enabled: bool, app: tauri::AppHandle) -> Result<(), Strin
         manager.disable().map_err(|e| format!("Failed to disable auto-launch: {}", e))?;
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn set_dialog_open(open: bool, state: State<AppState>) {
+    let mut guard = state.dialog_open.lock().unwrap();
+    *guard = open;
 }

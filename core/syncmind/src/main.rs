@@ -123,7 +123,7 @@ async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
         let store = store.clone();
         let embedder = embedder.clone();
         tokio::spawn(async move {
-            if let Err(e) = syncmind_indexing::run_indexing_pipeline(config, store, embedder, file_rx).await {
+            if let Err(e) = syncmind_indexing::run_indexing_pipeline(config, store, embedder, file_rx, None).await {
                 warn!(error = %e, "indexing pipeline exited");
             }
         })

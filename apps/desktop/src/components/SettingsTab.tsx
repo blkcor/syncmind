@@ -74,7 +74,13 @@ export default function SettingsTab() {
   }
 
   async function addFiles() {
-    const selected = await open({ multiple: true });
+    await invoke('set_dialog_open', { open: true });
+    let selected: string | string[] | null = null;
+    try {
+      selected = await open({ multiple: true });
+    } finally {
+      await invoke('set_dialog_open', { open: false });
+    }
     if (!selected) return;
     const paths = Array.isArray(selected) ? selected : [selected];
     const updatedFiles = [...store.config.registered_files, ...paths];

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -6,6 +6,11 @@ use tracing::{info, warn};
 use syncmind_rag_engine::chunker::{Chunker, CodeChunker, FallbackChunker, MarkdownChunker};
 use syncmind_rag_engine::embedder::Embedder;
 use syncmind_rag_engine::extractor::{CompositeExtractor, Extractor};
+
+/// Callback invoked after each file indexing attempt. The closure receives
+/// the file path and the result. Used by the desktop app to update the
+/// shared `IndexingState` and emit events to the frontend / tray.
+pub type IndexResultCallback = Arc<dyn Fn(&Path, Result<(), &anyhow::Error>) + Send + Sync>;
 
 /// Select the appropriate chunker for a file based on its extension.
 pub fn chunker_for_path(
@@ -70,21 +75,28 @@ pub async fn index_file(
 }
 
 /// Run the indexing pipeline: receive file change events and index each changed file.
+///
+/// `on_result` is invoked after every per-file indexing attempt so callers
+/// (e.g. the desktop app) can update shared status state and emit events.
 pub async fn run_indexing_pipeline(
     config: syncmind_core::Config,
     store: Arc<syncmind_storage::VectorStore>,
     embedder: Arc<dyn Embedder>,
     mut watcher_rx: mpsc::Receiver<Vec<PathBuf>>,
+    on_result: Option<IndexResultCallback>,
 ) -> anyhow::Result<()> {
     let extractor = CompositeExtractor::new();
 
     while let Some(batch) = watcher_rx.recv().await {
         for path in batch {
             let chunker = chunker_for_path(&path, config.chunk_size, config.chunk_overlap);
-            if let Err(e) = index_file(&path, &extractor, chunker.as_ref(), embedder.as_ref(), &store).await {
-                warn!(path = %path.display(), error = %e, "failed to re-index file");
-            } else {
-                info!(path = %path.display(), "re-indexed file");
+            let result = index_file(&path, &extractor, chunker.as_ref(), embedder.as_ref(), &store).await;
+            match &result {
+                Err(e) => warn!(path = %path.display(), error = %e, "failed to re-index file"),
+                Ok(()) => info!(path = %path.display(), "re-indexed file"),
+            }
+            if let Some(cb) = on_result.as_ref() {
+                cb(&path, result.as_ref().map(|_| ()));
             }
         }
     }

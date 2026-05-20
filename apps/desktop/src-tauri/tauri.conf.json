@@ -9,18 +9,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "width": 860,
-        "height": 540,
-        "resizable": false,
-        "decorations": false,
-        "center": true,
-        "visible": false,
-        "focus": true
-      }
-    ],
+    "macOSPrivateApi": true,
     "security": {
       "csp": null
     }
@@ -41,10 +30,5 @@
       "signingIdentity": "-"
     }
   },
-  "plugins": {
-    "global-shortcut": {},
-    "autostart": {},
-    "shell": {},
-    "dialog": {}
-  }
+  "plugins": {}
 }

@@ -2,10 +2,15 @@ import { createSignal, createEffect, onMount, onCleanup, Show, For } from 'solid
 import { invoke } from '@tauri-apps/api/core';
 import { store, setStore } from '../store';
 import type { SearchResult } from '@syncmind/types';
-import { createHighlighter, type HighlighterGeneric } from 'shiki';
+import {
+  createHighlighter,
+  type HighlighterGeneric,
+  type BundledLanguage,
+  type BundledTheme,
+} from 'shiki';
 
-let highlighterPromise: Promise<HighlighterGeneric<any, any>> | null = null;
-function getLazyHighlighter(): Promise<HighlighterGeneric<any, any>> {
+let highlighterPromise: Promise<HighlighterGeneric<BundledLanguage, BundledTheme>> | null = null;
+function getLazyHighlighter(): Promise<HighlighterGeneric<BundledLanguage, BundledTheme>> {
   if (!highlighterPromise) {
     highlighterPromise = createHighlighter({
       themes: ['github-dark'],
@@ -246,6 +251,8 @@ export default function SearchTab() {
                   Reveal
                 </button>
               </div>
+              {/* Shiki output is sanitized HTML (escaped angle brackets, no user attrs) */}
+              {/* eslint-disable-next-line solid/no-innerhtml */}
               <div class="preview-content" innerHTML={previewHtml()} />
             </div>
           </Show>
