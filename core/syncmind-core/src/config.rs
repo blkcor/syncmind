@@ -72,6 +72,11 @@ impl Config {
     }
 
     pub fn config_path() -> Result<PathBuf> {
+        if let Ok(custom) = std::env::var("SYNCMIND_CONFIG_DIR") {
+            if !custom.is_empty() {
+                return Ok(PathBuf::from(custom).join("config.toml"));
+            }
+        }
         let config_dir = dirs::config_dir()
             .context("Failed to determine system config directory")?;
         Ok(config_dir.join("syncmind").join("config.toml"))
