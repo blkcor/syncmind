@@ -10,6 +10,15 @@ pub enum McpTransport {
     Sse,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LogRotation {
+    #[default]
+    Daily,
+    Hourly,
+    Never,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub ollama_url: String,
@@ -20,6 +29,20 @@ pub struct Config {
     pub embedding_dim: usize,
     pub chunk_size: usize,
     pub chunk_overlap: usize,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+    #[serde(default = "default_log_to_file")]
+    pub log_to_file: bool,
+    #[serde(default)]
+    pub log_rotation: LogRotation,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_log_to_file() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -33,6 +56,9 @@ impl Default for Config {
             embedding_dim: 1024,
             chunk_size: 512,
             chunk_overlap: 50,
+            log_level: default_log_level(),
+            log_to_file: default_log_to_file(),
+            log_rotation: LogRotation::default(),
         }
     }
 }
@@ -99,6 +125,9 @@ mod tests {
             embedding_dim: 384,
             chunk_size: 256,
             chunk_overlap: 25,
+            log_level: "debug".to_string(),
+            log_to_file: false,
+            log_rotation: LogRotation::Hourly,
         };
 
         let toml_str = toml::to_string_pretty(&original).unwrap();
@@ -114,10 +143,30 @@ mod tests {
     }
 
     #[test]
+    fn legacy_config_without_log_fields_uses_defaults() {
+        let legacy = r#"
+ollama_url = "http://localhost:11434"
+ollama_model = "bge-m3"
+mcp_transport = "stdio"
+bind_addr = "127.0.0.1:3000"
+registered_files = []
+embedding_dim = 1024
+chunk_size = 512
+chunk_overlap = 50
+"#;
+        let parsed: Config = toml::from_str(legacy).unwrap();
+        assert_eq!(parsed.log_level, "info");
+        assert!(parsed.log_to_file);
+        assert_eq!(parsed.log_rotation, LogRotation::Daily);
+    }
+
+    #[test]
     fn default_config_serialization() {
         let config = Config::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         assert!(toml_str.contains("ollama_url"));
         assert!(toml_str.contains("stdio"));
+        assert!(toml_str.contains("log_level"));
+        assert!(toml_str.contains("log_rotation"));
     }
 }

@@ -43,12 +43,17 @@ fn validate_and_canonicalize(path: &PathBuf) -> anyhow::Result<PathBuf> {
 }
 
 async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
-    if foreground {
-        tracing_subscriber::fmt::init();
-    }
+    let config = syncmind_core::Config::load()?;
+    let log_dir = syncmind_core::log_dir()?;
+    let _log_guard = syncmind_core::init_tracing(
+        &log_dir,
+        &config.log_level,
+        config.log_to_file,
+        config.log_rotation,
+        foreground,
+    );
     info!("Starting SyncMind daemon...");
 
-    let config = syncmind_core::Config::load()?;
     let db_path = syncmind_core::db_path()?;
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
