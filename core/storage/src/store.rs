@@ -1,6 +1,7 @@
 use crate::error::StorageError;
 use crate::models::{Chunk, FileMeta, SearchResult};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use zerocopy::IntoBytes;
@@ -88,6 +89,11 @@ impl VectorStore {
         );
         conn.execute(&vec_table_sql, [])?;
 
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(content);",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -120,8 +126,9 @@ impl VectorStore {
                 .prepare("SELECT id FROM chunks WHERE file_id = ?")?
                 .query_map([id], |row| row.get(0))?
                 .collect::<Result<Vec<_>, _>>()?;
-            for chunk_id in chunk_ids {
+            for chunk_id in &chunk_ids {
                 tx.execute("DELETE FROM vec_chunks WHERE chunk_id = ?", [chunk_id])?;
+                tx.execute("DELETE FROM fts_chunks WHERE rowid = ?", [chunk_id])?;
             }
             tx.execute("DELETE FROM chunks WHERE file_id = ?", [id])?;
             tx.execute("DELETE FROM files WHERE id = ?", [id])?;
@@ -163,6 +170,11 @@ impl VectorStore {
             tx.execute(
                 "INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?, ?)",
                 params![chunk_id, embedding.as_bytes()],
+            )?;
+
+            tx.execute(
+                "INSERT INTO fts_chunks (rowid, content) VALUES (?, ?)",
+                params![chunk_id, &chunk.content],
             )?;
         }
 
@@ -215,6 +227,165 @@ impl VectorStore {
 
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::from)
+    }
+
+    /// Convert an L2 distance (from sqlite-vec on normalized vectors) to an
+    /// approximate cosine similarity score in [0, 1].
+    fn l2_to_similarity(distance: f64) -> f64 {
+        // For unit-length vectors: L2^2 = 2 - 2*dot_product
+        // dot_product = 1 - L2^2/2
+        let sim = 1.0 - (distance * distance) / 2.0;
+        sim.clamp(0.0, 1.0)
+    }
+
+    pub fn search_with_threshold(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        threshold: Option<f64>,
+    ) -> Result<Vec<SearchResult>, StorageError> {
+        let mut results = self.search(query_embedding, top_k)?;
+        if let Some(th) = threshold {
+            results.retain(|r| Self::l2_to_similarity(r.score) >= th);
+        }
+        Ok(results)
+    }
+
+    pub fn search_hybrid(
+        &self,
+        query_embedding: &[f32],
+        query_text: &str,
+        top_k: usize,
+        threshold: Option<f64>,
+    ) -> Result<Vec<SearchResult>, StorageError> {
+        if query_embedding.len() != self.embedding_dim {
+            return Err(StorageError::InvalidDimension {
+                expected: self.embedding_dim,
+                actual: query_embedding.len(),
+            });
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let candidate_limit = (top_k * 2).max(10);
+        let k_rrf = 60.0;
+
+        // --- Vector candidates ---
+        let mut vec_stmt = conn.prepare(
+            "SELECT
+                c.id,
+                c.start_line,
+                c.end_line,
+                c.content,
+                f.absolute_path,
+                vc.distance
+             FROM vec_chunks vc
+             JOIN chunks c ON vc.chunk_id = c.id
+             JOIN files f ON c.file_id = f.id
+             WHERE vc.embedding MATCH ? AND k = ?
+             ORDER BY vc.distance
+             LIMIT ?",
+        )?;
+
+        let vec_rows = vec_stmt.query_map(
+            params![
+                query_embedding.as_bytes(),
+                candidate_limit as i64,
+                candidate_limit as i64
+            ],
+            |row| {
+                Ok(SearchResult {
+                    chunk_id: row.get(0)?,
+                    start_line: row.get(1)?,
+                    end_line: row.get(2)?,
+                    content: row.get(3)?,
+                    file_path: PathBuf::from(row.get::<_, String>(4)?),
+                    score: row.get(5)?,
+                })
+            },
+        )?;
+
+        // --- FTS5 candidates ---
+        let mut fts_stmt = conn.prepare(
+            "SELECT
+                c.id,
+                c.start_line,
+                c.end_line,
+                c.content,
+                f.absolute_path,
+                rank
+             FROM fts_chunks
+             JOIN chunks c ON fts_chunks.rowid = c.id
+             JOIN files f ON c.file_id = f.id
+             WHERE fts_chunks MATCH ?
+             ORDER BY rank
+             LIMIT ?",
+        )?;
+
+        let fts_rows = fts_stmt.query_map(
+            params![query_text, candidate_limit as i64],
+            |row| {
+                Ok(SearchResult {
+                    chunk_id: row.get(0)?,
+                    start_line: row.get(1)?,
+                    end_line: row.get(2)?,
+                    content: row.get(3)?,
+                    file_path: PathBuf::from(row.get::<_, String>(4)?),
+                    score: row.get(5)?,
+                })
+            },
+        )?;
+
+        // --- RRF fusion ---
+        let mut fused: HashMap<i64, (SearchResult, f64)> = HashMap::new();
+
+        for (rank, row) in vec_rows.enumerate() {
+            let result = row?;
+            let score = 1.0 / (k_rrf + rank as f64 + 1.0);
+            fused.entry(result.chunk_id)
+                .and_modify(|(_, s)| *s += score)
+                .or_insert((result, score));
+        }
+
+        for (rank, row) in fts_rows.enumerate() {
+            let result = row?;
+            let score = 1.0 / (k_rrf + rank as f64 + 1.0);
+            fused.entry(result.chunk_id)
+                .and_modify(|(_, s)| *s += score)
+                .or_insert((result, score));
+        }
+
+        let mut results: Vec<(SearchResult, f64)> = fused.into_values().collect();
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Apply threshold and top_k
+        let mut final_results: Vec<SearchResult> = results
+            .into_iter()
+            .filter(|(r, _)| {
+                if let Some(th) = threshold {
+                    Self::l2_to_similarity(r.score) >= th
+                } else {
+                    true
+                }
+            })
+            .map(|(mut r, rrf_score)| {
+                // Overwrite score with the fused RRF score for downstream consumers
+                r.score = rrf_score;
+                r
+            })
+            .take(top_k)
+            .collect();
+
+        // Normalize scores to [0, 1] for downstream consistency.
+        // RRF scores are small fractions; we scale by the max so the best result is ~1.0.
+        if let Some(max_score) = final_results.first().map(|r| r.score) {
+            if max_score > 0.0 {
+                for r in &mut final_results {
+                    r.score /= max_score;
+                }
+            }
+        }
+
+        Ok(final_results)
     }
 
     pub fn get_stats(&self) -> Result<(usize, usize), StorageError> {
@@ -434,5 +605,88 @@ mod tests {
         let (files, chunks_count) = store.get_stats().unwrap();
         assert_eq!(files, 1);
         assert_eq!(chunks_count, 1);
+    }
+
+    #[test]
+    fn store_search_with_threshold_filters_low_similarity() {
+        let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let store = VectorStore::new(&db_path, 4).unwrap();
+
+        let meta = FileMeta {
+            absolute_path: PathBuf::from("/tmp/test.md"),
+            file_type: "markdown".to_string(),
+            last_modified: 1,
+            last_indexed: 1,
+        };
+        let chunks = vec![
+            Chunk {
+                chunk_index: 0,
+                start_line: 1,
+                end_line: 2,
+                content: "Hello world".to_string(),
+            },
+            Chunk {
+                chunk_index: 1,
+                start_line: 3,
+                end_line: 4,
+                content: "Goodbye world".to_string(),
+            },
+        ];
+        // Very different embeddings: one close to query, one far
+        let embeddings = vec![
+            vec![0.1, 0.2, 0.3, 0.4],
+            vec![0.9, 0.8, 0.7, 0.6],
+        ];
+        store.upsert_file(&meta, &chunks, &embeddings).unwrap();
+
+        let query = vec![0.11, 0.19, 0.31, 0.39];
+        // With a high threshold, only the very close result should remain
+        let results = store.search_with_threshold(&query, 5, Some(0.95)).unwrap();
+        assert_eq!(results.len(), 1, "threshold should filter out dissimilar results");
+        assert_eq!(results[0].content, "Hello world");
+    }
+
+    #[test]
+    fn store_search_hybrid_returns_fused_results() {
+        let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let store = VectorStore::new(&db_path, 4).unwrap();
+
+        let meta = FileMeta {
+            absolute_path: PathBuf::from("/tmp/test.md"),
+            file_type: "markdown".to_string(),
+            last_modified: 1,
+            last_indexed: 1,
+        };
+        let chunks = vec![
+            Chunk {
+                chunk_index: 0,
+                start_line: 1,
+                end_line: 2,
+                content: "Hello world".to_string(),
+            },
+            Chunk {
+                chunk_index: 1,
+                start_line: 3,
+                end_line: 4,
+                content: "Goodbye world".to_string(),
+            },
+        ];
+        let embeddings = vec![
+            vec![0.1, 0.2, 0.3, 0.4],
+            vec![0.9, 0.8, 0.7, 0.6],
+        ];
+        store.upsert_file(&meta, &chunks, &embeddings).unwrap();
+
+        let query_embedding = vec![0.11, 0.19, 0.31, 0.39];
+        let results = store
+            .search_hybrid(&query_embedding, "Hello", 5, None)
+            .unwrap();
+
+        assert!(
+            !results.is_empty(),
+            "hybrid search should return at least one result"
+        );
+        // The BM25 arm should boost "Hello world" to the top.
+        assert_eq!(results[0].content, "Hello world");
     }
 }
