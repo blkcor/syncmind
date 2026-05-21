@@ -29,24 +29,14 @@ pub struct Config {
     pub embedding_dim: usize,
     pub chunk_size: usize,
     pub chunk_overlap: usize,
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
-    #[serde(default = "default_log_to_file")]
-    pub log_to_file: bool,
     #[serde(default)]
-    pub log_rotation: LogRotation,
+    pub hybrid_search_enabled: bool,
     #[serde(default)]
-    pub onnx_model_url: Option<String>,
+    pub relevance_threshold: Option<f64>,
     #[serde(default)]
-    pub onnx_tokenizer_url: Option<String>,
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
-fn default_log_to_file() -> bool {
-    true
+    pub reranker_enabled: bool,
+    #[serde(default)]
+    pub reranker_model_path: Option<String>,
 }
 
 impl Default for Config {
@@ -60,11 +50,10 @@ impl Default for Config {
             embedding_dim: 1024,
             chunk_size: 512,
             chunk_overlap: 50,
-            log_level: default_log_level(),
-            log_to_file: default_log_to_file(),
-            log_rotation: LogRotation::default(),
-            onnx_model_url: None,
-            onnx_tokenizer_url: None,
+            hybrid_search_enabled: false,
+            relevance_threshold: None,
+            reranker_enabled: false,
+            reranker_model_path: None,
         }
     }
 }
@@ -131,11 +120,10 @@ mod tests {
             embedding_dim: 384,
             chunk_size: 256,
             chunk_overlap: 25,
-            log_level: "debug".to_string(),
-            log_to_file: false,
-            log_rotation: LogRotation::Hourly,
-            onnx_model_url: Some("https://example.test/model.onnx".to_string()),
-            onnx_tokenizer_url: Some("https://example.test/tokenizer.json".to_string()),
+            hybrid_search_enabled: true,
+            relevance_threshold: Some(0.75),
+            reranker_enabled: true,
+            reranker_model_path: Some("/tmp/reranker.onnx".to_string()),
         };
 
         let toml_str = toml::to_string_pretty(&original).unwrap();

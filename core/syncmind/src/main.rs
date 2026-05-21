@@ -54,6 +54,7 @@ async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
     );
     info!("Starting SyncMind daemon...");
 
+    let config = Arc::new(syncmind_core::Config::load()?);
     let db_path = syncmind_core::db_path()?;
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -65,11 +66,47 @@ async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
     )?);
     let embedder = Arc::new(syncmind_rag_engine::embedder::AutoEmbedder::new(&config).await?);
 
+    // Load optional reranker.
+    let reranker: Option<Arc<dyn syncmind_rag_engine::reranker::Reranker>> =
+        if config.reranker_enabled {
+            let model_path = config
+                .reranker_model_path
+                .as_ref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    syncmind_core::model_cache_dir()
+                        .map(|d| d.join("bge-reranker-base").join("model.onnx"))
+                        .unwrap_or_default()
+                });
+            if model_path.exists() {
+                match syncmind_rag_engine::reranker::OnnxReranker::new(&model_path) {
+                    Ok(r) => {
+                        info!(path = %model_path.display(), "reranker loaded");
+                        Some(Arc::new(r))
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to load reranker, continuing without");
+                        None
+                    }
+                }
+            } else {
+                warn!(path = %model_path.display(), "reranker model not found, continuing without");
+                None
+            }
+        } else {
+            None
+        };
+
     // Start MCP server.
-    let mcp_server = Arc::new(syncmind_mcp_server::McpServer::new(
+    let mut mcp_server = syncmind_mcp_server::McpServer::new(
         store.clone(),
         embedder.clone(),
-    ));
+        config.clone(),
+    );
+    if let Some(r) = reranker.clone() {
+        mcp_server = mcp_server.with_reranker(r);
+    }
+    let mcp_server = Arc::new(mcp_server);
     let mcp_transport = config.mcp_transport.clone();
     let bind_addr = config.bind_addr.clone();
     let _mcp_handle = tokio::spawn(async move {
@@ -128,7 +165,7 @@ async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
         let store = store.clone();
         let embedder = embedder.clone();
         tokio::spawn(async move {
-            if let Err(e) = syncmind_indexing::run_indexing_pipeline(config, store, embedder, file_rx, None).await {
+            if let Err(e) = syncmind_indexing::run_indexing_pipeline((*config).clone(), store, embedder, file_rx, None).await {
                 warn!(error = %e, "indexing pipeline exited");
             }
         })
@@ -249,6 +286,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Search { query, top_k } => {
             use syncmind_rag_engine::embedder::{AutoEmbedder, Embedder};
+            use syncmind_rag_engine::reranker::{OnnxReranker, Reranker};
 
             let config = syncmind_core::Config::load()?;
             let db_path = syncmind_core::db_path()?;
@@ -258,7 +296,34 @@ async fn main() -> anyhow::Result<()> {
             let embeddings = embedder.embed(&[&query]).await?;
             let query_embedding = embeddings.into_iter().next().unwrap();
 
-            let results = store.search(&query_embedding, top_k)?;
+            let mut results = store.search(&query_embedding, top_k)?;
+
+            // Optional CLI-side reranking.
+            if config.reranker_enabled && !results.is_empty() {
+                let model_path = config
+                    .reranker_model_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| {
+                        syncmind_core::model_cache_dir()
+                            .map(|d| d.join("bge-reranker-base.onnx"))
+                            .unwrap_or_default()
+                    });
+                if model_path.exists() {
+                    if let Ok(reranker) = OnnxReranker::new(&model_path) {
+                        let passages: Vec<&str> =
+                            results.iter().map(|r| r.content.as_str()).collect();
+                        if let Ok(scores) = reranker.rerank(&query, &passages).await {
+                            for (result, score) in results.iter_mut().zip(scores) {
+                                result.score = score as f64;
+                            }
+                            results.sort_by(|a, b| {
+                                b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        }
+                    }
+                }
+            }
 
             if results.is_empty() {
                 println!("No results found.");

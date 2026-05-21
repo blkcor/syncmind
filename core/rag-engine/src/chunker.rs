@@ -210,6 +210,7 @@ impl CodeChunker {
             Some("rs") => Some("rust"),
             Some("py") => Some("python"),
             Some("js") | Some("ts") | Some("jsx") | Some("tsx") => Some("javascript"),
+            Some("go") => Some("go"),
             _ => None,
         }
     }
@@ -230,6 +231,12 @@ impl CodeChunker {
                 "method_definition",
                 "arrow_function",
             ],
+            "go" => &[
+                "function_declaration",
+                "method_declaration",
+                "type_spec",
+                "struct_type",
+            ],
             _ => &[],
         }
     }
@@ -240,6 +247,7 @@ impl CodeChunker {
             "rust" => tree_sitter_rust::LANGUAGE.into(),
             "python" => tree_sitter_python::LANGUAGE.into(),
             "javascript" => tree_sitter_javascript::LANGUAGE.into(),
+            "go" => tree_sitter_go::LANGUAGE.into(),
             _ => return Err(ChunkError::Parse(format!("unsupported language: {lang}"))),
         };
         parser
@@ -294,6 +302,167 @@ impl CodeChunker {
             }
         }
     }
+
+    /// Extract the signature (declaration up to the opening `{`) from a code block.
+    /// For single-line declarations without `{`, returns the first line.
+    fn extract_signature(content: &str) -> String {
+        let mut sig = String::new();
+        for line in content.lines() {
+            sig.push_str(line);
+            if line.contains('{') {
+                break;
+            }
+            sig.push('\n');
+        }
+        sig.trim_end().to_string()
+    }
+
+    /// Split oversized content at blank-line boundaries, falling back to
+    /// `FallbackChunker` for individual paragraphs that still exceed the limit.
+    /// Prepends `signature` to every sub-chunk so semantic context is preserved.
+    fn chunk_semantically(
+        content: &str,
+        start_line: usize,
+        chunk_size: usize,
+        chunk_overlap: usize,
+        signature: Option<&str>,
+    ) -> Vec<Chunk> {
+        let lines: Vec<&str> = content.lines().collect();
+        if lines.is_empty() {
+            return Vec::new();
+        }
+
+        let sig_prefix = signature.map(|s| format!("{}\n", s));
+        let prefix_len = sig_prefix.as_ref().map(|s| s.len()).unwrap_or(0);
+        let effective_size = chunk_size.saturating_sub(prefix_len);
+
+        // --- split into paragraphs separated by blank lines ---
+        let mut paragraphs: Vec<(usize, Vec<&str>)> = Vec::new();
+        let mut cur_offset: Option<usize> = None;
+        let mut cur_lines: Vec<&str> = Vec::new();
+
+        for (idx, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                if !cur_lines.is_empty() {
+                    paragraphs.push((cur_offset.unwrap(), std::mem::take(&mut cur_lines)));
+                }
+                cur_offset = None;
+            } else {
+                if cur_offset.is_none() {
+                    cur_offset = Some(idx);
+                }
+                cur_lines.push(*line);
+            }
+        }
+        if !cur_lines.is_empty() {
+            paragraphs.push((cur_offset.unwrap(), cur_lines));
+        }
+
+        // If there are no paragraph boundaries, fallback directly.
+        if paragraphs.is_empty() {
+            let fb = FallbackChunker::new(chunk_size, chunk_overlap);
+            let mut chunks = fb.chunk_lines(&lines, start_line);
+            if let Some(ref prefix) = sig_prefix {
+                for c in &mut chunks {
+                    c.content.insert_str(0, prefix);
+                }
+            }
+            return chunks;
+        }
+
+        let fb = FallbackChunker::new(chunk_size, chunk_overlap);
+        let mut all_chunks: Vec<Chunk> = Vec::new();
+        let mut chunk_idx = 0usize;
+        let mut i = 0usize;
+
+        while i < paragraphs.len() {
+            let mut accum = String::new();
+            let mut j = i;
+            let para_start_offset = paragraphs[i].0;
+
+            while j < paragraphs.len() {
+                let para_text = paragraphs[j].1.join("\n");
+                let added = if accum.is_empty() {
+                    para_text.len()
+                } else {
+                    para_text.len() + 1 // blank-line separator
+                };
+
+                // Would exceed limit and we already have content → stop
+                if !accum.is_empty() && accum.len() + added > effective_size {
+                    break;
+                }
+
+                if !accum.is_empty() {
+                    accum.push('\n');
+                }
+                accum.push_str(&para_text);
+                j += 1;
+
+                // Single paragraph already too big → handle below
+                if accum.len() > effective_size && j == i + 1 {
+                    break;
+                }
+            }
+
+            // Case: single paragraph exceeds limit → fallback chunk that paragraph
+            if j == i + 1 && accum.len() > effective_size {
+                let (offset, ref para_lines) = paragraphs[i];
+                let para_start_line = start_line + offset;
+                let line_refs: Vec<&str> = para_lines.to_vec();
+                let mut sub = fb.chunk_lines(&line_refs, para_start_line);
+                for c in &mut sub {
+                    if let Some(ref prefix) = sig_prefix {
+                        c.content.insert_str(0, prefix);
+                    }
+                    c.chunk_index = chunk_idx;
+                    chunk_idx += 1;
+                }
+                all_chunks.append(&mut sub);
+                i += 1;
+                continue;
+            }
+
+            // Normal case: build chunk from accumulated paragraphs
+            let end_offset = if j > 0 {
+                let last = &paragraphs[j - 1];
+                last.0 + last.1.len().saturating_sub(1)
+            } else {
+                para_start_offset
+            };
+
+            let final_content = if let Some(ref prefix) = sig_prefix {
+                format!("{}{}", prefix, accum)
+            } else {
+                accum
+            };
+
+            all_chunks.push(Chunk {
+                chunk_index: chunk_idx,
+                start_line: start_line + para_start_offset,
+                end_line: start_line + end_offset,
+                content: final_content,
+            });
+            chunk_idx += 1;
+
+            // Advance with overlap
+            if chunk_overlap == 0 || j >= paragraphs.len() {
+                i = j;
+                continue;
+            }
+
+            let mut overlap_chars = 0usize;
+            let mut new_i = j;
+            while new_i > i && overlap_chars < chunk_overlap {
+                new_i -= 1;
+                let para_text = paragraphs[new_i].1.join("\n");
+                overlap_chars += para_text.len() + 1;
+            }
+            i = if new_i == i { j } else { new_i };
+        }
+
+        all_chunks
+    }
 }
 
 impl Chunker for CodeChunker {
@@ -317,14 +486,19 @@ impl Chunker for CodeChunker {
             }
         };
 
-        let fb = FallbackChunker::new(self.chunk_size, self.chunk_overlap);
         let mut all_chunks: Vec<Chunk> = Vec::new();
         let mut global_idx = 0usize;
 
         for mut c in raw_chunks {
             if c.content.len() > self.chunk_size {
-                let sub_lines: Vec<&str> = c.content.lines().collect();
-                let sub_chunks = fb.chunk_lines(&sub_lines, c.start_line);
+                let signature = Self::extract_signature(&c.content);
+                let sub_chunks = Self::chunk_semantically(
+                    &c.content,
+                    c.start_line,
+                    self.chunk_size,
+                    self.chunk_overlap,
+                    Some(&signature),
+                );
                 for mut sc in sub_chunks {
                     sc.chunk_index = global_idx;
                     all_chunks.push(sc);
@@ -497,5 +671,81 @@ fn bar() {
         assert!(chunks.iter().any(|c| c.content.contains("big")));
         // small() should also appear.
         assert!(chunks.iter().any(|c| c.content.contains("small")));
+    }
+
+    #[test]
+    fn test_code_chunker_go_functions() {
+        let code = r#"
+package main
+
+func Foo() int {
+    return 1
+}
+
+func Bar(x string) string {
+    return x
+}
+"#;
+        let chunker = CodeChunker::new(200, 20);
+        let chunks = chunker.chunk(code, Path::new("test.go"));
+        assert!(
+            chunks.len() >= 2,
+            "expected at least two chunks for two functions, got {}",
+            chunks.len()
+        );
+        let contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+        assert!(contents.iter().any(|c| c.contains("Foo")));
+        assert!(contents.iter().any(|c| c.contains("Bar")));
+        for (i, c) in chunks.iter().enumerate() {
+            assert_eq!(c.chunk_index, i);
+            assert!(c.start_line >= 1);
+        }
+    }
+
+    #[test]
+    fn test_semantic_sub_chunking_preserves_signature() {
+        // A large Go function with blank lines between logical sections.
+        let code = r#"func BigFunc() {
+    sectionA()
+
+    sectionB()
+
+    sectionC()
+
+    sectionD()
+}"#;
+        let chunker = CodeChunker::new(40, 5);
+        let chunks = chunker.chunk(code, Path::new("big.go"));
+        assert!(
+            chunks.len() >= 2,
+            "expected semantic split, got {} chunks",
+            chunks.len()
+        );
+        // Every sub-chunk of BigFunc should include its signature.
+        for c in &chunks {
+            if c.content.contains("BigFunc") || c.content.contains("section") {
+                assert!(
+                    c.content.contains("func BigFunc()"),
+                    "sub-chunk should preserve signature: {}",
+                    c.content
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_semantic_sub_chunking_line_numbers() {
+        let code = "fn a() {\n    1\n\n    2\n\n    3\n\n    4\n}\n";
+        let chunker = CodeChunker::new(30, 3);
+        let chunks = chunker.chunk(code, Path::new("lines.rs"));
+        assert!(
+            !chunks.is_empty(),
+            "expected at least one chunk"
+        );
+        // Verify sequential line numbers.
+        for c in &chunks {
+            assert!(c.start_line >= 1, "start_line should be >= 1");
+            assert!(c.end_line >= c.start_line, "end_line >= start_line");
+        }
     }
 }

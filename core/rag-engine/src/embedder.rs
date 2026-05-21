@@ -335,16 +335,7 @@ impl OnnxEmbedder {
     pub async fn from_config(config: &Config) -> Result<Self, EmbedError> {
         let model_dir = syncmind_core::paths::model_cache_dir()
             .map_err(|e| EmbedError::Onnx(format!("Failed to resolve model cache dir: {}", e)))?;
-        let model_url = config
-            .onnx_model_url
-            .as_deref()
-            .unwrap_or(DEFAULT_ONNX_MODEL_URL);
-        let tokenizer_url = config
-            .onnx_tokenizer_url
-            .as_deref()
-            .unwrap_or(DEFAULT_ONNX_TOKENIZER_URL);
-        let (model_path, _tokenizer_path) =
-            ensure_onnx_assets(&model_dir, model_url, tokenizer_url).await?;
+        let model_path = model_dir.join("bge-small-en-v1.5").join("model.onnx");
         Self::new(model_path, config.embedding_dim)
     }
 }
@@ -836,7 +827,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a running Ollama instance"]
     async fn test_ollama_embedder_real() {
         let embedder = OllamaEmbedder::new("http://localhost:11434", "bge-m3", 1024).unwrap();
         let result = embedder.embed(&["hello world"]).await;
