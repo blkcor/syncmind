@@ -5,7 +5,9 @@ use serde_json::{json, Value};
 use tracing::debug;
 
 use crate::protocol::*;
+use syncmind_core::Config;
 use syncmind_rag_engine::embedder::Embedder;
+use syncmind_rag_engine::reranker::Reranker;
 use syncmind_storage::VectorStore;
 
 /// A handler for an MCP tool.
@@ -19,19 +21,28 @@ pub trait ToolHandler: Send + Sync {
 pub struct McpServer {
     store: Arc<VectorStore>,
     embedder: Arc<dyn Embedder>,
+    config: Arc<Config>,
     tools: Vec<(Tool, Arc<dyn ToolHandler>)>,
+    reranker: Option<Arc<dyn Reranker>>,
 }
 
 impl McpServer {
-    /// Create a new server with the given store and embedder.
-    pub fn new(store: Arc<VectorStore>, embedder: Arc<dyn Embedder>) -> Self {
+    /// Create a new server with the given store, embedder, and config.
+    pub fn new(store: Arc<VectorStore>, embedder: Arc<dyn Embedder>, config: Arc<Config>) -> Self {
         let mut server = Self {
             store,
             embedder,
+            config,
             tools: Vec::new(),
+            reranker: None,
         };
         server.register_builtin_tools();
         server
+    }
+
+    pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
+        self.reranker = Some(reranker);
+        self
     }
 
     /// Register the built-in `search_knowledge` tool.
@@ -55,6 +66,18 @@ impl McpServer {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Optional file type filters"
+                    },
+                    "hybrid": {
+                        "type": "boolean",
+                        "description": "Enable hybrid search (FTS5 + vector). Defaults to config setting."
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "description": "Minimum cosine similarity threshold (0.0-1.0). Defaults to config setting."
+                    },
+                    "rerank": {
+                        "type": "boolean",
+                        "description": "Enable cross-encoder reranking. Defaults to config setting."
                     }
                 },
                 "required": ["query"]
@@ -64,6 +87,8 @@ impl McpServer {
         let handler = SearchKnowledgeHandler {
             store: self.store.clone(),
             embedder: self.embedder.clone(),
+            config: self.config.clone(),
+            reranker: self.reranker.clone(),
         };
 
         self.tools.push((tool, Arc::new(handler)));
@@ -151,6 +176,8 @@ impl McpServer {
 struct SearchKnowledgeHandler {
     store: Arc<VectorStore>,
     embedder: Arc<dyn Embedder>,
+    config: Arc<Config>,
+    reranker: Option<Arc<dyn Reranker>>,
 }
 
 #[async_trait]
@@ -165,6 +192,13 @@ impl ToolHandler for SearchKnowledgeHandler {
             return Err("Invalid top_k: must be between 1 and 100".to_string());
         }
 
+        // Determine search mode and threshold
+        let hybrid = args["hybrid"].as_bool()
+            .unwrap_or(self.config.hybrid_search_enabled);
+        let threshold = args["threshold"].as_f64()
+            .or(self.config.relevance_threshold)
+            .filter(|t| (0.0..=1.0).contains(t));
+
         let embeddings = self
             .embedder
             .embed(&[query])
@@ -175,10 +209,15 @@ impl ToolHandler for SearchKnowledgeHandler {
             .next()
             .ok_or("Embedding returned empty result")?;
 
-        let mut results = self
-            .store
-            .search(&query_embedding, top_k)
-            .map_err(|e| format!("Search failed: {}", e))?;
+        let mut results = if hybrid {
+            self.store
+                .search_hybrid(&query_embedding, query, top_k, threshold)
+                .map_err(|e| format!("Search failed: {}", e))?
+        } else {
+            self.store
+                .search_with_threshold(&query_embedding, top_k, threshold)
+                .map_err(|e| format!("Search failed: {}", e))?
+        };
 
         // Apply optional file type filter post-search.
         if let Some(filter) = args.get("filter_file_type").and_then(|f| f.as_array()) {
@@ -194,6 +233,28 @@ impl ToolHandler for SearchKnowledgeHandler {
                         .map(|e| filters.contains(&e.to_lowercase()))
                         .unwrap_or(false)
                 });
+            }
+        }
+
+        // Optional cross-encoder reranking.
+        let rerank = args["rerank"].as_bool()
+            .unwrap_or(self.config.reranker_enabled);
+        if rerank {
+            if let Some(reranker) = &self.reranker {
+                let passages: Vec<&str> = results.iter().map(|r| r.content.as_str()).collect();
+                match reranker.rerank(query, &passages).await {
+                    Ok(scores) => {
+                        for (result, score) in results.iter_mut().zip(scores) {
+                            result.score = score as f64;
+                        }
+                        results.sort_by(|a, b| {
+                            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "reranking failed, returning unranked results");
+                    }
+                }
             }
         }
 

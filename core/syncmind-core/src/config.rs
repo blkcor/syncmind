@@ -20,6 +20,14 @@ pub struct Config {
     pub embedding_dim: usize,
     pub chunk_size: usize,
     pub chunk_overlap: usize,
+    #[serde(default)]
+    pub hybrid_search_enabled: bool,
+    #[serde(default)]
+    pub relevance_threshold: Option<f64>,
+    #[serde(default)]
+    pub reranker_enabled: bool,
+    #[serde(default)]
+    pub reranker_model_path: Option<String>,
 }
 
 impl Default for Config {
@@ -33,6 +41,10 @@ impl Default for Config {
             embedding_dim: 1024,
             chunk_size: 512,
             chunk_overlap: 50,
+            hybrid_search_enabled: false,
+            relevance_threshold: None,
+            reranker_enabled: false,
+            reranker_model_path: None,
         }
     }
 }
@@ -94,6 +106,10 @@ mod tests {
             embedding_dim: 384,
             chunk_size: 256,
             chunk_overlap: 25,
+            hybrid_search_enabled: true,
+            relevance_threshold: Some(0.75),
+            reranker_enabled: true,
+            reranker_model_path: Some("/tmp/reranker.onnx".to_string()),
         };
 
         let toml_str = toml::to_string_pretty(&original).unwrap();

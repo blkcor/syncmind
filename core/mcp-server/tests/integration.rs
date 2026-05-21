@@ -32,7 +32,8 @@ fn create_test_store() -> Arc<VectorStore> {
 fn create_server() -> McpServer {
     let store = create_test_store();
     let embedder = Arc::new(MockEmbedder { dim: 384 });
-    McpServer::new(store, embedder)
+    let config = Arc::new(syncmind_core::Config::default());
+    McpServer::new(store, embedder, config)
 }
 
 #[tokio::test]
@@ -132,7 +133,8 @@ async fn test_tools_call_search_knowledge_with_results() {
     let embeddings = vec![vec![0.0; 384]];
     store.upsert_file(&meta, &chunks, &embeddings).unwrap();
 
-    let server = McpServer::new(store, embedder);
+    let config = Arc::new(syncmind_core::Config::default());
+    let server = McpServer::new(store, embedder, config);
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
