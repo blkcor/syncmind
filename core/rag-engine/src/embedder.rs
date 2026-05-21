@@ -597,6 +597,66 @@ impl Embedder for AutoEmbedder {
     }
 }
 
+// ─── Swappable Embedder ──────────────────────────────────────────────────────
+
+/// Embedder whose backend can be replaced at runtime.
+///
+/// The desktop daemon installs a fast placeholder backend at startup so its
+/// Tauri `setup` hook never blocks on the network, then spawns a background
+/// task that swaps in a real `AutoEmbedder` once initialization
+/// (Ollama probe + ONNX model download) completes. Consumers continue to
+/// hold the same `Arc<dyn Embedder>` and are unaware of the swap.
+pub struct SwappableEmbedder {
+    inner: std::sync::RwLock<std::sync::Arc<dyn Embedder>>,
+    embedding_dim: usize,
+}
+
+impl SwappableEmbedder {
+    pub fn new(initial: std::sync::Arc<dyn Embedder>) -> Self {
+        let embedding_dim = initial.embedding_dim();
+        Self {
+            inner: std::sync::RwLock::new(initial),
+            embedding_dim,
+        }
+    }
+
+    /// Replace the active backend. The new backend must report the same
+    /// `embedding_dim` as the one used to construct this `SwappableEmbedder`,
+    /// otherwise downstream vector store writes would corrupt the index.
+    pub fn swap(&self, new_backend: std::sync::Arc<dyn Embedder>) {
+        debug_assert_eq!(
+            new_backend.embedding_dim(),
+            self.embedding_dim,
+            "swapped backend must preserve embedding_dim"
+        );
+        let mut guard = self
+            .inner
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *guard = new_backend;
+    }
+}
+
+#[async_trait]
+impl Embedder for SwappableEmbedder {
+    async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        // Clone the Arc out of the lock so we never hold the read guard
+        // across the `.await` below.
+        let backend = {
+            let guard = self
+                .inner
+                .read()
+                .unwrap_or_else(|poison| poison.into_inner());
+            std::sync::Arc::clone(&*guard)
+        };
+        backend.embed(texts).await
+    }
+
+    fn embedding_dim(&self) -> usize {
+        self.embedding_dim
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -787,7 +847,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires ONNX model file and tokenizer.json at ~/.local/share/syncmind/models/"]
+    #[ignore = "requires ONNX model file and tokenizer.json at <data-dir>/syncmind/models/ (see core/syncmind-core/src/paths.rs)"]
     async fn test_onnx_embedder_loads() {
         let config = Config {
             embedding_dim: 384,
@@ -799,5 +859,45 @@ mod tests {
         let embeddings = result.unwrap();
         assert_eq!(embeddings.len(), 1);
         assert_eq!(embeddings[0].len(), 384);
+    }
+
+    // SwappableEmbedder: swap()  routes subsequent embed() calls to the new
+    // backend without changing the Arc<dyn Embedder> consumers hold.
+    struct FixedEmbedder {
+        value: f32,
+        dim: usize,
+    }
+
+    #[async_trait]
+    impl Embedder for FixedEmbedder {
+        async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+            Ok(texts.iter().map(|_| vec![self.value; self.dim]).collect())
+        }
+
+        fn embedding_dim(&self) -> usize {
+            self.dim
+        }
+    }
+
+    #[tokio::test]
+    async fn swappable_embedder_routes_to_current_backend() {
+        let initial: std::sync::Arc<dyn Embedder> =
+            std::sync::Arc::new(FixedEmbedder { value: 1.0, dim: 4 });
+        let swappable = std::sync::Arc::new(SwappableEmbedder::new(initial));
+        let as_dyn: std::sync::Arc<dyn Embedder> = std::sync::Arc::clone(&swappable)
+            as std::sync::Arc<dyn Embedder>;
+
+        let before = as_dyn.embed(&["x"]).await.unwrap();
+        assert_eq!(before, vec![vec![1.0; 4]]);
+
+        let replacement: std::sync::Arc<dyn Embedder> =
+            std::sync::Arc::new(FixedEmbedder { value: 2.0, dim: 4 });
+        swappable.swap(replacement);
+
+        // The same Arc<dyn Embedder> a consumer captured earlier must see
+        // the new backend without being re-handed.
+        let after = as_dyn.embed(&["x"]).await.unwrap();
+        assert_eq!(after, vec![vec![2.0; 4]]);
+        assert_eq!(as_dyn.embedding_dim(), 4);
     }
 }

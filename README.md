@@ -54,7 +54,7 @@ syncmind register /absolute/path/to/project/src/main.rs
 syncmind daemon --foreground
 ```
 
-On first run with no Ollama instance, the ONNX fallback model (`bge-small-en-v1.5`, ~130 MB) is auto-downloaded from Hugging Face to `~/.local/share/syncmind/models/`. Subsequent runs reuse the cached files.
+On first run with no Ollama instance, the ONNX fallback model (`bge-small-en-v1.5`, ~130 MB) is auto-downloaded from Hugging Face to `<data-dir>/syncmind/models/`. Subsequent runs reuse the cached files.
 
 ## Connecting Claude Code
 
@@ -68,12 +68,22 @@ Then ask Claude Code something like *"based on my notes, what did I write about 
 
 ## File Locations
 
+Paths below use generic placeholders (`<config-dir>` and `<data-dir>`) because SyncMind resolves them using your OS standard directories. Run `syncmind status` to see the exact paths on your machine.
+
 | Path | Purpose |
 |------|---------|
-| `~/.config/syncmind/config.toml` | User configuration |
-| `~/.local/share/syncmind/syncmind.db` | SQLite + sqlite-vec database |
-| `~/.local/share/syncmind/logs/syncmind.log.<date>` | Rolling daemon logs |
-| `~/.local/share/syncmind/models/` | Cached ONNX model + tokenizer |
+| `<config-dir>/syncmind/config.toml` | User configuration |
+| `<data-dir>/syncmind/syncmind.db` | SQLite + sqlite-vec database |
+| `<data-dir>/syncmind/logs/syncmind.log.<date>` | Rolling daemon logs |
+| `<data-dir>/syncmind/models/` | Cached ONNX model + tokenizer |
+
+**Platform Paths**
+
+| Platform | `<config-dir>` | `<data-dir>` |
+|----------|----------------|--------------|
+| Linux | `~/.config` | `~/.local/share` |
+| macOS | `~/Library/Application Support` | `~/Library/Application Support` |
+| Windows | `%APPDATA%` | `%LOCALAPPDATA%` |
 
 ## Configuration Highlights
 
@@ -84,7 +94,7 @@ Then ask Claude Code something like *"based on my notes, what did I write about 
 | `embedding_dim` | `1024` | Must match the model (`bge-m3` = 1024, `bge-small` = 384) |
 | `mcp_transport` | `stdio` | `stdio` for Claude Code; `sse` for HTTP clients |
 | `log_level` | `info` | `trace` / `debug` / `info` / `warn` / `error` |
-| `log_to_file` | `true` | Whether to write to `~/.local/share/syncmind/logs/` |
+| `log_to_file` | `true` | Whether to write to `<data-dir>/syncmind/logs/` |
 | `log_rotation` | `daily` | `daily` / `hourly` / `never` |
 | `onnx_model_url` | *(default HF URL)* | Override to use an in-country mirror |
 

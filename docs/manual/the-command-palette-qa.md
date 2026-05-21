@@ -56,7 +56,7 @@ Register all of them via **Settings → Add File** before starting timed tests.
 - Either process disappears (unexpected exit).
 
 If memory climbs without a corresponding indexing event, capture
-`~/.local/share/syncmind/logs/desktop.log` from the same window.
+`<data-dir>/syncmind/logs/desktop.log` from the same window.
 
 ---
 
@@ -240,7 +240,7 @@ For each section, record one of:
 - ✅ **pass** — observed all "Pass" criteria; tick the corresponding
   `tasks.md` box.
 - ❌ **fail** — note which fail signature matched and capture the relevant
-  log lines from `~/.local/share/syncmind/logs/desktop.log`. File a
+  log lines from `<data-dir>/syncmind/logs/desktop.log`. File a
   follow-up issue or change rather than silently skipping.
 - ⚠️ **partial** — some sub-scenarios passed but at least one did not.
   Treat as fail until resolved.

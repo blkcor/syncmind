@@ -94,7 +94,11 @@ pub fn get_config(state: State<AppState>) -> ConfigDto {
             syncmind_core::McpTransport::Sse => "sse".into(),
         },
         bind_addr: config.bind_addr.clone(),
-        registered_files: config.registered_files.iter().map(|p| p.to_string_lossy().into()).collect(),
+        registered_files: config
+            .registered_files
+            .iter()
+            .map(|p| p.to_string_lossy().into())
+            .collect(),
         embedding_dim: config.embedding_dim,
         chunk_size: config.chunk_size,
         chunk_overlap: config.chunk_overlap,
@@ -121,7 +125,11 @@ pub fn update_config(patch: ConfigPatchDto, state: State<AppState>) -> ConfigDto
             syncmind_core::McpTransport::Sse => "sse".into(),
         },
         bind_addr: config.bind_addr.clone(),
-        registered_files: config.registered_files.iter().map(|p| p.to_string_lossy().into()).collect(),
+        registered_files: config
+            .registered_files
+            .iter()
+            .map(|p| p.to_string_lossy().into())
+            .collect(),
         embedding_dim: config.embedding_dim,
         chunk_size: config.chunk_size,
         chunk_overlap: config.chunk_overlap,
@@ -135,7 +143,10 @@ pub fn get_indexing_status(state: State<AppState>) -> Result<IndexingStatusDto, 
         .get_stats()
         .map_err(|e| format!("Failed to get stats: {}", e))?;
 
-    let indexing = state.indexing.lock().map_err(|e| format!("indexing state lock poisoned: {}", e))?;
+    let indexing = state
+        .indexing
+        .lock()
+        .map_err(|e| format!("indexing state lock poisoned: {}", e))?;
 
     Ok(IndexingStatusDto {
         file_count,
@@ -189,14 +200,30 @@ pub async fn trigger_reindex(
 
     if let Some(path_str) = file_path {
         let path = std::path::PathBuf::from(path_str);
-        let chunker = syncmind_indexing::chunker_for_path(&path, config.chunk_size, config.chunk_overlap);
-        let result = syncmind_indexing::index_file(&path, &extractor, chunker.as_ref(), embedder.as_ref(), &store).await;
+        let chunker =
+            syncmind_indexing::chunker_for_path(&path, config.chunk_size, config.chunk_overlap);
+        let result = syncmind_indexing::index_file(
+            &path,
+            &extractor,
+            chunker.as_ref(),
+            embedder.as_ref(),
+            &store,
+        )
+        .await;
         on_result(&path, result.as_ref().map(|_| ()));
         result.map_err(|e| format!("Re-index failed: {}", e))?;
     } else {
         for path in &config.registered_files {
-            let chunker = syncmind_indexing::chunker_for_path(path, config.chunk_size, config.chunk_overlap);
-            let result = syncmind_indexing::index_file(path, &extractor, chunker.as_ref(), embedder.as_ref(), &store).await;
+            let chunker =
+                syncmind_indexing::chunker_for_path(path, config.chunk_size, config.chunk_overlap);
+            let result = syncmind_indexing::index_file(
+                path,
+                &extractor,
+                chunker.as_ref(),
+                embedder.as_ref(),
+                &store,
+            )
+            .await;
             if let Err(e) = &result {
                 tracing::warn!(path = %path.display(), error = %e, "full re-index failed for file");
             }
@@ -271,7 +298,9 @@ pub fn reveal_in_finder(path: String) -> Result<(), String> {
 pub fn is_auto_launch_enabled(app: tauri::AppHandle) -> Result<bool, String> {
     use tauri_plugin_autostart::ManagerExt;
     let manager = app.autolaunch();
-    manager.is_enabled().map_err(|e| format!("Failed to query auto-launch: {}", e))
+    manager
+        .is_enabled()
+        .map_err(|e| format!("Failed to query auto-launch: {}", e))
 }
 
 #[tauri::command]
@@ -279,9 +308,13 @@ pub fn set_auto_launch(enabled: bool, app: tauri::AppHandle) -> Result<(), Strin
     use tauri_plugin_autostart::ManagerExt;
     let manager = app.autolaunch();
     if enabled {
-        manager.enable().map_err(|e| format!("Failed to enable auto-launch: {}", e))?;
+        manager
+            .enable()
+            .map_err(|e| format!("Failed to enable auto-launch: {}", e))?;
     } else {
-        manager.disable().map_err(|e| format!("Failed to disable auto-launch: {}", e))?;
+        manager
+            .disable()
+            .map_err(|e| format!("Failed to disable auto-launch: {}", e))?;
     }
     Ok(())
 }
