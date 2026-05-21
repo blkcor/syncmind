@@ -22,7 +22,7 @@ syncmind --help
 ## 2. Initialize config
 
 ```bash
-syncmind status      # creates ~/.config/syncmind/config.toml with defaults
+syncmind status      # creates <config-dir>/syncmind/config.toml with defaults
 ```
 
 If you are using Ollama (recommended), confirm the model:
@@ -31,13 +31,13 @@ If you are using Ollama (recommended), confirm the model:
 ollama pull bge-m3   # default model
 ```
 
-If you are NOT using Ollama, switch to the smaller 384-dim model in `~/.config/syncmind/config.toml`:
+If you are NOT using Ollama, switch to the smaller 384-dim model in `<config-dir>/syncmind/config.toml`:
 
 ```toml
 embedding_dim = 384
 ```
 
-The first daemon launch will auto-download the ONNX model (~130 MB) to `~/.local/share/syncmind/models/`. You can also point at an in-country mirror via:
+The first daemon launch will auto-download the ONNX model (~130 MB) to `<data-dir>/syncmind/models/`. You can also point at an in-country mirror via:
 
 ```toml
 onnx_model_url = "https://your-mirror.example/bge-small/model.onnx"
@@ -70,7 +70,7 @@ INFO syncmind_indexing: indexed file path=/Users/.../notes/research.md
 INFO syncmind_mcp_server::stdio: MCP stdio server ready
 ```
 
-Logs are also written to `~/.local/share/syncmind/logs/syncmind.log.<YYYY-MM-DD>`.
+Logs are also written to `<data-dir>/syncmind/logs/syncmind.log.<YYYY-MM-DD>`.
 
 ## 5. CLI sanity-check the search
 
@@ -124,8 +124,8 @@ syncmind unregister "$HOME/code/myproject/README.md"   # also cleans up if you f
 
 | Symptom | Fix |
 |---------|-----|
-| `Failed to load ONNX model` | Check `~/.local/share/syncmind/models/` — the auto-download may have failed; check `syncmind.log.*` for the HTTP error and either retry or set `onnx_model_url` to a mirror |
+| `Failed to load ONNX model` | Check `<data-dir>/syncmind/models/` — the auto-download may have failed; check `syncmind.log.*` for the HTTP error and either retry or set `onnx_model_url` to a mirror |
 | `Ollama probe returned HTTP 404` | The model name in config doesn't match what `ollama list` shows; either `ollama pull <model>` or change `ollama_model` |
 | `No results found` | Run `syncmind status` — is the file actually indexed? Check the daemon's stderr/log for indexing errors |
 | Claude Code shows "no tool available" | Run `claude mcp list`; confirm syncmind is listed and the binary path is correct |
-| Daemon logs nothing in background mode | Check that `log_to_file = true` and that `~/.local/share/syncmind/logs/` is writable |
+| Daemon logs nothing in background mode | Check that `log_to_file = true` and that `<data-dir>/syncmind/logs/` is writable |

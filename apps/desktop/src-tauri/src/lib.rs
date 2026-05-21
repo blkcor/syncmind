@@ -80,6 +80,27 @@ pub struct AppState {
     pub dialog_open: Mutex<bool>,
 }
 
+struct UnavailableEmbedder {
+    message: String,
+    embedding_dim: usize,
+}
+
+#[async_trait::async_trait]
+impl syncmind_rag_engine::embedder::Embedder for UnavailableEmbedder {
+    async fn embed(
+        &self,
+        _texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, syncmind_rag_engine::error::EmbedError> {
+        Err(syncmind_rag_engine::error::EmbedError::OllamaUnavailable(
+            self.message.clone(),
+        ))
+    }
+
+    fn embedding_dim(&self) -> usize {
+        self.embedding_dim
+    }
+}
+
 /// Set the app as an accessory (menu-bar-only) app on macOS.
 /// Hides the Dock icon and removes the app from Cmd+Tab.
 /// This works at runtime so it also applies in `cargo tauri dev`.
@@ -134,6 +155,16 @@ fn apply_tray_health(tray: &TrayIcon, healthy: bool) {
     let _ = tray.set_icon_as_template(healthy);
 }
 
+fn unavailable_embedder(
+    config: &syncmind_core::Config,
+    message: String,
+) -> Arc<dyn syncmind_rag_engine::embedder::Embedder> {
+    Arc::new(UnavailableEmbedder {
+        message,
+        embedding_dim: config.embedding_dim,
+    })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -180,16 +211,22 @@ pub fn run() {
                 .map_err(|e| e.to_string())?;
             let store = Arc::new(store);
 
-            let embedder = tauri::async_runtime::block_on(async {
-                syncmind_rag_engine::embedder::AutoEmbedder::new(&config)
-                    .await
-                    .context("Failed to create embedder")
-            })
-            .map_err(|e| {
-                error!(error = %e, "embedder creation failed");
-                e.to_string()
-            })?;
-            let embedder: Arc<dyn syncmind_rag_engine::embedder::Embedder> = Arc::new(embedder);
+            // Install a fast placeholder embedder so this `setup` hook never
+            // blocks on the network. A background task spawned at the end of
+            // setup replaces it once `AutoEmbedder::new` (Ollama probe + ONNX
+            // download) completes. AppState and the indexing pipeline see
+            // only `Arc<dyn Embedder>`; the underlying SwappableEmbedder
+            // routes every call to whichever backend is current.
+            let placeholder = unavailable_embedder(
+                &config,
+                "Embedder is initializing…".to_string(),
+            );
+            let swappable = Arc::new(
+                syncmind_rag_engine::embedder::SwappableEmbedder::new(placeholder),
+            );
+            let embedder: Arc<dyn syncmind_rag_engine::embedder::Embedder> =
+                Arc::clone(&swappable)
+                    as Arc<dyn syncmind_rag_engine::embedder::Embedder>;
 
             // Shared indexing status — updated from every indexing path
             // (startup loop, background pipeline, manual re-index).
@@ -226,18 +263,10 @@ pub fn run() {
                 },
             );
 
-            // Index all registered files on startup (using the same callback).
-            let extractor = syncmind_rag_engine::extractor::CompositeExtractor::new();
-            for path in &config.registered_files {
-                let chunker = syncmind_indexing::chunker_for_path(path, config.chunk_size, config.chunk_overlap);
-                let result = tauri::async_runtime::block_on(async {
-                    syncmind_indexing::index_file(path, &extractor, chunker.as_ref(), embedder.as_ref(), &store).await
-                });
-                if let Err(e) = &result {
-                    error!(path = %path.display(), error = %e, "startup indexing failed");
-                }
-                on_index_result(path, result.as_ref().map(|_| ()));
-            }
+            // Note: per-file startup indexing now runs inside the background
+            // embedder-init task spawned below, so it waits until the real
+            // embedder backend is ready instead of pinning this `setup` hook
+            // to the network.
 
             // Start file watcher with 1-second debounce.
             let (file_tx, file_rx) =
@@ -263,6 +292,14 @@ pub fn run() {
                 Some(Arc::clone(&on_index_result)),
             ));
 
+            // Capture clones for the background embedder-init task BEFORE
+            // `app.manage` moves `config` / `store` / `embedder` into AppState.
+            let init_swappable = Arc::clone(&swappable);
+            let init_config = config.clone();
+            let init_store = Arc::clone(&store);
+            let init_on_index_result = Arc::clone(&on_index_result);
+            let init_app_handle = app.handle().clone();
+
             app.manage(AppState {
                 config: Mutex::new(config),
                 store,
@@ -272,6 +309,50 @@ pub fn run() {
                 indexing: Arc::clone(&indexing_state),
                 on_index_result: Arc::clone(&on_index_result),
                 dialog_open: Mutex::new(false),
+            });
+
+            // Real embedder initialization runs in the background so the
+            // `setup` hook returns immediately. When `AutoEmbedder::new`
+            // succeeds the placeholder is swapped out and the per-file
+            // startup indexing runs against the live backend; on failure we
+            // leave a more descriptive UnavailableEmbedder in place so users
+            // see a useful message instead of a hang.
+            tauri::async_runtime::spawn(async move {
+                match syncmind_rag_engine::embedder::AutoEmbedder::new(&init_config).await {
+                    Ok(real) => {
+                        init_swappable.swap(Arc::new(real));
+                        info!("embedder ready; running startup indexing");
+                        let _ = init_app_handle.emit("embedder-ready", ());
+
+                        let extractor = syncmind_rag_engine::extractor::CompositeExtractor::new();
+                        for path in &init_config.registered_files {
+                            let chunker = syncmind_indexing::chunker_for_path(
+                                path,
+                                init_config.chunk_size,
+                                init_config.chunk_overlap,
+                            );
+                            let result = syncmind_indexing::index_file(
+                                path,
+                                &extractor,
+                                chunker.as_ref(),
+                                &*init_swappable,
+                                &init_store,
+                            )
+                            .await;
+                            if let Err(e) = &result {
+                                error!(path = %path.display(), error = %e, "startup indexing failed");
+                            }
+                            init_on_index_result(path, result.as_ref().map(|_| ()));
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "embedder init failed; staying with UnavailableEmbedder");
+                        let message = format!("Embedder unavailable: {}", e);
+                        let new_placeholder = unavailable_embedder(&init_config, message.clone());
+                        init_swappable.swap(new_placeholder);
+                        let _ = init_app_handle.emit("embedder-init-failed", message);
+                    }
+                }
             });
 
             // First-run detection: show window on first launch

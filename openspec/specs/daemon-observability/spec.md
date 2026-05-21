@@ -6,11 +6,11 @@ Provide persistent, rotating log files for the SyncMind daemon so that issues en
 ## Requirements
 
 ### Requirement: Always-on file logging
-The daemon SHALL initialize tracing such that logs are always written to a rolling file under `~/.local/share/syncmind/logs/`, regardless of whether `--foreground` is set.
+The daemon SHALL initialize tracing such that logs are always written to a rolling file under `<data-dir>/syncmind/logs/`, regardless of whether `--foreground` is set.
 
 #### Scenario: Background daemon writes to disk
 - **WHEN** `syncmind daemon` is started without `--foreground`
-- **THEN** a file matching `~/.local/share/syncmind/logs/syncmind.log.<YYYY-MM-DD>` exists after the first log event
+- **THEN** a file matching `<data-dir>/syncmind/logs/syncmind.log.<YYYY-MM-DD>` exists after the first log event
 - **AND** the file contains the daemon's startup messages
 
 #### Scenario: Foreground daemon additionally writes to stderr
@@ -40,7 +40,7 @@ The system SHALL expose `log_level`, `log_to_file`, and `log_rotation` fields in
 - **AND** logs still appear on stderr if `--foreground` is set
 
 ### Requirement: Graceful fallback when log directory is not writable
-The system SHALL not crash when `~/.local/share/syncmind/logs/` cannot be created or written; instead it SHALL fall back to stderr-only logging and emit a single error describing the cause.
+The system SHALL not crash when `<data-dir>/syncmind/logs/` cannot be created or written; instead it SHALL fall back to stderr-only logging and emit a single error describing the cause.
 
 #### Scenario: Read-only log directory
 - **WHEN** the log directory's parent is read-only or otherwise inaccessible

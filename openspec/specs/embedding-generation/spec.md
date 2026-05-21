@@ -6,14 +6,14 @@ Local embedding generation with Ollama primary and ONNX fallback, including firs
 ## Requirements
 
 ### Requirement: ONNX asset auto-download
-When `OnnxEmbedder::from_config` is invoked and the model or tokenizer file is missing from `~/.local/share/syncmind/models/`, the system SHALL download the missing assets from the configured Hugging Face URL (or a user-supplied mirror) before initializing the ONNX session.
+When `OnnxEmbedder::from_config` is invoked and the model or tokenizer file is missing from `<data-dir>/syncmind/models/`, the system SHALL download the missing assets from the configured Hugging Face URL (or a user-supplied mirror) before initializing the ONNX session.
 
 #### Scenario: First-run download from Hugging Face
 - **WHEN** the daemon starts for the first time without Ollama running
 - **AND** neither `bge-small-en-v1.5.onnx` nor `tokenizer.json` exist in the model cache directory
 - **THEN** the system downloads both files from the default Hugging Face URL
 - **AND** the daemon emits `tracing::info!("downloading bge-small-en-v1.5 …")` before each request
-- **AND** files land at `~/.local/share/syncmind/models/bge-small-en-v1.5.onnx` and `~/.local/share/syncmind/models/tokenizer.json`
+- **AND** files land at `<data-dir>/syncmind/models/bge-small-en-v1.5.onnx` and `<data-dir>/syncmind/models/tokenizer.json`
 
 #### Scenario: User-configured mirror takes precedence
 - **WHEN** `config.toml` sets `onnx_model_url` and/or `onnx_tokenizer_url`

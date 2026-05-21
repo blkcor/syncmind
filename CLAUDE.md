@@ -161,9 +161,19 @@ pnpm lint
 
 ### Data & Log Locations
 
-- Database: `~/.local/share/syncmind/syncmind.db`
-- Logs: `~/.local/share/syncmind/logs/`
-- ONNX model cache: `~/.local/share/syncmind/models/`
+SyncMind resolves data and config directories using the `dirs` crate (see `core/syncmind-core/src/paths.rs` and `core/syncmind-core/src/config.rs`). Never hardcode Linux-specific paths like `~/.local/share/syncmind/` in documentation or comments.
+
+| Variable | Resolution | Example (Linux) |
+|----------|------------|-----------------|
+| `<data-dir>` | `dirs::data_local_dir()` + `/syncmind` | `~/.local/share/syncmind` |
+| `<config-dir>` | `dirs::config_dir()` + `/syncmind` | `~/.config/syncmind` |
+
+Platform-specific defaults:
+- **Linux**: `~/.local/share/syncmind/` (data), `~/.config/syncmind/` (config)
+- **macOS**: `~/Library/Application Support/syncmind/` (both data and config)
+- **Windows**: `%LOCALAPPDATA%\syncmind\` (data), `%APPDATA%\syncmind\` (config)
+
+Both directories can be overridden via environment variables: `SYNCMIND_DATA_DIR` and `SYNCMIND_CONFIG_DIR`.
 
 ## MCP Integration Notes
 
