@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "syncmind": {
+      "command": "syncmind",
+      "args": ["daemon", "--foreground"],
+      "env": {
+        "RUST_LOG": "syncmind=info,syncmind_mcp_server=info"
+      }
+    }
+  }
+}

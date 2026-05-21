@@ -43,9 +43,15 @@ fn validate_and_canonicalize(path: &PathBuf) -> anyhow::Result<PathBuf> {
 }
 
 async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
-    if foreground {
-        tracing_subscriber::fmt::init();
-    }
+    let config = syncmind_core::Config::load()?;
+    let log_dir = syncmind_core::log_dir()?;
+    let _log_guard = syncmind_core::init_tracing(
+        &log_dir,
+        &config.log_level,
+        config.log_to_file,
+        config.log_rotation,
+        foreground,
+    );
     info!("Starting SyncMind daemon...");
 
     let config = Arc::new(syncmind_core::Config::load()?);
@@ -130,7 +136,7 @@ async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
     }
 
     // Start file watcher for registered files.
-    let (file_tx, file_rx) = tokio::sync::mpsc::channel::<Vec<PathBuf>>(16);
+    let (file_tx, file_rx) = tokio::sync::mpsc::channel::<Vec<syncmind_file_watcher::FileEvent>>(16);
     let mut file_watcher = syncmind_file_watcher::FileWatcher::new(
         config.registered_files.clone(),
         Duration::from_secs(1),
@@ -235,6 +241,25 @@ async fn main() -> anyhow::Result<()> {
             }
 
             config.save()?;
+
+            // Clean up the index for this file so it stops appearing in
+            // search results immediately, even before the daemon restarts.
+            let db_path = syncmind_core::db_path()?;
+            if db_path.exists() {
+                match syncmind_storage::VectorStore::new(&db_path, config.embedding_dim) {
+                    Ok(store) => match store.delete_file_by_path(&canonical) {
+                        Ok(true) => println!("Removed indexed chunks for: {}", canonical.display()),
+                        Ok(false) => {}
+                        Err(e) => eprintln!(
+                            "warning: failed to clean up index for {}: {}",
+                            canonical.display(),
+                            e
+                        ),
+                    },
+                    Err(e) => eprintln!("warning: could not open store to clean index: {}", e),
+                }
+            }
+
             println!("Unregistered: {}", canonical.display());
         }
         Commands::Status => {

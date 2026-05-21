@@ -10,6 +10,15 @@ pub enum McpTransport {
     Sse,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LogRotation {
+    #[default]
+    Daily,
+    Hourly,
+    Never,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub ollama_url: String,
@@ -84,6 +93,11 @@ impl Config {
     }
 
     pub fn config_path() -> Result<PathBuf> {
+        if let Ok(custom) = std::env::var("SYNCMIND_CONFIG_DIR") {
+            if !custom.is_empty() {
+                return Ok(PathBuf::from(custom).join("config.toml"));
+            }
+        }
         let config_dir = dirs::config_dir()
             .context("Failed to determine system config directory")?;
         Ok(config_dir.join("syncmind").join("config.toml"))
@@ -125,10 +139,31 @@ mod tests {
     }
 
     #[test]
+    fn legacy_config_without_log_fields_uses_defaults() {
+        let legacy = r#"
+ollama_url = "http://localhost:11434"
+ollama_model = "bge-m3"
+mcp_transport = "stdio"
+bind_addr = "127.0.0.1:3000"
+registered_files = []
+embedding_dim = 1024
+chunk_size = 512
+chunk_overlap = 50
+"#;
+        let parsed: Config = toml::from_str(legacy).unwrap();
+        assert_eq!(parsed.log_level, "info");
+        assert!(parsed.log_to_file);
+        assert_eq!(parsed.log_rotation, LogRotation::Daily);
+        assert!(parsed.onnx_model_url.is_none());
+    }
+
+    #[test]
     fn default_config_serialization() {
         let config = Config::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         assert!(toml_str.contains("ollama_url"));
         assert!(toml_str.contains("stdio"));
+        assert!(toml_str.contains("log_level"));
+        assert!(toml_str.contains("log_rotation"));
     }
 }

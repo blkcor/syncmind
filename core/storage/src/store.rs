@@ -396,6 +396,46 @@ impl VectorStore {
             .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
         Ok((file_count, chunk_count))
     }
+
+    /// Delete a file and all its associated chunks and vectors from the store.
+    ///
+    /// Returns `Ok(true)` if a row was deleted, `Ok(false)` if no file with
+    /// the given absolute path existed. The deletion is transactional and
+    /// idempotent.
+    ///
+    /// `vec_chunks` is a sqlite-vec virtual table and does not honor the
+    /// foreign-key cascade on `chunks`, so each linked row must be deleted
+    /// explicitly before the parent rows are removed.
+    pub fn delete_file_by_path(&self, path: &Path) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+
+        let file_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM files WHERE absolute_path = ?",
+                [path.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let Some(file_id) = file_id else {
+            return Ok(false);
+        };
+
+        let chunk_ids: Vec<i64> = tx
+            .prepare("SELECT id FROM chunks WHERE file_id = ?")?
+            .query_map([file_id], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for chunk_id in chunk_ids {
+            tx.execute("DELETE FROM vec_chunks WHERE chunk_id = ?", [chunk_id])?;
+        }
+        tx.execute("DELETE FROM chunks WHERE file_id = ?", [file_id])?;
+        tx.execute("DELETE FROM files WHERE id = ?", [file_id])?;
+
+        tx.commit()?;
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
@@ -473,6 +513,71 @@ mod tests {
 
         assert!(!results.is_empty());
         assert_eq!(results[0].content, "Hello world");
+    }
+
+    fn count_vec_chunks(store: &VectorStore) -> usize {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn store_delete_file_by_path_clears_all_artifacts() {
+        let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let store = VectorStore::new(&db_path, 4).unwrap();
+
+        let meta = FileMeta {
+            absolute_path: PathBuf::from("/tmp/delete_me.md"),
+            file_type: "markdown".to_string(),
+            last_modified: 1,
+            last_indexed: 1,
+        };
+        let chunks = vec![
+            Chunk {
+                chunk_index: 0,
+                start_line: 1,
+                end_line: 2,
+                content: "First".to_string(),
+            },
+            Chunk {
+                chunk_index: 1,
+                start_line: 3,
+                end_line: 4,
+                content: "Second".to_string(),
+            },
+        ];
+        let embeddings = vec![mock_embedding(4, 0.1), mock_embedding(4, 0.2)];
+        store.upsert_file(&meta, &chunks, &embeddings).unwrap();
+
+        let (files_before, chunks_before) = store.get_stats().unwrap();
+        assert_eq!(files_before, 1);
+        assert_eq!(chunks_before, 2);
+        assert_eq!(count_vec_chunks(&store), 2);
+
+        let removed = store
+            .delete_file_by_path(&PathBuf::from("/tmp/delete_me.md"))
+            .unwrap();
+        assert!(removed);
+
+        let (files_after, chunks_after) = store.get_stats().unwrap();
+        assert_eq!(files_after, 0);
+        assert_eq!(chunks_after, 0);
+        assert_eq!(
+            count_vec_chunks(&store),
+            0,
+            "vec_chunks must be cleared (sqlite-vec does not cascade)"
+        );
+    }
+
+    #[test]
+    fn store_delete_file_by_path_idempotent_for_unknown() {
+        let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let store = VectorStore::new(&db_path, 4).unwrap();
+
+        let removed = store
+            .delete_file_by_path(&PathBuf::from("/tmp/never_indexed.md"))
+            .unwrap();
+        assert!(!removed);
     }
 
     #[test]
