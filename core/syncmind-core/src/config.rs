@@ -19,6 +19,15 @@ pub enum LogRotation {
     Never,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrMode {
+    Disabled,
+    #[default]
+    Auto,
+    Force,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub ollama_url: String,
@@ -47,6 +56,14 @@ pub struct Config {
     pub onnx_model_url: Option<String>,
     #[serde(default)]
     pub onnx_tokenizer_url: Option<String>,
+    #[serde(default)]
+    pub ocr_mode: OcrMode,
+    #[serde(default = "default_pdf_text_quality_threshold")]
+    pub pdf_text_quality_threshold: f64,
+    #[serde(default)]
+    pub ocr_binary_path: Option<String>,
+    #[serde(default)]
+    pub pdf_renderer_path: Option<String>,
 }
 
 fn default_log_level() -> String {
@@ -55,6 +72,10 @@ fn default_log_level() -> String {
 
 fn default_log_to_file() -> bool {
     true
+}
+
+fn default_pdf_text_quality_threshold() -> f64 {
+    0.35
 }
 
 impl Default for Config {
@@ -77,6 +98,10 @@ impl Default for Config {
             log_rotation: LogRotation::default(),
             onnx_model_url: None,
             onnx_tokenizer_url: None,
+            ocr_mode: OcrMode::default(),
+            pdf_text_quality_threshold: default_pdf_text_quality_threshold(),
+            ocr_binary_path: None,
+            pdf_renderer_path: None,
         }
     }
 }
@@ -96,6 +121,16 @@ impl Config {
         }
     }
 
+    pub fn validate_ocr_config(&self) -> Result<()> {
+        if !(0.0..=1.0).contains(&self.pdf_text_quality_threshold) {
+            anyhow::bail!(
+                "pdf_text_quality_threshold must be between 0.0 and 1.0, got {}",
+                self.pdf_text_quality_threshold
+            );
+        }
+        Ok(())
+    }
+
     pub fn load() -> Result<Config> {
         let path = Self::config_path()?;
 
@@ -105,6 +140,7 @@ impl Config {
             let mut config: Config = toml::from_str(&contents)
                 .with_context(|| format!("Failed to parse config file at {}", path.display()))?;
             config.normalize_embedding_dim();
+            config.validate_ocr_config()?;
             Ok(config)
         } else {
             let config = Config::default();
@@ -168,6 +204,10 @@ mod tests {
             log_rotation: LogRotation::Hourly,
             onnx_model_url: Some("https://example.test/model.onnx".to_string()),
             onnx_tokenizer_url: Some("https://example.test/tokenizer.json".to_string()),
+            ocr_mode: OcrMode::Force,
+            pdf_text_quality_threshold: 0.5,
+            ocr_binary_path: Some("/usr/local/bin/tesseract".to_string()),
+            pdf_renderer_path: Some("/usr/local/bin/pdftoppm".to_string()),
         };
 
         let toml_str = toml::to_string_pretty(&original).unwrap();
@@ -199,6 +239,8 @@ chunk_overlap = 50
         assert!(parsed.log_to_file);
         assert_eq!(parsed.log_rotation, LogRotation::Daily);
         assert!(parsed.onnx_model_url.is_none());
+        assert_eq!(parsed.ocr_mode, OcrMode::Auto);
+        assert_eq!(parsed.pdf_text_quality_threshold, 0.35);
     }
 
     #[test]
@@ -209,6 +251,8 @@ chunk_overlap = 50
         assert!(toml_str.contains("stdio"));
         assert!(toml_str.contains("log_level"));
         assert!(toml_str.contains("log_rotation"));
+        assert!(toml_str.contains("ocr_mode"));
+        assert!(toml_str.contains("pdf_text_quality_threshold"));
     }
 
     #[test]
@@ -235,5 +279,17 @@ chunk_overlap = 50
         config.normalize_embedding_dim();
 
         assert_eq!(config.embedding_dim, 768);
+    }
+
+    #[test]
+    fn invalid_ocr_threshold_is_rejected() {
+        let config = Config {
+            pdf_text_quality_threshold: 1.5,
+            ..Config::default()
+        };
+
+        let result = config.validate_ocr_config();
+
+        assert!(result.is_err());
     }
 }

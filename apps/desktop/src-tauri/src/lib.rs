@@ -352,7 +352,7 @@ pub fn run() {
                         info!("embedder ready; running startup indexing");
                         let _ = init_app_handle.emit("embedder-ready", ());
 
-                        let extractor = syncmind_rag_engine::extractor::CompositeExtractor::new();
+                        let extractor = syncmind_rag_engine::extractor::CompositeExtractor::from_config(&init_config);
                         for path in &init_config.registered_files {
                             let chunker = syncmind_indexing::chunker_for_path(
                                 path,

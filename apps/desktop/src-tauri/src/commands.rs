@@ -231,7 +231,7 @@ pub async fn trigger_reindex(
     let embedder = Arc::clone(&state.embedder);
     let on_result = Arc::clone(&state.on_index_result);
 
-    let extractor = syncmind_rag_engine::extractor::CompositeExtractor::new();
+    let extractor = syncmind_rag_engine::extractor::CompositeExtractor::from_config(&config);
 
     if let Some(path_str) = file_path {
         let path = std::path::PathBuf::from(path_str);

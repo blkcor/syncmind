@@ -215,4 +215,4 @@ SyncMind Phase 1 的核心目标是构建一个**无头（Headless）的本地�
 2. **Code AST 分块深度:** `tree-sitter` 支持的语言需要各自引入语法库，是否需要在 Phase 1 就支持 10+ 种语言，还是先聚焦 Rust/TypeScript/Python 三种？
 3. ~~**ONNX 模型分发:** `bge-small` 的 ONNX 模型文件（约 50-100MB）是打包进二进制（`include_bytes!` 不推荐，会导致体积过大），还是首次运行时从网络下载到 `<data-dir>/syncmind/models/`？考虑到"纯离线"原则，可能需要用户在联网环境下首次初始化，或者提供手动放置指南。~~ **Resolved (2026-05-20, openspec change `phase1-completion`):** First-run auto-download from Hugging Face (`BAAI/bge-small-en-v1.5`) with `onnx_model_url` / `onnx_tokenizer_url` config overrides for in-country mirrors. Atomic `.part` write + `fs2` lock file protect against concurrent-launch races. Privacy directive satisfied: single configurable endpoint, no telemetry.
 4. **SQLite-Vec 的并发:** sqlite-vec 基于 SQLite，写操作是库级锁。频繁文件变更可能导致写队列堆积，是否需要引入 `tokio::sync::Semaphore` 限制并发写入，或异步批处理队列？
-5. **MCP Stdio + SSE 同时开启:** 配置是否允许同时开启两种传输，还是严格二选一？同时开启会增加架构复杂度（两个 Server 入口），但对高级用户可能更方便。
+5. ~~**MCP Stdio + SSE 同时开启:** 配置是否允许同时开启两种传输，还是严格二选一？同时开启会增加架构复杂度（两个 Server 入口），但对高级用户可能更方便。~~

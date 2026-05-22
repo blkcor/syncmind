@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -320,12 +320,12 @@ fn is_tracked(path: &PathBuf, tracked_paths: &Arc<Mutex<HashSet<PathBuf>>>) -> b
 
 fn replace_tracked_path(
     from: &PathBuf,
-    to: &PathBuf,
+    to: &Path,
     tracked_paths: &Arc<Mutex<HashSet<PathBuf>>>,
 ) {
     let mut tracked = tracked_paths.lock().unwrap();
     tracked.remove(from);
-    tracked.insert(to.clone());
+    tracked.insert(to.to_path_buf());
 }
 
 #[cfg(test)]

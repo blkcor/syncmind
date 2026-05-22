@@ -11,3 +11,7 @@ syncmind-core = { path = "../syncmind-core" }
 syncmind-rag-engine = { path = "../rag-engine" }
 syncmind-storage = { path = "../storage" }
 syncmind-file-watcher = { path = "../file-watcher" }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tempfile = "3"

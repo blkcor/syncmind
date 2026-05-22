@@ -6,6 +6,8 @@ pub enum ExtractError {
     Io(#[from] std::io::Error),
     #[error("PDF extraction failed: {0}")]
     Pdf(String),
+    #[error("OCR extraction unavailable: {0}")]
+    OcrUnavailable(String),
     #[error("Unsupported file type: {0}")]
     Unsupported(String),
 }

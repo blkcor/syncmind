@@ -209,8 +209,20 @@ impl CodeChunker {
         match path.extension().and_then(|e| e.to_str()) {
             Some("rs") => Some("rust"),
             Some("py") => Some("python"),
-            Some("js") | Some("ts") | Some("jsx") | Some("tsx") => Some("javascript"),
+            Some("js") | Some("jsx") => Some("javascript"),
+            Some("ts") => Some("typescript"),
+            Some("tsx") => Some("tsx"),
             Some("go") => Some("go"),
+            Some("java") => Some("java"),
+            Some("c") | Some("h") => Some("c"),
+            Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") | Some("hh") | Some("hxx") => {
+                Some("cpp")
+            }
+            Some("cs") => Some("c_sharp"),
+            Some("rb") => Some("ruby"),
+            Some("php") => Some("php"),
+            Some("swift") => Some("swift"),
+            Some("kt") | Some("kts") => Some("kotlin"),
             _ => None,
         }
     }
@@ -231,11 +243,90 @@ impl CodeChunker {
                 "method_definition",
                 "arrow_function",
             ],
+            "typescript" | "tsx" => &[
+                "function_declaration",
+                "class_declaration",
+                "method_definition",
+                "abstract_method_signature",
+                "interface_declaration",
+                "type_alias_declaration",
+                "enum_declaration",
+                "lexical_declaration",
+            ],
             "go" => &[
                 "function_declaration",
                 "method_declaration",
                 "type_spec",
                 "struct_type",
+            ],
+            "java" => &[
+                "class_declaration",
+                "interface_declaration",
+                "enum_declaration",
+                "constructor_declaration",
+                "method_declaration",
+                "field_declaration",
+            ],
+            "c" => &[
+                "function_definition",
+                "struct_specifier",
+                "union_specifier",
+                "enum_specifier",
+                "declaration",
+            ],
+            "cpp" => &[
+                "function_definition",
+                "class_specifier",
+                "struct_specifier",
+                "union_specifier",
+                "enum_specifier",
+                "namespace_definition",
+                "declaration",
+            ],
+            "c_sharp" => &[
+                "namespace_declaration",
+                "file_scoped_namespace_declaration",
+                "class_declaration",
+                "struct_declaration",
+                "interface_declaration",
+                "enum_declaration",
+                "constructor_declaration",
+                "method_declaration",
+                "property_declaration",
+                "field_declaration",
+            ],
+            "ruby" => &[
+                "module",
+                "class",
+                "method",
+                "singleton_method",
+                "assignment",
+                "call",
+            ],
+            "php" => &[
+                "class_declaration",
+                "interface_declaration",
+                "trait_declaration",
+                "enum_declaration",
+                "function_definition",
+                "method_declaration",
+                "property_declaration",
+            ],
+            "swift" => &[
+                "class_declaration",
+                "struct_declaration",
+                "protocol_declaration",
+                "enum_declaration",
+                "function_declaration",
+                "property_declaration",
+                "extension_declaration",
+            ],
+            "kotlin" => &[
+                "class_declaration",
+                "object_declaration",
+                "function_declaration",
+                "property_declaration",
+                "type_alias",
             ],
             _ => &[],
         }
@@ -247,7 +338,17 @@ impl CodeChunker {
             "rust" => tree_sitter_rust::LANGUAGE.into(),
             "python" => tree_sitter_python::LANGUAGE.into(),
             "javascript" => tree_sitter_javascript::LANGUAGE.into(),
+            "typescript" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
             "go" => tree_sitter_go::LANGUAGE.into(),
+            "java" => tree_sitter_java::LANGUAGE.into(),
+            "c" => tree_sitter_c::LANGUAGE.into(),
+            "cpp" => tree_sitter_cpp::LANGUAGE.into(),
+            "c_sharp" => tree_sitter_c_sharp::LANGUAGE.into(),
+            "ruby" => tree_sitter_ruby::LANGUAGE.into(),
+            "php" => tree_sitter_php::LANGUAGE_PHP.into(),
+            "swift" => tree_sitter_swift::LANGUAGE.into(),
+            "kotlin" => tree_sitter_kotlin_ng::LANGUAGE.into(),
             _ => return Err(ChunkError::Parse(format!("unsupported language: {lang}"))),
         };
         parser
@@ -259,6 +360,12 @@ impl CodeChunker {
             .ok_or_else(|| ChunkError::Parse("tree-sitter parse returned None".to_string()))?;
 
         let root = tree.root_node();
+        if root.has_error() {
+            return Err(ChunkError::Parse(format!(
+                "tree-sitter parse produced errors for language: {lang}"
+            )));
+        }
+
         let types = Self::node_types_for_language(lang);
         let mut nodes: Vec<tree_sitter::Node> = Vec::new();
         Self::collect_nodes(root, types, &mut nodes);
@@ -297,7 +404,7 @@ impl CodeChunker {
             return;
         }
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
+            if let Some(child) = node.child(i as u32) {
                 Self::collect_nodes(child, types, out);
             }
         }
@@ -474,6 +581,7 @@ impl Chunker for CodeChunker {
         let fallback = || FallbackChunker::new(self.chunk_size, self.chunk_overlap).chunk(text, path);
 
         let Some(lang) = Self::language_from_extension(path) else {
+            tracing::warn!(path = %path.display(), "unsupported code language, falling back");
             return fallback();
         };
 
@@ -481,7 +589,7 @@ impl Chunker for CodeChunker {
             Ok(c) if !c.is_empty() => c,
             Ok(_) => return fallback(),
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "tree-sitter parse failed, falling back");
+                tracing::warn!(path = %path.display(), language = lang, error = %e, "tree-sitter parse failed, falling back");
                 return fallback();
             }
         };
@@ -699,6 +807,256 @@ func Bar(x string) string {
         for (i, c) in chunks.iter().enumerate() {
             assert_eq!(c.chunk_index, i);
             assert!(c.start_line >= 1);
+        }
+    }
+
+    #[test]
+    fn test_code_chunker_added_languages_use_language_boundaries() {
+        let cases = [
+            (
+                "Example.java",
+                r#"
+public class Example {
+    private int value;
+
+    public Example(int value) {
+        this.value = value;
+    }
+
+    public int value() {
+        return value;
+    }
+}
+
+interface Named {
+    String name();
+}
+"#,
+                &["class Example", "value()"][..],
+                2,
+            ),
+            (
+                "example.c",
+                r#"
+struct Point {
+    int x;
+    int y;
+};
+
+int add(int a, int b) {
+    return a + b;
+}
+"#,
+                &["struct Point", "add(int"][..],
+                2,
+            ),
+            (
+                "example.cpp",
+                r#"
+namespace math {
+class Calculator {
+public:
+    int add(int a, int b) {
+        return a + b;
+    }
+};
+}
+
+int free_value() {
+    return 1;
+}
+"#,
+                &["namespace math", "free_value"][..],
+                2,
+            ),
+            (
+                "Example.cs",
+                r#"
+namespace Demo;
+
+public class Example {
+    public int Value { get; }
+
+    public Example(int value) {
+        Value = value;
+    }
+}
+
+public interface Named {
+    string Name { get; }
+}
+"#,
+                &["class Example", "Value"][..],
+                2,
+            ),
+            (
+                "example.rb",
+                r#"
+module Demo
+  class Example
+    def value
+      42
+    end
+  end
+end
+
+def outside
+  1
+end
+"#,
+                &["module Demo", "def outside"][..],
+                2,
+            ),
+            (
+                "example.php",
+                r#"
+<?php
+class Example {
+    public function value() {
+        return 42;
+    }
+}
+
+function outside() {
+    return 1;
+}
+"#,
+                &["class Example", "function outside"][..],
+                2,
+            ),
+            (
+                "Example.swift",
+                r#"
+struct Example {
+    let value: Int
+
+    func doubled() -> Int {
+        value * 2
+    }
+}
+
+func outside() -> Int {
+    1
+}
+"#,
+                &["struct Example", "func outside"][..],
+                2,
+            ),
+            (
+                "Example.kt",
+                r#"
+class Example(private val value: Int) {
+    fun doubled(): Int {
+        return value * 2
+    }
+}
+
+fun outside(): Int {
+    return 1
+}
+"#,
+                &["class Example", "fun outside"][..],
+                2,
+            ),
+        ];
+
+        let chunker = CodeChunker::new(1_000, 0);
+
+        for (path, code, expected_fragments, expected_min_chunks) in cases {
+            let chunks = chunker.chunk(code, Path::new(path));
+            assert!(
+                chunks.len() >= expected_min_chunks,
+                "expected at least {expected_min_chunks} language-aware chunks for {path}, got {chunks:#?}"
+            );
+            for fragment in expected_fragments {
+                assert!(
+                    chunks.iter().any(|c| c.content.contains(fragment)),
+                    "expected {path} chunks to contain `{fragment}`, got {chunks:#?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_code_chunker_added_extension_aliases() {
+        let cases = [
+            ("header.h", "int header_value(void) {\n    return 1;\n}\n", "header_value"),
+            ("source.cc", "int cc_value() {\n    return 1;\n}\n", "cc_value"),
+            ("source.cxx", "int cxx_value() {\n    return 1;\n}\n", "cxx_value"),
+            ("header.hpp", "class HeaderValue {\npublic:\n    int get() { return 1; }\n};\n", "HeaderValue"),
+            ("header.hh", "class HhValue {\npublic:\n    int get() { return 1; }\n};\n", "HhValue"),
+            ("header.hxx", "class HxxValue {\npublic:\n    int get() { return 1; }\n};\n", "HxxValue"),
+            ("script.kts", "fun scriptValue(): Int {\n    return 1\n}\n", "scriptValue"),
+        ];
+
+        let chunker = CodeChunker::new(1_000, 0);
+
+        for (path, code, expected) in cases {
+            let chunks = chunker.chunk(code, Path::new(path));
+            assert!(
+                chunks.iter().any(|c| c.content.contains(expected)),
+                "expected {path} to use a parser chunk containing `{expected}`, got {chunks:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_existing_code_languages_still_use_language_boundaries() {
+        let cases = [
+            ("test.rs", "fn first() {}\n\nfn second() {}\n", &["first", "second"][..]),
+            (
+                "test.py",
+                "def first():\n    return 1\n\nclass Second:\n    pass\n",
+                &["def first", "class Second"][..],
+            ),
+            (
+                "test.js",
+                "function first() {}\n\nclass Second {}\n",
+                &["function first", "class Second"][..],
+            ),
+            (
+                "test.ts",
+                "function first(): number { return 1; }\n\nclass Second {}\n",
+                &["function first", "class Second"][..],
+            ),
+            (
+                "test.go",
+                "package main\n\nfunc First() int { return 1 }\n\nfunc Second() int { return 2 }\n",
+                &["func First", "func Second"][..],
+            ),
+        ];
+
+        let chunker = CodeChunker::new(1_000, 0);
+
+        for (path, code, expected_fragments) in cases {
+            let lang = CodeChunker::language_from_extension(Path::new(path))
+                .unwrap_or_else(|| panic!("expected language mapping for {path}"));
+            let parser_chunks = CodeChunker::parse_with_tree_sitter(code, lang)
+                .unwrap_or_else(|e| panic!("expected parser chunks for {path}: {e}"));
+            assert!(
+                !parser_chunks.is_empty(),
+                "expected parser chunks for {path}"
+            );
+            let chunks = chunker.chunk(code, Path::new(path));
+            for fragment in expected_fragments {
+                assert!(
+                    chunks.iter().any(|c| c.content.contains(fragment)),
+                    "expected {path} chunks to contain `{fragment}`, got {chunks:#?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_supported_language_without_boundaries_falls_back_per_file() {
+        let text = "not valid rust declarations\nbut still index this file";
+        let chunker = CodeChunker::new(20, 2);
+        let chunks = chunker.chunk(text, Path::new("broken.rs"));
+        let fb = FallbackChunker::new(20, 2);
+        let fb_chunks = fb.chunk(text, Path::new("broken.rs"));
+        assert_eq!(chunks.len(), fb_chunks.len());
+        for (a, b) in chunks.iter().zip(fb_chunks.iter()) {
+            assert_eq!(a.content, b.content);
         }
     }
 
