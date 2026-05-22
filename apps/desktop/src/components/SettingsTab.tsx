@@ -6,6 +6,7 @@ import type { ConfigPatch } from '@syncmind/types';
 
 export default function SettingsTab() {
   const [urlError, setUrlError] = createSignal('');
+  const [rebuildError, setRebuildError] = createSignal('');
   const [autoLaunch, setAutoLaunch] = createSignal(false);
   const [modelCustom, setModelCustom] = createSignal(false);
   let pollTimer: number | null = null;
@@ -63,6 +64,7 @@ export default function SettingsTab() {
     const patch: ConfigPatch = {
       ollama_url: store.config.ollama_url,
       ollama_model: store.config.ollama_model,
+      embedding_dim: store.config.embedding_dim,
       registered_files: store.config.registered_files,
     };
     try {
@@ -103,10 +105,12 @@ export default function SettingsTab() {
 
   async function rebuildAll() {
     if (!window.confirm('Rebuild index for all registered files?')) return;
+    setRebuildError('');
     try {
-      await invoke('trigger_reindex', { filePath: null });
+      await invoke('trigger_reindex', { file_path: null });
       await loadIndexingStatus();
     } catch (e) {
+      setRebuildError(String(e));
       console.error('Reindex failed', e);
     }
   }
@@ -164,6 +168,11 @@ export default function SettingsTab() {
                   setModelCustom(true);
                 } else {
                   setStore('config', 'ollama_model', val);
+                  if (val === 'bge-m3') {
+                    setStore('config', 'embedding_dim', 1024);
+                  } else if (val === 'bge-small') {
+                    setStore('config', 'embedding_dim', 384);
+                  }
                 }
               }}
             >
@@ -241,6 +250,9 @@ export default function SettingsTab() {
         <button class="action-btn danger-btn" onClick={rebuildAll}>
           Rebuild All
         </button>
+        <Show when={rebuildError()}>
+          <div class="field-error">{rebuildError()}</div>
+        </Show>
       </div>
 
       <div class="settings-section">

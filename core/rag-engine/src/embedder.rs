@@ -335,7 +335,15 @@ impl OnnxEmbedder {
     pub async fn from_config(config: &Config) -> Result<Self, EmbedError> {
         let model_dir = syncmind_core::paths::model_cache_dir()
             .map_err(|e| EmbedError::Onnx(format!("Failed to resolve model cache dir: {}", e)))?;
-        let model_path = model_dir.join("bge-small-en-v1.5").join("model.onnx");
+        let model_url = config
+            .onnx_model_url
+            .as_deref()
+            .unwrap_or(DEFAULT_ONNX_MODEL_URL);
+        let tokenizer_url = config
+            .onnx_tokenizer_url
+            .as_deref()
+            .unwrap_or(DEFAULT_ONNX_TOKENIZER_URL);
+        let (model_path, _) = ensure_onnx_assets(&model_dir, model_url, tokenizer_url).await?;
         Self::new(model_path, config.embedding_dim)
     }
 }
@@ -535,7 +543,18 @@ impl AutoEmbedder {
             });
         }
 
-        tracing::info!("Ollama unavailable, falling back to ONNX embedder");
+        // Current ONNX fallback assets are bge-small-en-v1.5 (384 dim).
+        // Avoid silently falling back from 1024-dim models (for example
+        // bge-m3) to 384-dim ONNX, which would poison the vector pipeline
+        // with dimension mismatch errors.
+        if config.embedding_dim != 384 {
+            return Err(EmbedError::OllamaUnavailable(format!(
+                "Ollama unavailable and ONNX fallback only supports 384-dim embeddings; current model '{}' expects {} dims",
+                config.ollama_model, config.embedding_dim
+            )));
+        }
+
+        tracing::info!("Ollama unavailable, falling back to ONNX embedder (384-dim)");
         let embedder = OnnxEmbedder::from_config(config).await?;
         Ok(Self {
             inner: Box::new(embedder),
@@ -712,9 +731,7 @@ mod tests {
         // Use a non-routable URL so Ollama probe fails. Point ONNX download
         // URLs at a closed local port so the fallback also fails fast — we
         // are only verifying that AutoEmbedder routes to the ONNX branch.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let closed_addr = listener.local_addr().unwrap();
-        drop(listener);
+        let closed_addr = "127.0.0.1:1";
 
         let config = Config {
             ollama_url: "http://192.0.2.0:11434".to_string(), // TEST-NET-1, guaranteed unreachable

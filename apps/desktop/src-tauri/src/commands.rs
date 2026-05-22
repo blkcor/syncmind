@@ -45,6 +45,7 @@ pub struct IndexingErrorDto {
 pub struct ConfigPatchDto {
     pub ollama_url: Option<String>,
     pub ollama_model: Option<String>,
+    pub embedding_dim: Option<usize>,
     pub registered_files: Option<Vec<String>>,
 }
 
@@ -105,18 +106,7 @@ pub fn get_config(state: State<AppState>) -> ConfigDto {
     }
 }
 
-#[tauri::command]
-pub fn update_config(patch: ConfigPatchDto, state: State<AppState>) -> ConfigDto {
-    let mut config = state.config.lock().unwrap();
-    if let Some(url) = patch.ollama_url {
-        config.ollama_url = url;
-    }
-    if let Some(model) = patch.ollama_model {
-        config.ollama_model = model;
-    }
-    if let Some(files) = patch.registered_files {
-        config.registered_files = files.into_iter().map(std::path::PathBuf::from).collect();
-    }
+fn config_to_dto(config: &syncmind_core::Config) -> ConfigDto {
     ConfigDto {
         ollama_url: config.ollama_url.clone(),
         ollama_model: config.ollama_model.clone(),
@@ -134,6 +124,51 @@ pub fn update_config(patch: ConfigPatchDto, state: State<AppState>) -> ConfigDto
         chunk_size: config.chunk_size,
         chunk_overlap: config.chunk_overlap,
     }
+}
+
+pub fn apply_config_patch(config: &mut syncmind_core::Config, patch: ConfigPatchDto) {
+    if let Some(url) = patch.ollama_url {
+        config.ollama_url = url;
+    }
+    if let Some(model) = patch.ollama_model {
+        config.ollama_model = model;
+    }
+    if let Some(embedding_dim) = patch.embedding_dim {
+        config.embedding_dim = embedding_dim;
+    }
+    config.normalize_embedding_dim();
+    if let Some(files) = patch.registered_files {
+        config.registered_files = files.into_iter().map(std::path::PathBuf::from).collect();
+    }
+}
+
+#[tauri::command]
+pub async fn update_config(
+    patch: ConfigPatchDto,
+    state: State<'_, AppState>,
+) -> Result<ConfigDto, String> {
+    let updated = {
+        let mut config = state.config.lock().unwrap();
+        apply_config_patch(&mut config, patch);
+        config
+            .save()
+            .map_err(|e| format!("Failed to save config: {}", e))?;
+        config.clone()
+    };
+
+    if updated.embedding_dim != state.embedder.embedding_dim() {
+        return Err(format!(
+            "Config saved with {}-dim embeddings. Restart SyncMind before rebuilding the index so the vector store opens with the new dimension.",
+            updated.embedding_dim
+        ));
+    }
+
+    state
+        .refresh_embedder(&updated)
+        .await
+        .map_err(|e| format!("Embedder refresh failed: {}", e))?;
+
+    Ok(config_to_dto(&updated))
 }
 
 #[tauri::command]
@@ -323,4 +358,52 @@ pub fn set_auto_launch(enabled: bool, app: tauri::AppHandle) -> Result<(), Strin
 pub fn set_dialog_open(open: bool, state: State<AppState>) {
     let mut guard = state.dialog_open.lock().unwrap();
     *guard = open;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_config_patch_updates_embedding_dim_for_bge_small() {
+        let mut config = syncmind_core::Config {
+            ollama_model: "bge-m3".to_string(),
+            embedding_dim: 1024,
+            ..syncmind_core::Config::default()
+        };
+
+        apply_config_patch(
+            &mut config,
+            ConfigPatchDto {
+                ollama_url: None,
+                ollama_model: Some("bge-small".to_string()),
+                embedding_dim: Some(384),
+                registered_files: None,
+            },
+        );
+
+        assert_eq!(config.ollama_model, "bge-small");
+        assert_eq!(config.embedding_dim, 384);
+    }
+
+    #[test]
+    fn apply_config_patch_normalizes_known_model_even_with_stale_dim() {
+        let mut config = syncmind_core::Config {
+            ollama_model: "bge-m3".to_string(),
+            embedding_dim: 1024,
+            ..syncmind_core::Config::default()
+        };
+
+        apply_config_patch(
+            &mut config,
+            ConfigPatchDto {
+                ollama_url: None,
+                ollama_model: Some("bge-small".to_string()),
+                embedding_dim: Some(1024),
+                registered_files: None,
+            },
+        );
+
+        assert_eq!(config.embedding_dim, 384);
+    }
 }
