@@ -5,25 +5,38 @@ import { store, setStore } from './store';
 import SearchTab from './components/SearchTab';
 import RagLabTab from './components/RagLabTab';
 import SettingsTab from './components/SettingsTab';
+import PinnedTab from './components/PinnedTab';
+import { refreshPinnedList } from './pins';
 
 export default function App() {
   const tabs = [
     { key: 'search' as const, label: 'Search' },
+    { key: 'pinned' as const, label: 'Pinned' },
     { key: 'rag-lab' as const, label: 'RAG Lab' },
     { key: 'settings' as const, label: 'Settings' },
   ];
 
   onMount(() => {
+    // Hydrate the pinned set once on startup so search results can show
+    // the correct icon state without waiting for the user to open the tab.
+    refreshPinnedList();
+
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' || (e.metaKey && e.key === 'w')) {
         e.preventDefault();
         getCurrentWindow().hide();
+        return;
+      }
+      // Cmd+Shift+P opens the Pinned tab from anywhere in the palette.
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        setStore('activeTab', 'pinned');
       }
     };
     window.addEventListener('keydown', onKeyDown);
 
     let unlistenNavigate: UnlistenFn | undefined;
-    listen<'search' | 'rag-lab' | 'settings'>('tray-navigate', (event) => {
+    listen<'search' | 'rag-lab' | 'settings' | 'pinned'>('tray-navigate', (event) => {
       setStore('activeTab', event.payload);
     }).then((unlisten) => {
       unlistenNavigate = unlisten;
@@ -52,6 +65,7 @@ export default function App() {
       </nav>
       <main class="main">
         {store.activeTab === 'search' && <SearchTab />}
+        {store.activeTab === 'pinned' && <PinnedTab />}
         {store.activeTab === 'rag-lab' && <RagLabTab />}
         {store.activeTab === 'settings' && <SettingsTab />}
       </main>

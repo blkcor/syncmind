@@ -37,3 +37,9 @@ export interface ConfigPatch {
   embedding_dim?: number;
   registered_files?: string[];
 }
+
+// A glob pattern accepted by `validate_file_filter` and
+// `search_knowledge#filter_file_type`. Patterns without glob metacharacters
+// (`*`, `?`, `[`, `{`) are treated as bare extensions and rewritten to
+// `**/*.<pattern>` by the backend.
+export type GlobPattern = string;

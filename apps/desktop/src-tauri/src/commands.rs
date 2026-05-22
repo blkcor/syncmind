@@ -53,6 +53,7 @@ pub struct ConfigPatchDto {
 pub async fn search_knowledge(
     query: String,
     top_k: Option<usize>,
+    filter_file_type: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<Vec<SearchResultDto>, String> {
     let embedder = Arc::clone(&state.embedder);
@@ -67,9 +68,19 @@ pub async fn search_knowledge(
         return Ok(Vec::new());
     }
 
-    let results = store
-        .search(&embeddings[0], top_k.unwrap_or(5))
-        .map_err(|e| format!("Search failed: {}", e))?;
+    let top_k = top_k.unwrap_or(5);
+    let patterns = filter_file_type.unwrap_or_default();
+    let filter = syncmind_rag_engine::file_filter::parse_file_filter(&patterns)
+        .map_err(|e| format!("Invalid file filter: {}", e))?;
+
+    let results = match filter {
+        Some(f) => store
+            .search_with_path_filter(&embeddings[0], top_k, 5, |path| f.evaluate(path))
+            .map_err(|e| format!("Search failed: {}", e))?,
+        None => store
+            .search(&embeddings[0], top_k)
+            .map_err(|e| format!("Search failed: {}", e))?,
+    };
 
     Ok(results
         .into_iter()
@@ -358,6 +369,57 @@ pub fn set_auto_launch(enabled: bool, app: tauri::AppHandle) -> Result<(), Strin
 pub fn set_dialog_open(open: bool, state: State<AppState>) {
     let mut guard = state.dialog_open.lock().unwrap();
     *guard = open;
+}
+
+fn search_result_to_dto(r: syncmind_storage::SearchResult) -> SearchResultDto {
+    SearchResultDto {
+        chunk_id: r.chunk_id,
+        file_path: r.file_path.to_string_lossy().into_owned(),
+        start_line: r.start_line,
+        end_line: r.end_line,
+        content: r.content,
+        score: r.score,
+    }
+}
+
+#[tauri::command]
+pub fn pin_chunk(chunk_id: i64, state: State<AppState>) -> Result<(), String> {
+    state
+        .store
+        .pin_chunk(chunk_id)
+        .map_err(|e| format!("Pin failed: {}", e))
+}
+
+#[tauri::command]
+pub fn unpin_chunk(chunk_id: i64, state: State<AppState>) -> Result<(), String> {
+    state
+        .store
+        .unpin_chunk(chunk_id)
+        .map_err(|e| format!("Unpin failed: {}", e))
+}
+
+#[tauri::command]
+pub fn is_chunk_pinned(chunk_id: i64, state: State<AppState>) -> Result<bool, String> {
+    state
+        .store
+        .is_chunk_pinned(chunk_id)
+        .map_err(|e| format!("Pin lookup failed: {}", e))
+}
+
+#[tauri::command]
+pub fn list_pinned_chunks(state: State<AppState>) -> Result<Vec<SearchResultDto>, String> {
+    let rows = state
+        .store
+        .list_pinned_chunks()
+        .map_err(|e| format!("List pinned chunks failed: {}", e))?;
+    Ok(rows.into_iter().map(search_result_to_dto).collect())
+}
+
+#[tauri::command]
+pub fn validate_file_filter(patterns: Vec<String>) -> Result<(), String> {
+    syncmind_rag_engine::file_filter::parse_file_filter(&patterns)
+        .map(|_| ())
+        .map_err(|e| format!("{}", e))
 }
 
 #[cfg(test)]

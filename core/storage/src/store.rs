@@ -1,7 +1,7 @@
 use crate::error::StorageError;
 use crate::models::{Chunk, FileMeta, SearchResult};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use zerocopy::IntoBytes;
@@ -77,7 +77,14 @@ impl VectorStore {
                 start_line INTEGER NOT NULL,
                 end_line INTEGER NOT NULL,
                 content TEXT NOT NULL
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS pinned_chunks (
+                chunk_id INTEGER PRIMARY KEY,
+                pinned_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_pinned_chunks_pinned_at
+                ON pinned_chunks(pinned_at DESC);",
         )?;
 
         let vec_table_sql = format!(
@@ -237,6 +244,32 @@ impl VectorStore {
         // dot_product = 1 - L2^2/2
         let sim = 1.0 - (distance * distance) / 2.0;
         sim.clamp(0.0, 1.0)
+    }
+
+    /// Like `search`, but applies a path predicate to the candidate set before
+    /// truncating to `top_k`. The vector search is over-fetched by a factor of
+    /// `overfetch` to leave room for filtered-out rows; if every result is
+    /// filtered out, the returned vector is empty.
+    ///
+    /// The path predicate receives the absolute path of each candidate chunk's
+    /// source file. Returning `true` keeps the candidate.
+    pub fn search_with_path_filter<F>(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        overfetch: usize,
+        keep: F,
+    ) -> Result<Vec<SearchResult>, StorageError>
+    where
+        F: Fn(&Path) -> bool,
+    {
+        let target = top_k.saturating_mul(overfetch.max(1));
+        let raw = self.search(query_embedding, target)?;
+        Ok(raw
+            .into_iter()
+            .filter(|r| keep(&r.file_path))
+            .take(top_k)
+            .collect())
     }
 
     pub fn search_with_threshold(
@@ -436,6 +469,98 @@ impl VectorStore {
 
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Pin a chunk so it persists in the user's quick-access list.
+    ///
+    /// Idempotent: pinning an already-pinned chunk succeeds without modifying
+    /// `pinned_at`. Returns `Ok(())` even if the chunk row does not exist; the
+    /// foreign-key cascade will surface as a different error path when the
+    /// chunk is missing, depending on whether `PRAGMA foreign_keys` is on.
+    pub fn pin_chunk(&self, chunk_id: i64) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO pinned_chunks (chunk_id) VALUES (?)",
+            [chunk_id],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a pin. Idempotent: unpinning a non-pinned chunk succeeds.
+    pub fn unpin_chunk(&self, chunk_id: i64) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM pinned_chunks WHERE chunk_id = ?",
+            [chunk_id],
+        )?;
+        Ok(())
+    }
+
+    /// Return `true` if the given chunk is currently pinned.
+    pub fn is_chunk_pinned(&self, chunk_id: i64) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pinned_chunks WHERE chunk_id = ?",
+            [chunk_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Bulk lookup: given a slice of chunk ids, return the subset that is
+    /// currently pinned. Used by the result-row renderer so the palette does
+    /// not issue N round-trips per page render.
+    pub fn pinned_set(&self, chunk_ids: &[i64]) -> Result<HashSet<i64>, StorageError> {
+        if chunk_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let placeholders = std::iter::repeat_n("?", chunk_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT chunk_id FROM pinned_chunks WHERE chunk_id IN ({})",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params_iter: Vec<&dyn rusqlite::ToSql> =
+            chunk_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params_iter.as_slice(), |row| row.get::<_, i64>(0))?;
+        rows.collect::<Result<HashSet<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    /// List every currently-pinned chunk as a `SearchResult`, ordered by
+    /// `pinned_at` descending (most recently pinned first). Score is set to a
+    /// synthetic `1.0` since pinned items bypass vector ranking.
+    pub fn list_pinned_chunks(&self) -> Result<Vec<SearchResult>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT
+                c.id,
+                c.start_line,
+                c.end_line,
+                c.content,
+                f.absolute_path
+             FROM pinned_chunks p
+             JOIN chunks c ON p.chunk_id = c.id
+             JOIN files f ON c.file_id = f.id
+             ORDER BY p.pinned_at DESC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(SearchResult {
+                chunk_id: row.get(0)?,
+                start_line: row.get(1)?,
+                end_line: row.get(2)?,
+                content: row.get(3)?,
+                file_path: PathBuf::from(row.get::<_, String>(4)?),
+                score: 1.0,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
     }
 }
 
@@ -698,5 +823,201 @@ mod tests {
         );
         // The BM25 arm should boost "Hello world" to the top.
         assert_eq!(results[0].content, "Hello world");
+    }
+
+    // ---- Pin / unpin tests ----
+
+    /// Seed two chunks and return (store, [chunk_id_a, chunk_id_b], _tmp).
+    /// The `TempDir` must stay in scope for the duration of the test, otherwise
+    /// the underlying SQLite file is unlinked and subsequent writes fail with
+    /// "attempt to write a readonly database".
+    fn seed_two_chunks() -> (VectorStore, Vec<i64>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("syncmind.db");
+        let store = VectorStore::new(&db_path, 4).unwrap();
+
+        let meta = FileMeta {
+            absolute_path: PathBuf::from("/tmp/pin_test.md"),
+            file_type: "markdown".to_string(),
+            last_modified: 1,
+            last_indexed: 1,
+        };
+        let chunks = vec![
+            Chunk {
+                chunk_index: 0,
+                start_line: 1,
+                end_line: 2,
+                content: "First".to_string(),
+            },
+            Chunk {
+                chunk_index: 1,
+                start_line: 3,
+                end_line: 4,
+                content: "Second".to_string(),
+            },
+        ];
+        let embeddings = vec![mock_embedding(4, 0.1), mock_embedding(4, 0.2)];
+        store.upsert_file(&meta, &chunks, &embeddings).unwrap();
+
+        let ids: Vec<i64> = {
+            let conn = store.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id FROM chunks ORDER BY id ASC").unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<Vec<i64>, _>>()
+                .unwrap()
+        };
+        assert_eq!(ids.len(), 2, "fixture must produce exactly two chunk rows");
+        (store, ids, tmp)
+    }
+
+    #[test]
+    fn pin_chunk_is_idempotent() {
+        let (store, ids, _tmp) = seed_two_chunks();
+
+        store.pin_chunk(ids[0]).unwrap();
+        // First pinned_at snapshot
+        let first_ts: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT pinned_at FROM pinned_chunks WHERE chunk_id = ?",
+                [ids[0]],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        // Second pin: must succeed and leave pinned_at unchanged.
+        store.pin_chunk(ids[0]).unwrap();
+        let second_ts: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT pinned_at FROM pinned_chunks WHERE chunk_id = ?",
+                [ids[0]],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            first_ts, second_ts,
+            "repeated pin must not mutate pinned_at"
+        );
+
+        assert!(store.is_chunk_pinned(ids[0]).unwrap());
+        assert!(!store.is_chunk_pinned(ids[1]).unwrap());
+    }
+
+    #[test]
+    fn unpin_chunk_is_idempotent() {
+        let (store, ids, _tmp) = seed_two_chunks();
+        // Unpin a chunk that was never pinned -> Ok.
+        store.unpin_chunk(ids[0]).unwrap();
+        assert!(!store.is_chunk_pinned(ids[0]).unwrap());
+
+        store.pin_chunk(ids[0]).unwrap();
+        store.unpin_chunk(ids[0]).unwrap();
+        store.unpin_chunk(ids[0]).unwrap(); // double-unpin Ok
+        assert!(!store.is_chunk_pinned(ids[0]).unwrap());
+    }
+
+    #[test]
+    fn pinned_set_returns_intersection() {
+        let (store, ids, _tmp) = seed_two_chunks();
+        store.pin_chunk(ids[1]).unwrap();
+
+        let result = store
+            .pinned_set(&[ids[0], ids[1], 999_999])
+            .unwrap();
+        assert!(!result.contains(&ids[0]));
+        assert!(result.contains(&ids[1]));
+        assert!(!result.contains(&999_999));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn pinned_set_empty_input_returns_empty_set() {
+        let (store, _ids, _tmp) = seed_two_chunks();
+        let result = store.pinned_set(&[]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_pinned_chunks_orders_by_pinned_at_desc() {
+        let (store, ids, _tmp) = seed_two_chunks();
+        store.pin_chunk(ids[0]).unwrap();
+        // Sleep ~1.1s to cross a `strftime('%s','now')` second boundary, so
+        // the two pinned_at values are strictly different and ordering is
+        // unambiguous.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store.pin_chunk(ids[1]).unwrap();
+
+        let listed = store.list_pinned_chunks().unwrap();
+        assert_eq!(listed.len(), 2);
+        // Most recent (ids[1]) first.
+        assert_eq!(listed[0].chunk_id, ids[1]);
+        assert_eq!(listed[1].chunk_id, ids[0]);
+        // Score is the synthetic 1.0 for pinned items.
+        assert!((listed[0].score - 1.0).abs() < f64::EPSILON);
+        assert_eq!(listed[0].file_path, PathBuf::from("/tmp/pin_test.md"));
+        assert_eq!(listed[0].content, "Second");
+    }
+
+    #[test]
+    fn deleting_underlying_file_cascades_pin() {
+        let (store, ids, _tmp) = seed_two_chunks();
+        store.pin_chunk(ids[0]).unwrap();
+        store.pin_chunk(ids[1]).unwrap();
+        assert_eq!(store.list_pinned_chunks().unwrap().len(), 2);
+
+        let removed = store
+            .delete_file_by_path(&PathBuf::from("/tmp/pin_test.md"))
+            .unwrap();
+        assert!(removed);
+
+        let after = store.list_pinned_chunks().unwrap();
+        assert!(
+            after.is_empty(),
+            "deleting parent file must cascade and clear all pins (got {} rows)",
+            after.len()
+        );
+    }
+
+    #[test]
+    fn reindex_via_upsert_cascades_pin() {
+        // Pin a chunk, then re-upsert the same file (replacing all chunks).
+        // The original chunk row is deleted in the upsert transaction, which
+        // must cascade and remove the pin.
+        let (store, ids, _tmp) = seed_two_chunks();
+        store.pin_chunk(ids[0]).unwrap();
+        assert!(store.is_chunk_pinned(ids[0]).unwrap());
+
+        let new_meta = FileMeta {
+            absolute_path: PathBuf::from("/tmp/pin_test.md"),
+            file_type: "markdown".to_string(),
+            last_modified: 2,
+            last_indexed: 2,
+        };
+        let new_chunks = vec![Chunk {
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 3,
+            content: "Rewritten".to_string(),
+        }];
+        let new_embeddings = vec![mock_embedding(4, 0.3)];
+        store
+            .upsert_file(&new_meta, &new_chunks, &new_embeddings)
+            .unwrap();
+
+        assert!(
+            store.list_pinned_chunks().unwrap().is_empty(),
+            "re-indexing must cascade-clear pins on replaced chunks"
+        );
+    }
+
+    #[test]
+    fn schema_init_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("syncmind.db");
+        let _store1 = VectorStore::new(&db_path, 4).unwrap();
+        let _store2 = VectorStore::new(&db_path, 4).unwrap();
     }
 }

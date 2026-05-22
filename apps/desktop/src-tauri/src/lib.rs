@@ -215,6 +215,11 @@ pub fn run() {
             is_auto_launch_enabled,
             set_auto_launch,
             set_dialog_open,
+            pin_chunk,
+            unpin_chunk,
+            is_chunk_pinned,
+            list_pinned_chunks,
+            validate_file_filter,
         ])
         .setup(|app| {
             // Hide from Dock / App Switcher on macOS.

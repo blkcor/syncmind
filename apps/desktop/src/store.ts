@@ -1,9 +1,11 @@
 import { createStore } from 'solid-js/store';
-import type { SearchResult, Config, IndexingStatus } from '@syncmind/types';
+import type { SearchResult, Config, IndexingStatus, GlobPattern } from '@syncmind/types';
 
 export interface RagLabState {
   topK: number;
-  fileTypeFilters: string[];
+  // Each entry is a single glob pattern (e.g. "*.rs", "**/*.md").
+  // Empty list = no filter.
+  fileTypeFilters: GlobPattern[];
 }
 
 export interface AppState {
@@ -14,10 +16,15 @@ export interface AppState {
   config: Config;
   indexingStatus: IndexingStatus;
   ragLab: RagLabState;
-  activeTab: 'search' | 'rag-lab' | 'settings';
+  activeTab: 'search' | 'rag-lab' | 'settings' | 'pinned';
   copiedToast: boolean;
   lastSearchLatencyMs: number | null;
   lastRawResponse: unknown | null;
+  // Set of chunk ids currently pinned. Updated optimistically on toggle,
+  // reverted on backend failure.
+  pinnedIds: Set<number>;
+  // Cached list view for the Pinned tab; refreshed on tab open and after toggles.
+  pinnedList: SearchResult[];
 }
 
 const defaultConfig: Config = {
@@ -53,4 +60,6 @@ export const [store, setStore] = createStore<AppState>({
   copiedToast: false,
   lastSearchLatencyMs: null,
   lastRawResponse: null,
+  pinnedIds: new Set<number>(),
+  pinnedList: [],
 });
