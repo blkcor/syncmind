@@ -125,7 +125,7 @@ async fn run_daemon(foreground: bool) -> anyhow::Result<()> {
     });
 
     // Index all registered files on startup.
-    let startup_extractor = syncmind_rag_engine::extractor::CompositeExtractor::new();
+    let startup_extractor = syncmind_rag_engine::extractor::CompositeExtractor::from_config(&config);
     for path in &config.registered_files {
         let chunker = syncmind_indexing::chunker_for_path(path, config.chunk_size, config.chunk_overlap);
         if let Err(e) = syncmind_indexing::index_file(path, &startup_extractor, chunker.as_ref(), embedder.as_ref(), &store).await {
