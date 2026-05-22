@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use notify::event::{ModifyKind, RenameMode};
@@ -38,8 +39,10 @@ impl FileEvent {
 /// A debounced file watcher that emits batches of classified file events.
 pub struct FileWatcher {
     watcher: RecommendedWatcher,
-    watched_paths: HashSet<PathBuf>,
-    _debounce_handle: tokio::task::JoinHandle<()>,
+    watched_dirs: HashSet<PathBuf>,
+    tracked_paths: Arc<Mutex<HashSet<PathBuf>>>,
+    _debounce_handle: Option<tokio::task::JoinHandle<()>>,
+    _runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl FileWatcher {
@@ -65,14 +68,18 @@ impl FileWatcher {
             Config::default().with_poll_interval(Duration::from_secs(2)),
         )?;
 
+        let tracked_paths = Arc::new(Mutex::new(HashSet::new()));
+        let debounce_tracked_paths = tracked_paths.clone();
         let mut me = Self {
             watcher,
-            watched_paths: HashSet::new(),
-            _debounce_handle: tokio::spawn(async move {}),
+            watched_dirs: HashSet::new(),
+            tracked_paths,
+            _debounce_handle: None,
+            _runtime: None,
         };
         me.add_paths(&paths)?;
 
-        let handle = tokio::spawn(async move {
+        let debounce_task = async move {
             // Path → latest classified event. A later event for the same path
             // overwrites the earlier one so the final on-disk intent wins.
             let mut pending: HashMap<PathBuf, FileEvent> = HashMap::new();
@@ -83,7 +90,7 @@ impl FileWatcher {
 
                 tokio::select! {
                     Some(event) = event_rx.recv() => {
-                        for classified in classify_event(event).await {
+                        for classified in classify_event(event, &debounce_tracked_paths).await {
                             pending.insert(classified.path().clone(), classified);
                         }
                         debounce_deadline = Some(tokio::time::Instant::now() + debounce_duration);
@@ -117,66 +124,124 @@ impl FileWatcher {
                     else => break,
                 }
             }
-        });
+        };
 
-        me._debounce_handle = handle;
+        let (handle, runtime) = match tokio::runtime::Handle::try_current() {
+            Ok(runtime_handle) => (runtime_handle.spawn(debounce_task), None),
+            Err(_) => {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_name("syncmind-file-watcher")
+                    .build()?;
+                let handle = runtime.spawn(debounce_task);
+                (handle, Some(runtime))
+            }
+        };
+
+        me._debounce_handle = Some(handle);
+        me._runtime = runtime;
         Ok(me)
     }
 
     /// Replace the watched paths with a new set.
     pub fn update_paths(&mut self, paths: &[PathBuf]) -> Result<(), WatcherError> {
-        let new_set: HashSet<PathBuf> = paths.iter().cloned().collect();
+        let new_set: HashSet<PathBuf> = paths.iter().flat_map(tracked_file_paths).collect();
 
-        let to_remove: Vec<PathBuf> = self
-            .watched_paths
-            .difference(&new_set)
-            .cloned()
-            .collect();
-        let to_add: Vec<PathBuf> = new_set
-            .difference(&self.watched_paths)
-            .cloned()
+        let new_dirs: HashSet<PathBuf> = new_set
+            .iter()
+            .filter_map(|path| path.parent().map(PathBuf::from))
             .collect();
 
-        for path in to_remove {
-            debug!(path = %path.display(), "unwatching file");
-            if let Err(e) = self.watcher.unwatch(&path) {
-                warn!(path = %path.display(), error = %e, "failed to unwatch file");
+        let to_remove: Vec<PathBuf> = self.watched_dirs.difference(&new_dirs).cloned().collect();
+        let to_add: Vec<PathBuf> = new_dirs.difference(&self.watched_dirs).cloned().collect();
+
+        for dir in to_remove {
+            debug!(path = %dir.display(), "unwatching directory");
+            if let Err(e) = self.watcher.unwatch(&dir) {
+                warn!(path = %dir.display(), error = %e, "failed to unwatch directory");
             }
-            self.watched_paths.remove(&path);
+            self.watched_dirs.remove(&dir);
         }
 
-        self.add_paths(&to_add)?;
+        for dir in to_add {
+            debug!(path = %dir.display(), "watching directory");
+            self.watcher.watch(&dir, RecursiveMode::NonRecursive)?;
+            self.watched_dirs.insert(dir);
+        }
+
+        *self.tracked_paths.lock().unwrap() = new_set;
         Ok(())
     }
 
     fn add_paths(&mut self, paths: &[PathBuf]) -> Result<(), WatcherError> {
-        for path in paths {
-            if path.is_file() {
-                let canonical = std::fs::canonicalize(path)
-                    .unwrap_or_else(|_| path.clone());
-                debug!(path = %canonical.display(), "watching file");
-                self.watcher.watch(&canonical, RecursiveMode::NonRecursive)?;
-                self.watched_paths.insert(canonical);
-            } else {
-                warn!(path = %path.display(), "skipping non-existent or non-file path");
-            }
+        let files: HashSet<PathBuf> = paths
+            .iter()
+            .filter_map(|path| {
+                let canonical = canonical_file_path(path);
+                if canonical.is_none() {
+                    warn!(path = %path.display(), "skipping non-existent or non-file path");
+                }
+                canonical
+            })
+            .collect();
+
+        let tracked_files: HashSet<PathBuf> = paths.iter().flat_map(tracked_file_paths).collect();
+
+        let dirs: HashSet<PathBuf> = files
+            .iter()
+            .filter_map(|path| path.parent().map(PathBuf::from))
+            .collect();
+
+        let to_add: Vec<PathBuf> = dirs.difference(&self.watched_dirs).cloned().collect();
+        for dir in to_add {
+            debug!(path = %dir.display(), "watching directory");
+            self.watcher.watch(&dir, RecursiveMode::NonRecursive)?;
+            self.watched_dirs.insert(dir);
         }
+
+        self.tracked_paths.lock().unwrap().extend(tracked_files);
         Ok(())
     }
+}
+
+fn tracked_file_paths(path: &PathBuf) -> Vec<PathBuf> {
+    let Some(canonical) = canonical_file_path(path) else {
+        return Vec::new();
+    };
+    if canonical == *path {
+        vec![canonical]
+    } else {
+        vec![path.clone(), canonical]
+    }
+}
+
+fn canonical_file_path(path: &PathBuf) -> Option<PathBuf> {
+    if !path.is_file() {
+        return None;
+    }
+    Some(std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
 }
 
 /// Classify a notify event into one or more `FileEvent` values.
 ///
 /// Removal events keep the (now-missing) path; we cannot canonicalize after
 /// deletion, so the raw event path is forwarded.
-async fn classify_event(event: Event) -> Vec<FileEvent> {
+async fn classify_event(
+    event: Event,
+    tracked_paths: &Arc<Mutex<HashSet<PathBuf>>>,
+) -> Vec<FileEvent> {
     let mut out = Vec::with_capacity(event.paths.len());
 
     match event.kind {
-        EventKind::Create(_) | EventKind::Modify(ModifyKind::Data(_)) | EventKind::Modify(ModifyKind::Metadata(_)) | EventKind::Modify(ModifyKind::Any) => {
+        EventKind::Create(_)
+        | EventKind::Modify(ModifyKind::Data(_))
+        | EventKind::Modify(ModifyKind::Metadata(_))
+        | EventKind::Modify(ModifyKind::Any) => {
             for path in event.paths {
                 let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path);
-                out.push(FileEvent::Upsert(canonical));
+                if is_tracked(&canonical, tracked_paths) {
+                    out.push(FileEvent::Upsert(canonical));
+                }
             }
         }
         EventKind::Modify(ModifyKind::Name(mode)) => {
@@ -184,20 +249,28 @@ async fn classify_event(event: Event) -> Vec<FileEvent> {
             // Linux typically emits Name(From) and Name(To) separately.
             match mode {
                 RenameMode::Both if event.paths.len() == 2 => {
-                    out.push(FileEvent::Remove(event.paths[0].clone()));
+                    let from = event.paths[0].clone();
                     let to = event.paths[1].clone();
-                    let canonical = tokio::fs::canonicalize(&to).await.unwrap_or(to);
-                    out.push(FileEvent::Upsert(canonical));
+                    if is_tracked(&from, tracked_paths) {
+                        out.push(FileEvent::Remove(from.clone()));
+                        let canonical_to = tokio::fs::canonicalize(&to).await.unwrap_or(to);
+                        replace_tracked_path(&from, &canonical_to, tracked_paths);
+                        out.push(FileEvent::Upsert(canonical_to));
+                    }
                 }
                 RenameMode::From => {
                     for path in event.paths {
-                        out.push(FileEvent::Remove(path));
+                        if is_tracked(&path, tracked_paths) {
+                            out.push(FileEvent::Remove(path));
+                        }
                     }
                 }
                 RenameMode::To => {
                     for path in event.paths {
                         let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path);
-                        out.push(FileEvent::Upsert(canonical));
+                        if is_tracked(&canonical, tracked_paths) {
+                            out.push(FileEvent::Upsert(canonical));
+                        }
                     }
                 }
                 _ => {
@@ -206,8 +279,10 @@ async fn classify_event(event: Event) -> Vec<FileEvent> {
                     for path in event.paths {
                         if path.exists() {
                             let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path);
-                            out.push(FileEvent::Upsert(canonical));
-                        } else {
+                            if is_tracked(&canonical, tracked_paths) {
+                                out.push(FileEvent::Upsert(canonical));
+                            }
+                        } else if is_tracked(&path, tracked_paths) {
                             out.push(FileEvent::Remove(path));
                         }
                     }
@@ -218,13 +293,17 @@ async fn classify_event(event: Event) -> Vec<FileEvent> {
             for path in event.paths {
                 if path.exists() {
                     let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path);
-                    out.push(FileEvent::Upsert(canonical));
+                    if is_tracked(&canonical, tracked_paths) {
+                        out.push(FileEvent::Upsert(canonical));
+                    }
                 }
             }
         }
         EventKind::Remove(_) => {
             for path in event.paths {
-                out.push(FileEvent::Remove(path));
+                if is_tracked(&path, tracked_paths) {
+                    out.push(FileEvent::Remove(path));
+                }
             }
         }
         EventKind::Access(_) | EventKind::Any | EventKind::Other => {
@@ -235,116 +314,131 @@ async fn classify_event(event: Event) -> Vec<FileEvent> {
     out
 }
 
+fn is_tracked(path: &PathBuf, tracked_paths: &Arc<Mutex<HashSet<PathBuf>>>) -> bool {
+    tracked_paths.lock().unwrap().contains(path)
+}
+
+fn replace_tracked_path(
+    from: &PathBuf,
+    to: &PathBuf,
+    tracked_paths: &Arc<Mutex<HashSet<PathBuf>>>,
+) {
+    let mut tracked = tracked_paths.lock().unwrap();
+    tracked.remove(from);
+    tracked.insert(to.clone());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tokio::time::{sleep, Duration};
+    use notify::event::{RemoveKind, RenameMode};
+    use tokio::time::Duration;
 
-    #[tokio::test]
-    async fn watcher_emits_debounced_upsert_batch() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_a = dir.path().join("a.txt");
-        let file_b = dir.path().join("b.txt");
-        std::fs::write(&file_a, "hello").unwrap();
-        std::fs::write(&file_b, "world").unwrap();
-
-        let (tx, mut rx) = mpsc::channel(16);
-        let _watcher = FileWatcher::new(
-            vec![file_a.clone(), file_b.clone()],
-            Duration::from_millis(200),
-            tx,
-        )
-        .unwrap();
-
-        sleep(Duration::from_millis(300)).await;
-
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&file_a)
-            .unwrap();
-        writeln!(f, " modified").unwrap();
-        drop(f);
-
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&file_b)
-            .unwrap();
-        writeln!(f, " modified").unwrap();
-        drop(f);
-
-        sleep(Duration::from_secs(3)).await;
-
-        let batch = rx.try_recv().expect("expected a debounced batch");
-        assert!(
-            batch.iter().any(|e| matches!(e, FileEvent::Upsert(_))),
-            "batch should contain at least one Upsert event, got: {:?}",
-            batch
-        );
+    fn tracked_set(paths: &[PathBuf]) -> Arc<Mutex<HashSet<PathBuf>>> {
+        Arc::new(Mutex::new(
+            paths.iter().flat_map(tracked_file_paths).collect(),
+        ))
     }
 
     #[tokio::test]
-    async fn update_paths_changes_watched_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_a = dir.path().join("a.txt");
-        let file_b = dir.path().join("b.txt");
-        std::fs::write(&file_a, "hello").unwrap();
-        std::fs::write(&file_b, "world").unwrap();
-
-        let (tx, mut rx) = mpsc::channel(16);
-        let mut watcher = FileWatcher::new(
-            vec![file_a.clone()],
-            Duration::from_millis(200),
-            tx,
-        )
-        .unwrap();
-
-        sleep(Duration::from_millis(300)).await;
-
-        watcher.update_paths(std::slice::from_ref(&file_b)).unwrap();
-
-        sleep(Duration::from_millis(300)).await;
-
-        std::fs::write(&file_a, "changed a").unwrap();
-        sleep(Duration::from_secs(3)).await;
-        assert!(rx.try_recv().is_err(), "file_a should not trigger after update");
-
-        std::fs::write(&file_b, "changed b").unwrap();
-        sleep(Duration::from_secs(3)).await;
-        let batch = rx.try_recv().expect("expected batch for file_b");
-        let canonical_b = std::fs::canonicalize(&file_b).unwrap_or_else(|_| file_b.clone());
-        assert!(
-            batch.iter().any(|e| matches!(e, FileEvent::Upsert(p) if p == &canonical_b)),
-            "batch should contain Upsert(file_b), got: {:?}",
-            batch
-        );
-    }
-
-    #[tokio::test]
-    async fn watcher_emits_remove_event_on_delete() {
+    async fn classify_remove_keeps_deleted_registered_path() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("doomed.txt");
         std::fs::write(&file, "fleeting").unwrap();
-
-        let (tx, mut rx) = mpsc::channel(16);
-        let _watcher = FileWatcher::new(
-            vec![file.clone()],
-            Duration::from_millis(200),
-            tx,
-        )
-        .unwrap();
-
-        sleep(Duration::from_millis(300)).await;
-
+        let tracked = tracked_set(std::slice::from_ref(&file));
         std::fs::remove_file(&file).unwrap();
 
-        sleep(Duration::from_secs(3)).await;
+        let event = Event::new(EventKind::Remove(RemoveKind::File)).add_path(file.clone());
+        let classified = classify_event(event, &tracked).await;
 
-        let batch = rx.try_recv().expect("expected a debounced batch after delete");
-        assert!(
-            batch.iter().any(|e| matches!(e, FileEvent::Remove(_))),
-            "batch should contain a Remove event, got: {:?}",
-            batch
+        assert_eq!(classified, vec![FileEvent::Remove(file)]);
+    }
+
+    #[tokio::test]
+    async fn classify_rename_both_removes_old_path_and_tracks_new_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("old.txt");
+        let to = dir.path().join("new.txt");
+        std::fs::write(&from, "moving").unwrap();
+        let tracked = tracked_set(std::slice::from_ref(&from));
+        std::fs::rename(&from, &to).unwrap();
+
+        let event = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(from.clone())
+            .add_path(to.clone());
+        let classified = classify_event(event, &tracked).await;
+        let canonical_to = std::fs::canonicalize(&to).unwrap_or(to);
+
+        assert_eq!(
+            classified,
+            vec![
+                FileEvent::Remove(from.clone()),
+                FileEvent::Upsert(canonical_to.clone()),
+            ]
         );
+        assert!(tracked.lock().unwrap().contains(&canonical_to));
+        assert!(!tracked.lock().unwrap().contains(&from));
+    }
+
+    #[tokio::test]
+    async fn classify_upsert_ignores_untracked_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracked = dir.path().join("tracked.txt");
+        let ignored = dir.path().join("ignored.txt");
+        std::fs::write(&tracked, "tracked").unwrap();
+        std::fs::write(&ignored, "ignored").unwrap();
+        let tracked_paths = tracked_set(std::slice::from_ref(&tracked));
+
+        let event = Event::new(EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )))
+        .add_path(tracked.clone())
+        .add_path(ignored);
+        let classified = classify_event(event, &tracked_paths).await;
+        let canonical = std::fs::canonicalize(&tracked).unwrap_or(tracked);
+
+        assert_eq!(classified, vec![FileEvent::Upsert(canonical)]);
+    }
+
+    #[test]
+    fn update_paths_changes_tracked_files_and_watched_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a.txt");
+        let subdir = dir.path().join("nested");
+        std::fs::create_dir(&subdir).unwrap();
+        let file_b = subdir.join("b.txt");
+        std::fs::write(&file_a, "hello").unwrap();
+        std::fs::write(&file_b, "world").unwrap();
+
+        let (tx, _rx) = mpsc::channel(16);
+        let mut watcher =
+            FileWatcher::new(vec![file_a.clone()], Duration::from_millis(200), tx).unwrap();
+
+        let canonical_a = std::fs::canonicalize(&file_a).unwrap_or_else(|_| file_a.clone());
+        let canonical_a_dir = canonical_a.parent().unwrap();
+        assert!(watcher.tracked_paths.lock().unwrap().contains(&canonical_a));
+        assert!(watcher.watched_dirs.contains(canonical_a_dir));
+
+        watcher.update_paths(std::slice::from_ref(&file_b)).unwrap();
+
+        let canonical_b = std::fs::canonicalize(&file_b).unwrap_or_else(|_| file_b.clone());
+        let tracked = watcher.tracked_paths.lock().unwrap();
+        assert!(!tracked.contains(&canonical_a));
+        assert!(tracked.contains(&canonical_b));
+        drop(tracked);
+        assert!(!watcher.watched_dirs.contains(canonical_a_dir));
+        assert!(watcher.watched_dirs.contains(canonical_b.parent().unwrap()));
+    }
+
+    #[test]
+    fn watcher_skips_missing_registered_files_without_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.txt");
+
+        let (tx, _rx) = mpsc::channel(16);
+        let watcher = FileWatcher::new(vec![missing], Duration::from_millis(200), tx).unwrap();
+
+        assert!(watcher.tracked_paths.lock().unwrap().is_empty());
+        assert!(watcher.watched_dirs.is_empty());
     }
 }
