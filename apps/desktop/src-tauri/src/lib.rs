@@ -81,6 +81,21 @@ pub struct AppState {
     pub dialog_open: Mutex<bool>,
 }
 
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod tests {
+    #[test]
+    fn palette_collection_behavior_joins_all_spaces_and_moves_to_active_space() {
+        let can_join_all_spaces = 1u64 << 0;
+        let move_to_active_space = 1u64 << 1;
+
+        assert_eq!(
+            super::palette_collection_behavior(),
+            can_join_all_spaces | move_to_active_space
+        );
+    }
+}
+
 impl AppState {
     pub async fn refresh_embedder(&self, config: &syncmind_core::Config) -> anyhow::Result<()> {
         let real = syncmind_rag_engine::embedder::AutoEmbedder::new(config)
@@ -116,6 +131,7 @@ impl syncmind_rag_engine::embedder::Embedder for UnavailableEmbedder {
 /// Hides the Dock icon and removes the app from Cmd+Tab.
 /// This works at runtime so it also applies in `cargo tauri dev`.
 #[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
 fn set_activation_policy_accessory() {
     use objc::runtime::Object;
     use objc::{msg_send, sel, sel_impl};
@@ -133,6 +149,7 @@ fn set_activation_policy_accessory() {}
 /// Activate the app on macOS so the palette window can steal focus.
 /// Required for LSUIElement (accessory) apps which are not auto-activated.
 #[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
 fn activate_app() {
     use objc::runtime::{Object, YES};
     use objc::{msg_send, sel, sel_impl};
@@ -146,10 +163,50 @@ fn activate_app() {
 #[cfg(not(target_os = "macos"))]
 fn activate_app() {}
 
+#[cfg(target_os = "macos")]
+fn palette_collection_behavior() -> u64 {
+    // NSWindowCollectionBehaviorCanJoinAllSpaces | MoveToActiveSpace
+    (1 << 0) | (1 << 1)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
+fn prepare_palette_window_for_current_space(window: &tauri::WebviewWindow) {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+    unsafe {
+        if let Ok(ns_window) = window.ns_window() {
+            let ns_window = ns_window as *mut Object;
+            let _: () = msg_send![ns_window, setCollectionBehavior: palette_collection_behavior()];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prepare_palette_window_for_current_space(_window: &tauri::WebviewWindow) {}
+
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
+fn order_palette_window_front(window: &tauri::WebviewWindow) {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+    unsafe {
+        if let Ok(ns_window) = window.ns_window() {
+            let ns_window = ns_window as *mut Object;
+            let _: () = msg_send![ns_window, makeKeyAndOrderFront: std::ptr::null::<Object>()];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn order_palette_window_front(_window: &tauri::WebviewWindow) {}
+
 /// Show and focus a window, ensuring the app is activated on macOS.
 fn show_and_focus(window: &tauri::WebviewWindow) {
-    activate_app();
+    prepare_palette_window_for_current_space(window);
     let _ = window.show();
+    order_palette_window_front(window);
+    activate_app();
     let _ = window.set_focus();
 }
 
