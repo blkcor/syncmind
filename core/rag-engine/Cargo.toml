@@ -38,6 +38,7 @@ parking_lot = { workspace = true }
 fs2 = { workspace = true }
 futures-util = "0.3"
 tempfile = "3"
+globset = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }

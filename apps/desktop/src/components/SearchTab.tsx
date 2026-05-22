@@ -1,6 +1,7 @@
 import { createSignal, createEffect, onMount, onCleanup, Show, For } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
 import { store, setStore } from '../store';
+import { togglePin } from '../pins';
 import type { SearchResult } from '@syncmind/types';
 import {
   createHighlighter,
@@ -89,9 +90,11 @@ export default function SearchTab() {
     setStore('loading', true);
     const start = Date.now();
     try {
+      const filters = store.ragLab.fileTypeFilters;
       const results = await invoke<SearchResult[]>('search_knowledge', {
         query,
         topK: store.ragLab.topK,
+        filterFileType: filters.length > 0 ? filters : null,
       });
       setStore('lastSearchLatencyMs', Date.now() - start);
       setStore('lastRawResponse', results as unknown);
@@ -148,6 +151,12 @@ export default function SearchTab() {
       } else {
         copyContent(result.content);
       }
+    } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'p' && !e.shiftKey) {
+      // Cmd+P toggles pin on the selected result. Cmd+Shift+P (Pinned tab)
+      // is handled at the App level and shouldn't fall through here.
+      e.preventDefault();
+      const result = store.results[store.selectedIndex];
+      if (result) togglePin(result.chunk_id);
     }
   }
 
@@ -190,24 +199,38 @@ export default function SearchTab() {
               fallback={<div class="empty-state">No matches found. Try a broader query.</div>}
             >
               <For each={store.results}>
-                {(result, index) => (
-                  <div
-                    class="result-item"
-                    classList={{ selected: index() === store.selectedIndex }}
-                    onClick={() => setStore('selectedIndex', index())}
-                  >
-                    <div class="result-meta">
-                      <span class="result-icon">{fileIcon(result.file_path)}</span>
-                      <span class="result-path" title={result.file_path}>
-                        {truncatePath(result.file_path)}
-                      </span>
-                      <span class="result-score">{(result.score * 100).toFixed(1)}%</span>
+                {(result, index) => {
+                  const isPinned = () => store.pinnedIds.has(result.chunk_id);
+                  return (
+                    <div
+                      class="result-item"
+                      classList={{ selected: index() === store.selectedIndex }}
+                      onClick={() => setStore('selectedIndex', index())}
+                    >
+                      <div class="result-meta">
+                        <span class="result-icon">{fileIcon(result.file_path)}</span>
+                        <span class="result-path" title={result.file_path}>
+                          {truncatePath(result.file_path)}
+                        </span>
+                        <span class="result-score">{(result.score * 100).toFixed(1)}%</span>
+                        <button
+                          class="pin-toggle"
+                          classList={{ pinned: isPinned() }}
+                          title={isPinned() ? 'Unpin (Cmd+P)' : 'Pin (Cmd+P)'}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            togglePin(result.chunk_id);
+                          }}
+                        >
+                          {isPinned() ? '★' : '☆'}
+                        </button>
+                      </div>
+                      <div class="result-preview">
+                        {result.content.slice(0, 120).replace(/\s+/g, ' ')}
+                      </div>
                     </div>
-                    <div class="result-preview">
-                      {result.content.slice(0, 120).replace(/\s+/g, ' ')}
-                    </div>
-                  </div>
-                )}
+                  );
+                }}
               </For>
             </Show>
           </div>

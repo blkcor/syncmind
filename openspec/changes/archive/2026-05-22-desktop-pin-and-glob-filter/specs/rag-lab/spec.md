@@ -1,8 +1,18 @@
-# rag-lab Specification
+## ADDED Requirements
 
-## Purpose
-TBD - created by archiving change the-command-palette. Update Purpose after archive.
-## Requirements
+### Requirement: Glob validation Tauri command
+The system SHALL expose a `validate_file_filter(patterns)` Tauri command that the frontend can call to validate user input without executing a search.
+
+#### Scenario: Valid pattern accepted
+- **WHEN** `validate_file_filter(["*.rs"])` is invoked
+- **THEN** the command SHALL return `Ok(())`
+
+#### Scenario: Invalid pattern rejected
+- **WHEN** `validate_file_filter(["[unclosed"])` is invoked
+- **THEN** the command SHALL return `Err` with a human-readable message describing the invalid pattern
+
+## MODIFIED Requirements
+
 ### Requirement: Parameter tuning controls
 The system SHALL provide a RAG Lab panel where users can adjust search parameters that affect the underlying vector retrieval. The file-type filter SHALL accept glob patterns.
 
@@ -34,38 +44,3 @@ The system SHALL provide a RAG Lab panel where users can adjust search parameter
 - **WHEN** the user clicks the "Reset" button in the RAG Lab panel
 - **THEN** `top_k` returns to 5
 - **AND** all file-filter chips are cleared
-
-### Requirement: Debug telemetry display
-The system SHALL expose real-time telemetry for the last executed search query.
-
-#### Scenario: Query latency shown
-- **WHEN** a search completes
-- **THEN** the panel displays the round-trip query latency in milliseconds
-
-#### Scenario: Result count shown
-- **WHEN** a search completes
-- **THEN** the panel displays the number of results returned
-
-#### Scenario: Embedding model info shown
-- **WHEN** the RAG Lab panel is open
-- **THEN** it displays the active embedding model name (e.g., `bge-m3`) and its vector dimension
-
-### Requirement: Raw JSON inspection
-The system SHALL allow advanced users to inspect the raw backend response.
-
-#### Scenario: Toggle raw JSON view
-- **WHEN** the user clicks "Show Raw JSON" in the RAG Lab panel
-- **THEN** an expandable/collapsible code block appears containing the serialized JSON response from the last `search_knowledge` invocation
-- **AND** the JSON is syntax-highlighted
-
-### Requirement: Glob validation Tauri command
-The system SHALL expose a `validate_file_filter(patterns)` Tauri command that the frontend can call to validate user input without executing a search.
-
-#### Scenario: Valid pattern accepted
-- **WHEN** `validate_file_filter(["*.rs"])` is invoked
-- **THEN** the command SHALL return `Ok(())`
-
-#### Scenario: Invalid pattern rejected
-- **WHEN** `validate_file_filter(["[unclosed"])` is invoked
-- **THEN** the command SHALL return `Err` with a human-readable message describing the invalid pattern
-

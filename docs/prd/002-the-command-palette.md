@@ -79,6 +79,8 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
   - `↑` / `↓` 切换选中项。
   - `Enter` 执行默认操作（复制内容到剪贴板）。
   - `Cmd+Enter` 在系统默认编辑器中打开源文件。
+  - `Cmd+P` 切换当前选中项的 Pin 状态（参见 US-028）。
+- [ ] 每个结果项右侧显示 Pin 图标：未 pin 为空心，已 pin 为实心；点击图标等效于 `Cmd+P`。
 - [ ] 空状态：无结果时显示 "No matches found. Try a broader query."。
 - [ ] 加载状态：搜索过程中显示不可交互的骨架屏或 Spinner。
 
@@ -109,7 +111,10 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
 - [ ] 通过底部 Tab 或侧边图标切换到 "RAG Lab" 面板。
 - [ ] 调参控件：
   - `top_k` 滑块（范围 1–20，默认 5）。
-  - `filter_file_type` 多选框（动态列出当前索引中的所有文件类型）。
+  - `filter_file_type` 升级为 **glob 模式输入**：chip 输入框，每个 chip 是一条 glob（如 `*.rs`、`**/*.md`、`src/**/*.{ts,tsx}`），支持回车确认、点击删除。
+    - 实时校验：非法 glob 高亮为红色并显示错误提示，不会下发到后端。
+    - 提供下拉建议：基于当前索引中实际出现的文件类型生成常用 pattern（如检测到 `.rs` 文件就建议 `*.rs`）。
+    - 留空表示不过滤；多个 chip 之间为 **OR** 关系（匹配任一即命中）。
   - 重置按钮（恢复默认值）。
 - [ ] 调试信息区：
   - 单次查询耗时（ms）。
@@ -155,6 +160,28 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
 - [ ] 点击 Dock 图标时，若面板已隐藏则显示面板；若已显示则聚焦。
 - [ ] `Cmd+Q` 或托盘 Quit 彻底退出应用，释放 Rust 核心资源（关闭 SQLite 连接、停止文件监听）。
 
+### US-028: Pinned Chunks 视图与本地持久化
+
+**Description:** 作为用户，我希望能将常用的搜索结果"钉住"，下次唤醒命令面板时无需再次搜索即可快速访问。
+
+**Acceptance Criteria:**
+
+- [ ] 在 `<data-dir>/syncmind/syncmind.db` 新增表 `pinned_chunks(chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE, pinned_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))`。
+  - 通过 `VectorStore::init_schema` 的 `CREATE TABLE IF NOT EXISTS` 模式创建，向后兼容已有数据库。
+  - 外键级联删除：原 chunk 因文件被移除或重新索引而失效时，对应 pin 自动清理。
+- [ ] 新增 Tauri Commands：
+  - `pin_chunk(chunk_id: i64) -> Result<()>`
+  - `unpin_chunk(chunk_id: i64) -> Result<()>`
+  - `list_pinned_chunks() -> Vec<SearchResult>`（返回结构与 `search_knowledge` 一致，按 `pinned_at` 降序）。
+  - `is_chunk_pinned(chunk_id: i64) -> bool`（用于结果列表渲染 Pin 图标状态）。
+- [ ] 命令面板顶部新增 "Pinned" Tab（或快捷键 `Cmd+Shift+P` 切换）：
+  - 显示所有已 pin 的 chunks，复用 US-023 的结果列表组件。
+  - 空状态显示 "No pinned items yet. Press Cmd+P on a search result to pin it."。
+  - 每项支持 `Cmd+P` 取消 pin、`Enter` 复制、`Cmd+Enter` 打开源文件，与搜索结果操作一致。
+- [ ] 搜索结果列表中，已 pin 的项在视觉上有标记（实心图标 + 轻微背景色高亮）。
+- [ ] Pin 操作必须是幂等的：重复 pin 同一 chunk 不报错，重复 unpin 同样静默通过。
+- [ ] **数据范围：** 本期 Pin 数据仅保存在本地单设备，不跨设备同步；schema 保持极简，未来 Phase 3 引入 The Spine 同步时再迁移。
+
 ## Functional Requirements
 
 - FR-1: 桌面应用必须能够在 Tauri 后端直接初始化并运行 `syncmind-core` 的完整数据管道（文件监听 → 提取 → 分块 → 嵌入 → 存储）。
@@ -165,6 +192,8 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
 - FR-6: 剪贴板操作、文件打开、Finder 定位等敏感系统交互必须在 Rust 后端完成，前端仅发送指令。
 - FR-7: 设置面板中的 "Rebuild All" 操作必须在后台线程执行，不阻塞 UI，且进度通过 Tauri Event 推送到前端。
 - FR-8: 系统托盘必须提供视觉状态指示：核心引擎运行中、索引正在进行、最后索引出错。
+- FR-9: Pin 状态必须持久化到本地 SQLite 数据库，跨应用重启保留；当被 pin 的 chunk 因再次索引产生新 `chunk_id` 时，旧 pin 通过外键级联清理，前端不显示孤儿条目。
+- FR-10: `filter_file_type` 必须接受 glob 模式（基于 Rust `globset` crate 语义），Tauri Command 层负责 glob 校验，非法 pattern 直接返回 `Err`，不进入向量检索路径。
 
 ## Non-Goals
 
@@ -196,12 +225,12 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
 
 - 从按下全局快捷键到搜索框可输入的延迟 < 300ms（冷启动后首次唤醒）。
 - 语义搜索从输入停止到结果渲染的端到端延迟 < 500ms（95th percentile，查询本地 1000 个块以内）。
-- 桌面应用空闲内存占用 < 150MB（Activity Monitor 观察 5 分钟均值）。
+- 桌面应用空闲内存占用 < 150MB（Activity Monitor Z观察 5 分钟均值）。
 - 索引状态仪表盘中，文件变更到块更新在 UI 中反映的延迟 < 5 秒（文件监听 + 重新索引异步完成）。
 
 ## Open Questions
 
-- 是否需要为搜索结果提供 "收藏 / Pin" 功能，以便用户固定常用片段？ 需要提供
-- RAG Lab 面板中的 `filter_file_type` 是否需要支持通配符或正则（如 `*.rs`）？ 需要支持
-- 当用户通过桌面应用修改 `registered_files` 时，是否同时通知外部 MCP 守护进程（如果正在运行）进行配置重载？是否需要文件锁或 IPC 机制？ 需要进行配置重载。需要文件锁和IPC机制。
-- 预览窗格的语法高亮库（`shiki` vs `prismjs`）是否对包体积有显著影响？是否需要懒加载语言定义？ 追求极致体验（选 Shiki + 懒加载）
+- ~~是否需要为搜索结果提供 "收藏 / Pin" 功能，以便用户固定常用片段？~~ **已决策（本地单设备持久化）→ 落地于 US-028、FR-9，由 OpenSpec change `desktop-pin-and-glob-filter` 实施。**
+- ~~RAG Lab 面板中的 `filter_file_type` 是否需要支持通配符或正则（如 `*.rs`）？~~ **已决策（仅 glob，基于 `globset`）→ 落地于 US-025、FR-10，由 OpenSpec change `desktop-pin-and-glob-filter` 实施。**
+- 当用户通过桌面应用修改 `registered_files` 时，是否同时通知外部 MCP 守护进程（如果正在运行）进行配置重载？是否需要文件锁或 IPC 机制？ **方向已定（需要重载 + 需要锁/IPC），具体协议形态待独立 OpenSpec change 设计。**
+- ~~预览窗格的语法高亮库（`shiki` vs `prismjs`）是否对包体积有显著影响？是否需要懒加载语言定义？~~ **已决策：Shiki + 懒加载语言定义。**
