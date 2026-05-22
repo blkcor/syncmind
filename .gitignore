@@ -43,6 +43,9 @@ vendor/
 # Claude harness
 .claude/
 
+# Codex Harness
+.codex
+
 # Logs and databases
 *.log
 *.sqlite
