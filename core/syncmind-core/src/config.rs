@@ -37,6 +37,24 @@ pub struct Config {
     pub reranker_enabled: bool,
     #[serde(default)]
     pub reranker_model_path: Option<String>,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+    #[serde(default = "default_log_to_file")]
+    pub log_to_file: bool,
+    #[serde(default)]
+    pub log_rotation: LogRotation,
+    #[serde(default)]
+    pub onnx_model_url: Option<String>,
+    #[serde(default)]
+    pub onnx_tokenizer_url: Option<String>,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_log_to_file() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -54,6 +72,11 @@ impl Default for Config {
             relevance_threshold: None,
             reranker_enabled: false,
             reranker_model_path: None,
+            log_level: default_log_level(),
+            log_to_file: default_log_to_file(),
+            log_rotation: LogRotation::default(),
+            onnx_model_url: None,
+            onnx_tokenizer_url: None,
         }
     }
 }
@@ -79,12 +102,13 @@ impl Config {
         let path = Self::config_path()?;
 
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory at {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create config directory at {}", parent.display())
+            })?;
         }
 
-        let contents = toml::to_string_pretty(self)
-            .context("Failed to serialize config to TOML")?;
+        let contents =
+            toml::to_string_pretty(self).context("Failed to serialize config to TOML")?;
 
         std::fs::write(&path, contents)
             .with_context(|| format!("Failed to write config file at {}", path.display()))?;
@@ -98,8 +122,8 @@ impl Config {
                 return Ok(PathBuf::from(custom).join("config.toml"));
             }
         }
-        let config_dir = dirs::config_dir()
-            .context("Failed to determine system config directory")?;
+        let config_dir =
+            dirs::config_dir().context("Failed to determine system config directory")?;
         Ok(config_dir.join("syncmind").join("config.toml"))
     }
 }
@@ -124,6 +148,11 @@ mod tests {
             relevance_threshold: Some(0.75),
             reranker_enabled: true,
             reranker_model_path: Some("/tmp/reranker.onnx".to_string()),
+            log_level: "debug".to_string(),
+            log_to_file: false,
+            log_rotation: LogRotation::Hourly,
+            onnx_model_url: Some("https://example.test/model.onnx".to_string()),
+            onnx_tokenizer_url: Some("https://example.test/tokenizer.json".to_string()),
         };
 
         let toml_str = toml::to_string_pretty(&original).unwrap();

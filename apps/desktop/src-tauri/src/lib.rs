@@ -196,7 +196,6 @@ pub fn run() {
                     error!(error = %e, "config load failed");
                     e.to_string()
                 })?;
-
             let db_path = syncmind_core::db_path()
                 .context("Failed to resolve DB path")
                 .map_err(|e| e.to_string())?;
@@ -210,7 +209,6 @@ pub fn run() {
                 .context("Failed to open VectorStore")
                 .map_err(|e| e.to_string())?;
             let store = Arc::new(store);
-
             // Install a fast placeholder embedder so this `setup` hook never
             // blocks on the network. A background task spawned at the end of
             // setup replaces it once `AutoEmbedder::new` (Ollama probe + ONNX
@@ -271,13 +269,11 @@ pub fn run() {
             // Start file watcher with 1-second debounce.
             let (file_tx, file_rx) =
                 mpsc::channel::<Vec<syncmind_file_watcher::FileEvent>>(256);
-            let watcher = tauri::async_runtime::block_on(async {
-                syncmind_file_watcher::FileWatcher::new(
-                    config.registered_files.clone(),
-                    Duration::from_secs(1),
-                    file_tx,
-                )
-            })
+            let watcher = syncmind_file_watcher::FileWatcher::new(
+                config.registered_files.clone(),
+                Duration::from_secs(1),
+                file_tx,
+            )
             .map_err(|e| {
                 error!(error = %e, "file watcher creation failed");
                 e.to_string()
@@ -310,7 +306,6 @@ pub fn run() {
                 on_index_result: Arc::clone(&on_index_result),
                 dialog_open: Mutex::new(false),
             });
-
             // Real embedder initialization runs in the background so the
             // `setup` hook returns immediately. When `AutoEmbedder::new`
             // succeeds the placeholder is swapped out and the per-file
@@ -373,23 +368,6 @@ pub fn run() {
                 .focused(true)
                 .visible(is_first_run)
                 .build()?;
-
-            // Prevent macOS from jumping Spaces when the palette is shown.
-            // CanJoinAllSpaces (1 << 0) lets the window live on every Space;
-            // MoveToActiveSpace (1 << 1) ensures it appears on the current Space
-            // without triggering a Space switch.
-            #[cfg(target_os = "macos")]
-            {
-                use objc::runtime::Object;
-                use objc::{msg_send, sel, sel_impl};
-                unsafe {
-                    if let Ok(ns_window) = window.ns_window() {
-                        let ns_window = ns_window as *mut Object;
-                        let behavior: u64 = (1 << 0) | (1 << 1);
-                        let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
-                    }
-                }
-            }
 
             if is_first_run {
                 let _ = std::fs::File::create(&first_run_marker);
@@ -492,7 +470,6 @@ pub fn run() {
                     })
                     .build(),
             )?;
-
             Ok(())
         })
         .on_window_event(|window, event| match event {
