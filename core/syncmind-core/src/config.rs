@@ -82,14 +82,29 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn expected_embedding_dim_for_model(model: &str) -> Option<usize> {
+        match model.trim().to_ascii_lowercase().as_str() {
+            "bge-m3" => Some(1024),
+            "bge-small" | "bge-small-en-v1.5" => Some(384),
+            _ => None,
+        }
+    }
+
+    pub fn normalize_embedding_dim(&mut self) {
+        if let Some(expected) = Self::expected_embedding_dim_for_model(&self.ollama_model) {
+            self.embedding_dim = expected;
+        }
+    }
+
     pub fn load() -> Result<Config> {
         let path = Self::config_path()?;
 
         if path.exists() {
             let contents = std::fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read config file at {}", path.display()))?;
-            let config: Config = toml::from_str(&contents)
+            let mut config: Config = toml::from_str(&contents)
                 .with_context(|| format!("Failed to parse config file at {}", path.display()))?;
+            config.normalize_embedding_dim();
             Ok(config)
         } else {
             let config = Config::default();
@@ -194,5 +209,31 @@ chunk_overlap = 50
         assert!(toml_str.contains("stdio"));
         assert!(toml_str.contains("log_level"));
         assert!(toml_str.contains("log_rotation"));
+    }
+
+    #[test]
+    fn normalize_embedding_dim_uses_known_model_defaults() {
+        let mut config = Config {
+            ollama_model: "bge-small".to_string(),
+            embedding_dim: 1024,
+            ..Config::default()
+        };
+
+        config.normalize_embedding_dim();
+
+        assert_eq!(config.embedding_dim, 384);
+    }
+
+    #[test]
+    fn normalize_embedding_dim_preserves_custom_model_dim() {
+        let mut config = Config {
+            ollama_model: "custom-embedder".to_string(),
+            embedding_dim: 768,
+            ..Config::default()
+        };
+
+        config.normalize_embedding_dim();
+
+        assert_eq!(config.embedding_dim, 768);
     }
 }

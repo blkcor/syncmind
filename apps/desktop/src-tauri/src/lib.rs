@@ -69,6 +69,7 @@ pub struct AppState {
     pub config: Mutex<syncmind_core::Config>,
     pub store: Arc<syncmind_storage::VectorStore>,
     pub embedder: Arc<dyn syncmind_rag_engine::embedder::Embedder>,
+    pub swappable_embedder: Arc<syncmind_rag_engine::embedder::SwappableEmbedder>,
     pub watcher: Mutex<Option<syncmind_file_watcher::FileWatcher>>,
     pub indexing_handle: Mutex<Option<tauri::async_runtime::JoinHandle<anyhow::Result<()>>>>,
     pub indexing: Arc<Mutex<IndexingState>>,
@@ -78,6 +79,16 @@ pub struct AppState {
     /// When true, the auto-hide on Focused(false) is suppressed so modal
     /// dialogs (file picker, etc.) don't get dismissed on macOS.
     pub dialog_open: Mutex<bool>,
+}
+
+impl AppState {
+    pub async fn refresh_embedder(&self, config: &syncmind_core::Config) -> anyhow::Result<()> {
+        let real = syncmind_rag_engine::embedder::AutoEmbedder::new(config)
+            .await
+            .context("failed to initialize embedder")?;
+        self.swappable_embedder.swap(Arc::new(real));
+        Ok(())
+    }
 }
 
 struct UnavailableEmbedder {
@@ -159,10 +170,30 @@ fn unavailable_embedder(
     config: &syncmind_core::Config,
     message: String,
 ) -> Arc<dyn syncmind_rag_engine::embedder::Embedder> {
+    let embedding_dim = syncmind_core::Config::expected_embedding_dim_for_model(&config.ollama_model)
+        .unwrap_or(config.embedding_dim);
     Arc::new(UnavailableEmbedder {
         message,
-        embedding_dim: config.embedding_dim,
+        embedding_dim,
     })
+}
+
+async fn auto_offline_config(mut config: syncmind_core::Config) -> syncmind_core::Config {
+    config.normalize_embedding_dim();
+    if config.embedding_dim != 384
+        && syncmind_rag_engine::embedder::AutoEmbedder::new(&config)
+            .await
+            .is_err()
+    {
+        config.ollama_model = "bge-small".to_string();
+        config.normalize_embedding_dim();
+        if let Err(e) = config.save() {
+            error!(error = %e, "failed to persist automatic offline embedding config");
+        } else {
+            info!("Ollama unavailable; switched to bge-small ONNX fallback config");
+        }
+    }
+    config
 }
 
 pub fn run() {
@@ -196,6 +227,7 @@ pub fn run() {
                     error!(error = %e, "config load failed");
                     e.to_string()
                 })?;
+            let config = tauri::async_runtime::block_on(auto_offline_config(config));
             let db_path = syncmind_core::db_path()
                 .context("Failed to resolve DB path")
                 .map_err(|e| e.to_string())?;
@@ -300,6 +332,7 @@ pub fn run() {
                 config: Mutex::new(config),
                 store,
                 embedder,
+                swappable_embedder: Arc::clone(&swappable),
                 watcher: Mutex::new(Some(watcher)),
                 indexing_handle: Mutex::new(Some(indexing_handle)),
                 indexing: Arc::clone(&indexing_state),

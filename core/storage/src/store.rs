@@ -214,13 +214,14 @@ impl VectorStore {
         let rows = stmt.query_map(
             params![query_embedding.as_bytes(), top_k as i64, top_k as i64],
             |row| {
+                let distance: f64 = row.get(5)?;
                 Ok(SearchResult {
                     chunk_id: row.get(0)?,
                     start_line: row.get(1)?,
                     end_line: row.get(2)?,
                     content: row.get(3)?,
                     file_path: PathBuf::from(row.get::<_, String>(4)?),
-                    score: row.get(5)?,
+                    score: Self::l2_to_similarity(distance),
                 })
             },
         )?;
@@ -246,7 +247,7 @@ impl VectorStore {
     ) -> Result<Vec<SearchResult>, StorageError> {
         let mut results = self.search(query_embedding, top_k)?;
         if let Some(th) = threshold {
-            results.retain(|r| Self::l2_to_similarity(r.score) >= th);
+            results.retain(|r| r.score >= th);
         }
         Ok(results)
     }
@@ -513,6 +514,15 @@ mod tests {
 
         assert!(!results.is_empty());
         assert_eq!(results[0].content, "Hello world");
+        assert!(
+            (0.0..=1.0).contains(&results[0].score),
+            "search score should be normalized similarity, got {}",
+            results[0].score
+        );
+        assert!(
+            results[0].score >= results[1].score,
+            "closer result should have greater or equal similarity score"
+        );
     }
 
     fn count_vec_chunks(store: &VectorStore) -> usize {

@@ -34,5 +34,6 @@ export interface IndexingError {
 export interface ConfigPatch {
   ollama_url?: string;
   ollama_model?: string;
+  embedding_dim?: number;
   registered_files?: string[];
 }
