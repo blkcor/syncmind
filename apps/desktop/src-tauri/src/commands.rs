@@ -422,6 +422,14 @@ pub fn validate_file_filter(patterns: Vec<String>) -> Result<(), String> {
         .map_err(|e| format!("{}", e))
 }
 
+#[tauri::command]
+pub fn list_indexed_extensions(state: State<AppState>) -> Result<Vec<String>, String> {
+    state
+        .store
+        .list_distinct_extensions()
+        .map_err(|e| format!("List indexed extensions failed: {}", e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

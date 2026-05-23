@@ -629,6 +629,7 @@ h2 {
 
 /* ---- Glob chip input (RAG Lab) ---- */
 .glob-field {
+  position: relative;
   align-items: flex-start;
 }
 .glob-chip-input {
@@ -686,4 +687,33 @@ h2 {
   color: #ff8a7a;
   font-size: 11px;
   margin-top: 4px;
+}
+
+.glob-suggestions {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  padding: 4px 0;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  list-style: none;
+  max-height: 180px;
+  overflow-y: auto;
+  z-index: 10;
+}
+
+.glob-suggestion {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  color: #e0e0e0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.glob-suggestion:hover {
+  background: #2a2a2a;
 }

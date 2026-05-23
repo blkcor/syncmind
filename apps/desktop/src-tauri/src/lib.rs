@@ -277,6 +277,7 @@ pub fn run() {
             is_chunk_pinned,
             list_pinned_chunks,
             validate_file_filter,
+            list_indexed_extensions,
         ])
         .setup(|app| {
             // Hide from Dock / App Switcher on macOS.

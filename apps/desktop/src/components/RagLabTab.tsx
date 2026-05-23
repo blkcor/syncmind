@@ -1,4 +1,4 @@
-import { createSignal, Show, For } from 'solid-js';
+import { createSignal, onMount, Show, For } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
 import { store, setStore } from '../store';
 
@@ -6,6 +6,26 @@ export default function RagLabTab() {
   const [showRaw, setShowRaw] = createSignal(false);
   const [draftPattern, setDraftPattern] = createSignal('');
   const [patternError, setPatternError] = createSignal<string | null>(null);
+  const [suggestions, setSuggestions] = createSignal<string[]>([]);
+  const [focused, setFocused] = createSignal(false);
+
+  onMount(async () => {
+    try {
+      const extensions = await invoke<string[]>('list_indexed_extensions');
+      setSuggestions(extensions.map((ext) => `*.${ext}`));
+    } catch {
+      setSuggestions([]);
+    }
+  });
+
+  const filteredSuggestions = () => {
+    const draft = draftPattern().trim().toLowerCase();
+    return suggestions().filter((suggestion) => {
+      if (store.ragLab.fileTypeFilters.includes(suggestion)) return false;
+      if (draft === '') return true;
+      return suggestion.toLowerCase().includes(draft);
+    });
+  };
 
   function resetParams() {
     setStore('ragLab', 'topK', 5);
@@ -14,8 +34,8 @@ export default function RagLabTab() {
     setPatternError(null);
   }
 
-  async function addChip() {
-    const candidate = draftPattern().trim();
+  async function addChip(value?: string) {
+    const candidate = (value ?? draftPattern()).trim();
     if (!candidate) return;
     if (store.ragLab.fileTypeFilters.includes(candidate)) {
       setPatternError('Pattern already added');
@@ -51,6 +71,12 @@ export default function RagLabTab() {
       const last = store.ragLab.fileTypeFilters[store.ragLab.fileTypeFilters.length - 1];
       if (last) removeChip(last);
     }
+  }
+
+  function applySuggestion(suggestion: string, e: MouseEvent) {
+    e.preventDefault();
+    setDraftPattern(suggestion);
+    void addChip(suggestion);
   }
 
   return (
@@ -100,9 +126,27 @@ export default function RagLabTab() {
                 setPatternError(null);
               }}
               onKeyDown={onPatternKeyDown}
-              onBlur={() => addChip()}
+              onFocus={() => setFocused(true)}
+              onBlur={() => {
+                setFocused(false);
+                void addChip();
+              }}
             />
           </div>
+          <Show when={focused() && filteredSuggestions().length > 0}>
+            <ul class="glob-suggestions">
+              <For each={filteredSuggestions()}>
+                {(suggestion) => (
+                  <li
+                    class="glob-suggestion"
+                    onMouseDown={(e) => applySuggestion(suggestion, e)}
+                  >
+                    {suggestion}
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
           <Show when={patternError()}>
             <span class="field-error">{patternError()}</span>
           </Show>

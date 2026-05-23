@@ -431,6 +431,22 @@ impl VectorStore {
         Ok((file_count, chunk_count))
     }
 
+    pub fn list_distinct_extensions(&self) -> Result<Vec<String>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT absolute_path FROM files")?;
+        let mut exts: HashSet<String> = HashSet::new();
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            let path = row?;
+            if let Some(ext) = Path::new(&path).extension().and_then(|e| e.to_str()) {
+                exts.insert(ext.to_ascii_lowercase());
+            }
+        }
+        let mut out: Vec<String> = exts.into_iter().collect();
+        out.sort();
+        Ok(out)
+    }
+
     /// Delete a file and all its associated chunks and vectors from the store.
     ///
     /// Returns `Ok(true)` if a row was deleted, `Ok(false)` if no file with
@@ -1019,5 +1035,62 @@ mod tests {
         let db_path = tmp.path().join("syncmind.db");
         let _store1 = VectorStore::new(&db_path, 4).unwrap();
         let _store2 = VectorStore::new(&db_path, 4).unwrap();
+    }
+
+    fn upsert_path(store: &VectorStore, path: &str) {
+        let meta = FileMeta {
+            absolute_path: PathBuf::from(path),
+            file_type: "other".to_string(),
+            last_modified: 1,
+            last_indexed: 1,
+        };
+        let chunks = vec![Chunk {
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 1,
+            content: format!("seed-{path}"),
+        }];
+        let embeddings = vec![mock_embedding(4, 0.1)];
+        store.upsert_file(&meta, &chunks, &embeddings).unwrap();
+    }
+
+    #[test]
+    fn list_distinct_extensions_returns_sorted_lowercased_unique() {
+        let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let store = VectorStore::new(&db_path, 4).unwrap();
+
+        for path in [
+            "/abs/a.rs",
+            "/abs/b.RS",
+            "/abs/c.md",
+            "/abs/D.PY",
+            "/abs/README",
+            "/abs/.gitignore",
+        ] {
+            upsert_path(&store, path);
+        }
+
+        let exts = store.list_distinct_extensions().unwrap();
+        assert_eq!(exts, vec!["md".to_string(), "py".to_string(), "rs".to_string()]);
+    }
+
+    #[test]
+    fn list_distinct_extensions_on_empty_index_returns_empty_vec() {
+        let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let store = VectorStore::new(&db_path, 4).unwrap();
+
+        let exts = store.list_distinct_extensions().unwrap();
+        assert!(exts.is_empty());
+    }
+
+    #[test]
+    fn list_distinct_extensions_sources_only_from_files_table() {
+        let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let store = VectorStore::new(&db_path, 4).unwrap();
+
+        upsert_path(&store, "/abs/indexed.md");
+
+        let exts = store.list_distinct_extensions().unwrap();
+        assert_eq!(exts, vec!["md".to_string()]);
     }
 }
