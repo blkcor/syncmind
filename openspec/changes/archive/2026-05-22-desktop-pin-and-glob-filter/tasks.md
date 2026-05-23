@@ -58,8 +58,8 @@
 ## 6. Documentation & Spec Alignment
 
 - [x] 6.1 PRD 002 reflects US-028, FR-9, FR-10, and the updated US-023 / US-025 acceptance criteria
-- [ ] 6.2 Update `apps/desktop/README.md` with the new Tauri commands and keyboard shortcuts (deferred — desktop README does not yet enumerate commands; will batch with other command docs)
-- [ ] 6.3 Add a short note in `core/storage/README.md` describing the `pinned_chunks` table (deferred — storage crate has no README yet; would be a separate doc-hygiene change)
+- [x] 6.2 Update `apps/desktop/README.md` with the new Tauri commands and keyboard shortcuts
+- [x] 6.3 Add a short note in `core/storage/README.md` describing the `pinned_chunks` table
 
 ## 7. Verification
 
