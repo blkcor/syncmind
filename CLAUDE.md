@@ -45,9 +45,9 @@ SyncMind adopts a **"Headless-First"** architecture where core computation and U
 
 ### The Spine (`services/`)
 
-- **Language:** Go (Go-Zero / Hertz)
-- **Responsibilities:** Cross-device sync gateway, E2EE data relay, mobile media ingestion.
-- **Status:** Phase 3 — not yet implemented.
+- **Language:** Go (Hertz + PostgreSQL + Redis)
+- **Responsibilities:** Cross-device sync gateway, E2EE blind relay (server holds no decryption keys), mobile media ingestion, WebSocket real-time notification.
+- **Status:** Phase 3 server implemented and archived (`openspec/changes/archive/2026-05-20-the-spine/`). Desktop ↔ Spine integration is the next milestone before Phases 4 (mobile capture) and 5 (web knowledge graph).
 
 ### The Nerve Endings (`apps/`)
 
@@ -61,7 +61,7 @@ All UI clients are consumers of the Brain. No UI client is required for the core
 
 SyncMind is a **polyglot monorepo** managed with two workspace systems:
 
-- **Rust:** `core/Cargo.toml` defines a Cargo workspace with four member crates.
+- **Rust:** `core/Cargo.toml` defines a Cargo workspace with seven member crates (`syncmind`, `syncmind-core`, `syncmind-indexing`, `file-watcher`, `rag-engine`, `storage`, `mcp-server`).
 - **TypeScript / Frontend:** Root `package.json` defines a pnpm workspace covering `apps/*` and `packages/*`.
 
 There is no single root build command that spans both languages. Build and test each stack independently.
@@ -75,12 +75,12 @@ There is no single root build command that spans both languages. Build and test 
 | `core/file-watcher/`      | File change listener and re-indexing trigger             |
 | `core/rag-engine/`        | Text extraction, semantic chunking, embedding generation |
 | `core/storage/`           | SQLite + sqlite-vec persistence layer                    |
-| `services/`               | Go sync gateway (future)                                 |
-| `services/sync-gateway/`  | Go microservice for cross-device sync                    |
-| `apps/`                   | UI clients: desktop, web, mobile                         |
+| `services/`               | Go sync gateway (The Spine, Phase 3)                    |
+| `services/sync-gateway/`  | Go microservice for cross-device E2EE sync               |
+| `apps/`                   | UI clients: desktop (P2), mobile (P4 planned), web (P5 planned) |
 | `apps/desktop/`           | Tauri desktop app                                        |
-| `apps/web/`               | Next.js / Nuxt knowledge graph dashboard                 |
-| `apps/mobile/`            | Mobile idea capture app                                  |
+| `apps/web/`               | Next.js / Nuxt knowledge graph dashboard (Phase 5)       |
+| `apps/mobile/`            | Mobile idea capture app (Phase 4)                        |
 | `packages/`               | Shared frontend packages                                 |
 | `packages/types/`         | Global TypeScript type definitions                       |
 | `packages/ui-kit/`        | Cross-platform reusable component library                |
@@ -107,18 +107,25 @@ These are hard rules. Any code change must respect them.
 3. Implement against the spec.
 4. Update the spec if the implementation diverges.
 
-### Phase 1 Focus: Headless MCP Core
+### Phase Roadmap
 
-The current milestone is building the Rust core workspace in `core/`.
+| Phase | Component | State |
+|-------|-----------|-------|
+| 1 | Headless MCP Core (Rust, `core/`) | ✅ Complete |
+| 2 | Desktop Command Palette (Tauri, `apps/desktop/`) | ✅ Complete |
+| 3 | The Spine sync gateway (Go, `services/sync-gateway/`) | ✅ Server complete · desktop integration pending |
+| 4 | Mobile capture (Expo, `apps/mobile/`) | ⏸️ Planned |
+| 5 | Web knowledge graph dashboard (`apps/web/`) | ⏸️ Planned |
 
-Planned crates:
+Active Rust crates (Phase 1, all shipped):
 
-- `syncmind-file-watcher` — File change listener (`notify` crate)
-- `syncmind-rag-engine` — Text extraction trait + Markdown (`pulldown-cmark`), code, PDF implementations; semantic chunking; `Embedder` trait (Ollama primary, ONNX fallback)
-- `syncmind-storage` — SQLite + sqlite-vec persistence layer
-- `syncmind-mcp-server` — MCP server implementation (Stdio + SSE transports)
-
-A top-level `syncmind` binary crate (or `mcp-server` binary) will provide the CLI via `clap`.
+- `syncmind` — top-level CLI binary (`clap`-based)
+- `syncmind-core` — config, paths, observability, shared types
+- `syncmind-indexing` — pipeline orchestration
+- `file-watcher` — file change listener (`notify` crate)
+- `rag-engine` — text extraction + semantic chunking + `Embedder` trait (Ollama primary, ONNX fallback)
+- `storage` — SQLite + sqlite-vec persistence layer
+- `mcp-server` — MCP server implementation (Stdio + SSE transports)
 
 ### Common Commands
 

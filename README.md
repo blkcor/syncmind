@@ -12,8 +12,9 @@ All raw text, embeddings, and metadata stay on your machine. The only network ca
 |-------|-----------|-------|
 | 1 | Headless MCP Core (Rust) | ✅ Complete |
 | 2 | Desktop Command Palette (Tauri) | ✅ Complete |
-| 3 | The Spine — cross-device sync (Go) | ⏸️ Planned |
+| 3 | The Spine — cross-device sync gateway (Go) | ✅ Server complete · desktop integration pending |
 | 4 | Mobile capture (Expo) | ⏸️ Planned |
+| 5 | Web knowledge graph dashboard (Next.js / Vue) | ⏸️ Planned |
 
 ## Architecture
 
@@ -104,9 +105,9 @@ Paths below use generic placeholders (`<config-dir>` and `<data-dir>`) because S
 |------|-------|--------|
 | `core/` | Rust workspace (7 crates) | ✅ Phase 1 |
 | `apps/desktop/` | Tauri + SolidJS | ✅ Phase 2 |
-| `apps/web/` | Next.js / Vue | ⏸️ Future |
-| `apps/mobile/` | Expo / React Native | ⏸️ Future |
-| `services/sync-gateway/` | Go (Hertz) | ⏸️ Phase 3 |
+| `services/sync-gateway/` | Go (Hertz) | ✅ Phase 3 (server) |
+| `apps/mobile/` | Expo / React Native | ⏸️ Phase 4 |
+| `apps/web/` | Next.js / Vue | ⏸️ Phase 5 |
 | `packages/` | Shared TS configs and types | ✅ |
 | `docs/` | PRDs, architecture, examples | ✅ |
 | `openspec/` | Spec-driven change tracking | ✅ |
