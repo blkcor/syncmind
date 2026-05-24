@@ -17,8 +17,11 @@
 //! receives raw key material via IPC. See `FR-21` in PRD 004.
 
 pub mod bundle;
+pub mod client;
 pub mod crypto;
 pub mod identity;
+pub mod inbox;
+pub mod pairing;
 
 use std::fmt;
 

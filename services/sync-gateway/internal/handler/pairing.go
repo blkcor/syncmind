@@ -273,6 +273,15 @@ func (h *PairingHandler) Status(ctx context.Context, c *app.RequestContext) {
 		if err == nil && device.PairedDeviceID != nil {
 			resp["paired_device_id"] = device.PairedDeviceID.String()
 		}
+		// Expose the responder's Ed25519 public key so the initiator can derive `sync_key`
+		// locally (see PRD 003 §Impl Note 1.1 and the `desktop-spine-client` spec delta on
+		// `device-pairing`). Responders learn the initiator's pubkey from the QR payload.
+		if len(ps.ResponderPubkey) > 0 {
+			resp["responder_pubkey"] = base64.RawURLEncoding.EncodeToString(ps.ResponderPubkey)
+		}
+		if len(ps.InitiatorPubkey) > 0 {
+			resp["initiator_pubkey"] = base64.RawURLEncoding.EncodeToString(ps.InitiatorPubkey)
+		}
 	}
 
 	log.Info("pairing status", zap.String("session_id", sessionID.String()), zap.String("status", ps.Status))

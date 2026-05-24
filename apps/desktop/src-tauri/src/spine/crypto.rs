@@ -128,6 +128,94 @@ pub fn sign(sk: &SigningKey, msg: &[u8]) -> Signature {
     sk.sign(msg)
 }
 
+// ---------------------------------------------------------------------------
+// JWT (EdDSA) — PRD 004 §US-024
+// ---------------------------------------------------------------------------
+
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use base64::Engine as _;
+use ed25519_dalek::pkcs8::EncodePrivateKey;
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use serde::{Deserialize, Serialize};
+
+/// JWT issuer claim baked into every desktop-minted token.
+pub const JWT_ISSUER: &str = "syncmind-client";
+
+/// JWT audience claim baked into every desktop-minted token.
+pub const JWT_AUDIENCE: &str = "syncmind-spine";
+
+/// JWT lifetime: tokens are valid for 1 hour. The spine client refreshes them 5 minutes
+/// before expiry; on a 401 it refreshes immediately and retries once.
+pub const JWT_LIFETIME_SECONDS: i64 = 3600;
+
+/// Soft refresh threshold: refresh when less than this many seconds remain.
+pub const JWT_REFRESH_THRESHOLD_SECONDS: i64 = 300;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JwtClaims {
+    pub sub: String,
+    pub iat: i64,
+    pub exp: i64,
+    pub jti: String,
+    pub iss: String,
+    pub aud: String,
+}
+
+/// A minted JWT plus the metadata needed to schedule its refresh.
+#[derive(Debug, Clone)]
+pub struct MintedJwt {
+    pub token: String,
+    pub jti: String,
+    pub exp: i64,
+}
+
+impl MintedJwt {
+    /// True when the token's remaining lifetime is below the refresh threshold.
+    pub fn needs_refresh(&self, now_unix: i64) -> bool {
+        self.exp - now_unix <= JWT_REFRESH_THRESHOLD_SECONDS
+    }
+}
+
+/// Mint a fresh JWT for `device_uuid`, signed by `sk`.
+pub fn mint_jwt(sk: &SigningKey, device_uuid: &str) -> Result<MintedJwt, SpineError> {
+    let now = chrono::Utc::now().timestamp();
+    let exp = now + JWT_LIFETIME_SECONDS;
+    let jti = uuid::Uuid::new_v4().to_string();
+    let claims = JwtClaims {
+        sub: device_uuid.to_string(),
+        iat: now,
+        exp,
+        jti: jti.clone(),
+        iss: JWT_ISSUER.to_string(),
+        aud: JWT_AUDIENCE.to_string(),
+    };
+    let pkcs8 = sk
+        .to_pkcs8_der()
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+    let encoding = EncodingKey::from_ed_der(pkcs8.as_bytes());
+    let token = jsonwebtoken::encode(&Header::new(Algorithm::EdDSA), &claims, &encoding)
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+    Ok(MintedJwt { token, jti, exp })
+}
+
+/// Decode JWT claims WITHOUT verifying the signature. Used only in tests; production code
+/// never needs to introspect its own JWTs (the server verifies them).
+#[cfg(test)]
+pub(crate) fn decode_unverified_claims(jwt: &str) -> Result<JwtClaims, SpineError> {
+    let mut parts = jwt.splitn(3, '.');
+    let _header = parts.next().ok_or_else(|| {
+        SpineError::new(SpineErrorCode::Internal, "jwt missing header segment")
+    })?;
+    let payload = parts.next().ok_or_else(|| {
+        SpineError::new(SpineErrorCode::Internal, "jwt missing payload segment")
+    })?;
+    let raw = B64URL
+        .decode(payload)
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+    serde_json::from_slice(&raw)
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +307,33 @@ mod tests {
         let expected =
             hex::decode("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad").unwrap();
         assert_eq!(got.to_vec(), expected);
+    }
+
+    #[test]
+    fn jwt_mint_includes_required_claims() {
+        let sk = fixed_signing_key(0x42);
+        let device_uuid = uuid::Uuid::new_v4().to_string();
+        let minted = mint_jwt(&sk, &device_uuid).unwrap();
+
+        let claims = decode_unverified_claims(&minted.token).unwrap();
+        assert_eq!(claims.sub, device_uuid);
+        assert_eq!(claims.iss, JWT_ISSUER);
+        assert_eq!(claims.aud, JWT_AUDIENCE);
+        assert_eq!(claims.exp - claims.iat, JWT_LIFETIME_SECONDS);
+        assert!(!claims.jti.is_empty());
+        assert_eq!(claims.jti, minted.jti);
+        assert_eq!(claims.exp, minted.exp);
+    }
+
+    #[test]
+    fn jwt_refresh_threshold_triggers_in_window() {
+        let sk = fixed_signing_key(0x42);
+        let minted = mint_jwt(&sk, &uuid::Uuid::new_v4().to_string()).unwrap();
+        // Fresh token: NOT in the refresh window (full hour remaining).
+        assert!(!minted.needs_refresh(minted.exp - JWT_LIFETIME_SECONDS));
+        // Less than threshold left → refresh.
+        assert!(minted.needs_refresh(minted.exp - JWT_REFRESH_THRESHOLD_SECONDS + 1));
+        // Already past exp → refresh.
+        assert!(minted.needs_refresh(minted.exp + 60));
     }
 }
