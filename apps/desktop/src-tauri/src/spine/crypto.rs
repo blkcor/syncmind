@@ -124,6 +124,7 @@ pub fn derive_sync_key(
 
 /// Sign `msg` with the supplied signing key (thin wrapper for callers that hold the key
 /// behind a wrapper type and don't want to expose `Signer`).
+#[allow(dead_code)] // Convenience entry point reserved for future callers that don't already hold an Identity.
 pub fn sign(sk: &SigningKey, msg: &[u8]) -> Signature {
     sk.sign(msg)
 }
@@ -132,7 +133,9 @@ pub fn sign(sk: &SigningKey, msg: &[u8]) -> Signature {
 // JWT (EdDSA) — PRD 004 §US-024
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+#[cfg(test)]
 use base64::Engine as _;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};

@@ -7,12 +7,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as _B64URL_UNUSED;
 use base64::Engine as _;
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::VerifyingKey as _VerifyingKeyUnused;
 use serde::Serialize;
 use tauri::State;
-use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 use crate::spine::bundle::{self, BundleEnvelope};
@@ -21,7 +20,7 @@ use crate::spine::crypto;
 use crate::spine::identity;
 use crate::spine::inbox;
 use crate::spine::pairing::{self, PairingCompletion, PairingHandleView, PollOutcome};
-use crate::spine::state::{ActivePairing, SpineRuntime};
+use crate::spine::state::ActivePairing;
 use crate::spine::{SpineError, SpineErrorCode};
 use crate::AppState;
 
@@ -550,6 +549,7 @@ fn load_peer_pubkey_raw(data_dir: &std::path::Path, peer_fp: &str) -> Result<[u8
 
 /// Persist the peer's raw Ed25519 pubkey under `<data-dir>/peers/<fp>.pub` so future send
 /// paths can construct the GCM AAD. Called when pairing completes.
+#[allow(dead_code)] // Wired in once SpineRuntime persists the peer pubkey on completion.
 pub fn persist_peer_pubkey_raw(
     data_dir: &std::path::Path,
     peer_fp: &str,
@@ -637,7 +637,7 @@ async fn process_inbound_bundle(
 // `cargo +stable build` doesn't whine about them while the modules are still wiring up.
 #[allow(dead_code)]
 fn _consumed_imports() {
-    let _ = VerifyingKey::from_bytes(&[0u8; 32]);
-    let _ = B64URL.encode([0u8; 1]);
+    let _ = _VerifyingKeyUnused::from_bytes(&[0u8; 32]);
+    let _ = _B64URL_UNUSED.encode([0u8; 1]);
     let _ = crypto::sha256(b"");
 }

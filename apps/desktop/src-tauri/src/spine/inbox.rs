@@ -152,7 +152,7 @@ pub fn list_inbox(data_dir: &Path) -> Result<Vec<InboxEntry>, SpineError> {
             modified_unix,
         });
     }
-    entries.sort_by(|a, b| b.modified_unix.cmp(&a.modified_unix));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.modified_unix));
     Ok(entries)
 }
 

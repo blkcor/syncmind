@@ -195,6 +195,7 @@ fn render_qr_png_base64(payload: &str) -> Result<String, SpineError> {
 }
 
 /// Tear down a pairing: revoke JWT (best-effort), wipe sync_key, clear paired_* in config.
+#[allow(dead_code)] // Reserved for callers that want a direct unpair primitive without going via the Tauri command layer.
 pub async fn unpair(
     client: &SpineClient,
     peer_fingerprint: &str,
