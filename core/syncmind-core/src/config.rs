@@ -28,6 +28,69 @@ pub enum OcrMode {
     Force,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpineConfig {
+    /// Spine sync gateway URL (e.g. `https://spine.example.com` or `http://192.168.1.10:8080`).
+    /// `None` disables the desktop sync subsystem entirely. See PRD 004 §US-020.
+    #[serde(default)]
+    pub url: Option<String>,
+
+    /// Optional PEM file containing a self-signed CA certificate that the HTTP client should
+    /// trust in addition to the system roots. Per PRD 004 §US-020, plain HTTP and IP-host
+    /// URLs are allowed; users opting into HTTPS with a private CA point this at the PEM.
+    #[serde(default)]
+    pub trust_ca_path: Option<PathBuf>,
+
+    /// SHA-256 hex fingerprint (64 chars) of the paired peer's Ed25519 public key.
+    /// `None` when no pairing has completed. See PRD 004 §US-022.
+    #[serde(default)]
+    pub paired_peer_fingerprint: Option<String>,
+
+    /// Self-reported device type of the paired peer (`"desktop"` or `"mobile"`).
+    #[serde(default)]
+    pub paired_peer_device_type: Option<String>,
+
+    /// RFC3339 timestamp at which the current pairing completed (UTC).
+    #[serde(default)]
+    pub paired_at: Option<String>,
+
+    /// UUIDv4 (as a string) of the paired peer's `devices.id` on the Spine. Cached locally
+    /// so the desktop can render it in the UI without an extra `/me` round-trip. See PRD 004
+    /// §US-022 and the OpenSpec change `desktop-spine-client`.
+    #[serde(default)]
+    pub peer_device_id_uuid: Option<String>,
+}
+
+impl SpineConfig {
+    /// Returns true when the desktop sync subsystem should be active (URL is set).
+    pub fn is_enabled(&self) -> bool {
+        self.url.as_deref().is_some_and(|s| !s.is_empty())
+    }
+
+    /// Returns true when the configured URL uses plain HTTP (used by the desktop UI to render
+    /// a non-blocking warning banner per PRD 004 §US-020). Returns false when no URL is set
+    /// or the URL is malformed.
+    pub fn is_plain_http(&self) -> bool {
+        self.url
+            .as_deref()
+            .map(|s| s.starts_with("http://"))
+            .unwrap_or(false)
+    }
+
+    /// Returns true when a paired peer is currently recorded.
+    pub fn is_paired(&self) -> bool {
+        self.paired_peer_fingerprint.is_some()
+    }
+
+    /// Clears every `paired_*` field. Called by the desktop's `spine_unpair` command.
+    pub fn clear_pairing(&mut self) {
+        self.paired_peer_fingerprint = None;
+        self.paired_peer_device_type = None;
+        self.paired_at = None;
+        self.peer_device_id_uuid = None;
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub ollama_url: String,
@@ -64,6 +127,8 @@ pub struct Config {
     pub ocr_binary_path: Option<String>,
     #[serde(default)]
     pub pdf_renderer_path: Option<String>,
+    #[serde(default)]
+    pub spine: SpineConfig,
 }
 
 fn default_log_level() -> String {
@@ -102,6 +167,7 @@ impl Default for Config {
             pdf_text_quality_threshold: default_pdf_text_quality_threshold(),
             ocr_binary_path: None,
             pdf_renderer_path: None,
+            spine: SpineConfig::default(),
         }
     }
 }
@@ -208,6 +274,7 @@ mod tests {
             pdf_text_quality_threshold: 0.5,
             ocr_binary_path: Some("/usr/local/bin/tesseract".to_string()),
             pdf_renderer_path: Some("/usr/local/bin/pdftoppm".to_string()),
+            spine: SpineConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&original).unwrap();
@@ -291,5 +358,77 @@ chunk_overlap = 50
         let result = config.validate_ocr_config();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn legacy_config_without_spine_section_defaults_to_empty() {
+        let legacy = r#"
+ollama_url = "http://localhost:11434"
+ollama_model = "bge-m3"
+mcp_transport = "stdio"
+bind_addr = "127.0.0.1:3000"
+registered_files = []
+embedding_dim = 1024
+chunk_size = 512
+chunk_overlap = 50
+"#;
+        let parsed: Config = toml::from_str(legacy).unwrap();
+        assert!(!parsed.spine.is_enabled());
+        assert!(!parsed.spine.is_paired());
+        assert!(parsed.spine.url.is_none());
+        assert!(parsed.spine.trust_ca_path.is_none());
+        assert!(parsed.spine.paired_peer_fingerprint.is_none());
+    }
+
+    #[test]
+    fn spine_section_roundtrips() {
+        let original = Config {
+            spine: SpineConfig {
+                url: Some("https://spine.example.com".to_string()),
+                trust_ca_path: Some(PathBuf::from("/etc/ssl/spine-ca.pem")),
+                paired_peer_fingerprint: Some("a".repeat(64)),
+                paired_peer_device_type: Some("mobile".to_string()),
+                paired_at: Some("2026-05-24T03:00:00Z".to_string()),
+                peer_device_id_uuid: Some("9c4a3b8e-1d2f-4a3b-9c4a-3b8e1d2f4a3b".to_string()),
+            },
+            ..Config::default()
+        };
+
+        let serialized = toml::to_string_pretty(&original).unwrap();
+        let parsed: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn spine_is_plain_http_detects_http_scheme() {
+        let mut cfg = SpineConfig::default();
+        assert!(!cfg.is_plain_http());
+
+        cfg.url = Some("http://192.168.1.10:8080".to_string());
+        assert!(cfg.is_plain_http());
+
+        cfg.url = Some("https://spine.example.com".to_string());
+        assert!(!cfg.is_plain_http());
+    }
+
+    #[test]
+    fn spine_clear_pairing_resets_all_paired_fields() {
+        let mut cfg = SpineConfig {
+            url: Some("https://spine.example.com".to_string()),
+            trust_ca_path: None,
+            paired_peer_fingerprint: Some("abc".to_string()),
+            paired_peer_device_type: Some("mobile".to_string()),
+            paired_at: Some("2026-05-24T03:00:00Z".to_string()),
+            peer_device_id_uuid: Some("uuid-here".to_string()),
+        };
+
+        cfg.clear_pairing();
+
+        assert_eq!(cfg.url, Some("https://spine.example.com".to_string()));
+        assert!(!cfg.is_paired());
+        assert!(cfg.paired_peer_fingerprint.is_none());
+        assert!(cfg.paired_peer_device_type.is_none());
+        assert!(cfg.paired_at.is_none());
+        assert!(cfg.peer_device_id_uuid.is_none());
     }
 }

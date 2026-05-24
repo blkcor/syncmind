@@ -8,6 +8,48 @@ use syncmind_rag_engine::chunker::{Chunker, CodeChunker, FallbackChunker, Markdo
 use syncmind_rag_engine::embedder::Embedder;
 use syncmind_rag_engine::extractor::{CompositeExtractor, Extractor};
 
+/// Summary of a single-file indexing run, returned by [`index_file_once`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestionReport {
+    pub file_path: std::path::PathBuf,
+    pub chunks_added: usize,
+    pub bytes: u64,
+    pub duration_ms: u128,
+}
+
+/// Index a single file synchronously and report what was ingested.
+///
+/// Designed for callers (e.g. the desktop Spine client at `apps/desktop/src-tauri/src/spine/inbox.rs`)
+/// that need to inject one file into the local index outside the file-watcher event stream and
+/// receive a structured outcome they can surface to the user. Internally this calls
+/// [`index_file`], so it inherits the same idempotency guarantee: re-running on the same path
+/// replaces any prior chunks for that path via `VectorStore::upsert_file`.
+///
+/// The chunker is chosen by extension via [`chunker_for_path`] using the supplied
+/// `chunk_size` / `chunk_overlap` (typically taken from `Config`).
+pub async fn index_file_once(
+    path: &std::path::Path,
+    extractor: &CompositeExtractor,
+    embedder: &dyn Embedder,
+    store: &syncmind_storage::VectorStore,
+    chunk_size: usize,
+    chunk_overlap: usize,
+) -> anyhow::Result<IngestionReport> {
+    let started = std::time::Instant::now();
+    let chunker = chunker_for_path(path, chunk_size, chunk_overlap);
+
+    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
+    let chunks_added = index_file(path, extractor, chunker.as_ref(), embedder, store).await?;
+
+    Ok(IngestionReport {
+        file_path: path.to_path_buf(),
+        chunks_added,
+        bytes,
+        duration_ms: started.elapsed().as_millis(),
+    })
+}
+
 /// Callback invoked after each file indexing attempt. The closure receives
 /// the file path and the result. Used by the desktop app to update the
 /// shared `IndexingState` and emit events to the frontend / tray.
@@ -37,18 +79,19 @@ pub fn chunker_for_path(
 }
 
 /// Index a single file through the full extract→chunk→embed→store pipeline.
+/// Returns the number of chunks ingested (0 if the extractor produced empty text).
 pub async fn index_file(
     path: &std::path::Path,
     extractor: &CompositeExtractor,
     chunker: &dyn Chunker,
     embedder: &dyn Embedder,
     store: &syncmind_storage::VectorStore,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     let text = extractor.extract(path)?;
     let chunks = chunker.chunk(&text, path);
 
     if chunks.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
     let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
@@ -74,8 +117,9 @@ pub async fn index_file(
         last_indexed,
     };
 
+    let chunk_count = chunks.len();
     store.upsert_file(&meta, &chunks, &embeddings)?;
-    Ok(())
+    Ok(chunk_count)
 }
 
 /// Run the indexing pipeline: receive file change events and route each to
@@ -108,7 +152,7 @@ pub async fn run_indexing_pipeline(
                     .await;
                     match &result {
                         Err(e) => warn!(path = %path.display(), error = %e, "failed to re-index file"),
-                        Ok(()) => info!(path = %path.display(), "re-indexed file"),
+                        Ok(n) => info!(path = %path.display(), chunks = n, "re-indexed file"),
                     }
                     if let Some(cb) = on_result.as_ref() {
                         cb(&path, result.as_ref().map(|_| ()));
@@ -310,5 +354,41 @@ mod tests {
                 .is_err(),
             "OCR-disabled image should fail only that file"
         );
+    }
+
+    #[tokio::test]
+    async fn index_file_once_reports_chunks_and_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let note = temp.path().join("draft.md");
+        let db = temp.path().join("index.sqlite");
+
+        fs::write(
+            &note,
+            "# Heading\n\nFirst paragraph with enough words to make a chunk.\n\nSecond paragraph likewise has enough words to chunk.\n",
+        )
+        .unwrap();
+
+        let extractor = CompositeExtractor::with_ocr_config(OcrConfig::default());
+        let embedder = FixedEmbedder { dim: 4 };
+        let store = syncmind_storage::VectorStore::new(&db, embedder.embedding_dim()).unwrap();
+
+        let report = index_file_once(&note, &extractor, &embedder, &store, 64, 8)
+            .await
+            .unwrap();
+        assert_eq!(report.file_path, note);
+        assert!(
+            report.chunks_added >= 1,
+            "expected at least one chunk, got {}",
+            report.chunks_added
+        );
+        assert!(report.bytes > 0, "bytes should reflect file size");
+
+        // First run produced N chunks; second run on the same path must produce the
+        // same number (idempotent via upsert_file's delete-then-insert semantics).
+        let first_count = report.chunks_added;
+        let report2 = index_file_once(&note, &extractor, &embedder, &store, 64, 8)
+            .await
+            .unwrap();
+        assert_eq!(report2.chunks_added, first_count);
     }
 }
