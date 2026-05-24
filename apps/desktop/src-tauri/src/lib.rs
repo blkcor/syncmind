@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 mod commands;
+mod spine;
 
 use commands::*;
 
