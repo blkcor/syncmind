@@ -18,10 +18,12 @@
 
 pub mod bundle;
 pub mod client;
+pub mod commands;
 pub mod crypto;
 pub mod identity;
 pub mod inbox;
 pub mod pairing;
+pub mod state;
 
 use std::fmt;
 

@@ -80,6 +80,9 @@ pub struct AppState {
     /// When true, the auto-hide on Focused(false) is suppressed so modal
     /// dialogs (file picker, etc.) don't get dismissed on macOS.
     pub dialog_open: Mutex<bool>,
+    /// Spine sync subsystem (PRD 004). `None` only during a transient startup window if
+    /// identity initialization failed; commands surface SPINE_NOT_CONFIGURED in that case.
+    pub spine: Arc<spine::state::SpineRuntime>,
 }
 
 impl AppState {
@@ -223,6 +226,20 @@ pub fn run() {
             is_chunk_pinned,
             list_pinned_chunks,
             validate_file_filter,
+            // Spine (PRD 004) — desktop sync client.
+            spine::commands::spine_get_config,
+            spine::commands::spine_set_url,
+            spine::commands::spine_set_trust_ca,
+            spine::commands::spine_get_identity,
+            spine::commands::spine_start_pairing,
+            spine::commands::spine_pair_status,
+            spine::commands::spine_cancel_pairing,
+            spine::commands::spine_send_note,
+            spine::commands::spine_pull_bundles,
+            spine::commands::spine_unpair,
+            spine::commands::spine_reset_identity,
+            spine::commands::spine_list_inbox,
+            spine::commands::spine_clear_inbox,
         ])
         .setup(|app| {
             // Hide from Dock / App Switcher on macOS.
@@ -336,6 +353,47 @@ pub fn run() {
             let init_on_index_result = Arc::clone(&on_index_result);
             let init_app_handle = app.handle().clone();
 
+            // Initialize the Spine subsystem (PRD 004). Identity creation is best-effort:
+            // if it fails (e.g., no keychain available and a write to <data-dir>/keys
+            // refused), we surface SPINE_NOT_CONFIGURED to the user via the Devices tab.
+            let data_dir = syncmind_core::paths::local_data_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let spine_runtime = match spine::identity::ensure_identity(&data_dir, "desktop") {
+                Ok(identity) => {
+                    let runtime = Arc::new(spine::state::SpineRuntime::new(data_dir.clone(), identity));
+                    // Rebuild client from existing config (if URL already set).
+                    let initial_url = config.spine.url.clone();
+                    let initial_ca = config.spine.trust_ca_path.clone();
+                    let runtime_for_init = Arc::clone(&runtime);
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = runtime_for_init
+                            .rebuild_client(initial_url.as_deref(), initial_ca.as_deref())
+                            .await
+                        {
+                            tracing::warn!(error = %e, "initial spine client build failed");
+                        }
+                    });
+                    runtime
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "spine identity initialization failed; sync disabled");
+                    // Construct a runtime around a placeholder identity so the field is
+                    // populated; commands will return SPINE_NOT_CONFIGURED until restart.
+                    // We use an in-memory throwaway key — it is never written anywhere.
+                    let throwaway = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+                    let placeholder = spine::identity::Identity::from_parts(
+                        throwaway,
+                        spine::identity::DeviceMetadata {
+                            fingerprint: "0".repeat(64),
+                            device_type: "desktop".to_string(),
+                            device_uuid: uuid::Uuid::new_v4().to_string(),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                        },
+                    );
+                    Arc::new(spine::state::SpineRuntime::new(data_dir, placeholder))
+                }
+            };
+
             app.manage(AppState {
                 config: Mutex::new(config),
                 store,
@@ -346,6 +404,7 @@ pub fn run() {
                 indexing: Arc::clone(&indexing_state),
                 on_index_result: Arc::clone(&on_index_result),
                 dialog_open: Mutex::new(false),
+                spine: spine_runtime,
             });
             // Real embedder initialization runs in the background so the
             // `setup` hook returns immediately. When `AutoEmbedder::new`
