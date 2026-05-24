@@ -1,4 +1,5 @@
 use std::fs;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -85,9 +86,9 @@ fn strip_frontmatter(content: &str) -> &str {
 pub struct CodeExtractor;
 
 const CODE_EXTENSIONS: &[&str] = &[
-    "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "c", "h", "cpp", "cc", "cxx", "hpp",
-    "hh", "hxx", "cs", "rb", "php", "swift", "kt", "kts", "toml", "json", "yaml", "yml",
-    "sh", "fish", "zsh",
+    "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "c", "h", "cpp", "cc", "cxx", "hpp", "hh",
+    "hxx", "cs", "rb", "php", "swift", "kt", "kts", "toml", "json", "yaml", "yml", "sh", "fish",
+    "zsh",
 ];
 
 impl Extractor for CodeExtractor {
@@ -127,37 +128,7 @@ impl Extractor for PdfExtractor {
     fn extract(&self, path: &Path) -> Result<String, ExtractError> {
         let path = validate_path(path)?;
         let bytes = fs::read(&path)?;
-        if self.ocr.mode != OcrMode::Force {
-            match pdf_extract::extract_text_from_mem(&bytes) {
-                Ok(text) if self.ocr.mode == OcrMode::Disabled || text_quality(&text) >= self.ocr.pdf_text_quality_threshold => {
-                    return Ok(text);
-                }
-                Ok(text) if self.ocr.mode == OcrMode::Auto => {
-                    match run_pdf_ocr(&path, &self.ocr) {
-                        Ok(ocr_text) => return Ok(ocr_text),
-                        Err(e) if !text.trim().is_empty() => {
-                            warn!(path = %path.display(), error = %e, "PDF OCR fallback unavailable; preserving embedded text");
-                            return Ok(text);
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                Ok(text) => return Ok(text),
-                Err(e) if self.ocr.mode == OcrMode::Auto => {
-                    match run_pdf_ocr(&path, &self.ocr) {
-                        Ok(ocr_text) => return Ok(ocr_text),
-                        Err(ocr_err) => {
-                            return Err(ExtractError::Pdf(format!(
-                                "embedded extraction failed: {e:?}; OCR fallback failed: {ocr_err}"
-                            )));
-                        }
-                    }
-                }
-                Err(e) => return Err(ExtractError::Pdf(format!("{e:?}"))),
-            }
-        }
-
-        run_pdf_ocr(&path, &self.ocr)
+        extract_pdf_text_with_fallback(&path, &bytes, &self.ocr, extract_pdf_text_safely)
     }
 
     fn can_handle(&self, path: &Path) -> bool {
@@ -259,6 +230,73 @@ pub fn pdf_renderer_available(config: &OcrConfig) -> bool {
     command_available(config.renderer_command())
 }
 
+fn extract_pdf_text_safely(bytes: &[u8]) -> Result<String, ExtractError> {
+    extract_pdf_text_with(bytes, pdf_extract::extract_text_from_mem)
+}
+
+fn extract_pdf_text_with_fallback<F>(
+    path: &Path,
+    bytes: &[u8],
+    ocr: &OcrConfig,
+    extract_fn: F,
+) -> Result<String, ExtractError>
+where
+    F: Fn(&[u8]) -> Result<String, ExtractError>,
+{
+    if ocr.mode == OcrMode::Force {
+        return run_pdf_ocr(path, ocr);
+    }
+
+    match extract_fn(bytes) {
+        Ok(text)
+            if ocr.mode == OcrMode::Disabled
+                || text_quality(&text) >= ocr.pdf_text_quality_threshold =>
+        {
+            Ok(text)
+        }
+        Ok(text) if ocr.mode == OcrMode::Auto => match run_pdf_ocr(path, ocr) {
+            Ok(ocr_text) => Ok(ocr_text),
+            Err(e) if !text.trim().is_empty() => {
+                warn!(path = %path.display(), error = %e, "PDF OCR fallback unavailable; preserving embedded text");
+                Ok(text)
+            }
+            Err(e) => Err(e),
+        },
+        Ok(text) => Ok(text),
+        Err(e) if ocr.mode == OcrMode::Auto => match run_pdf_ocr(path, ocr) {
+            Ok(ocr_text) => Ok(ocr_text),
+            Err(ocr_err) => Err(ExtractError::Pdf(format!(
+                "embedded extraction failed: {e}; OCR fallback failed: {ocr_err}"
+            ))),
+        },
+        Err(e) => Err(e),
+    }
+}
+
+fn extract_pdf_text_with<F>(bytes: &[u8], extract_fn: F) -> Result<String, ExtractError>
+where
+    F: FnOnce(&[u8]) -> Result<String, pdf_extract::OutputError>,
+{
+    match panic::catch_unwind(AssertUnwindSafe(|| extract_fn(bytes))) {
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(err)) => Err(ExtractError::Pdf(format!("{err:?}"))),
+        Err(payload) => Err(ExtractError::Pdf(format!(
+            "third-party extractor panicked: {}",
+            panic_payload_message(payload)
+        ))),
+    }
+}
+
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 fn text_quality(text: &str) -> f64 {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -348,7 +386,12 @@ fn run_image_ocr(path: &Path, config: &OcrConfig) -> Result<String, ExtractError
 fn is_image_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "tif" | "tiff" | "bmp" | "webp"))
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "tif" | "tiff" | "bmp" | "webp"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -358,12 +401,7 @@ pub struct CompositeExtractor {
 
 impl Clone for CompositeExtractor {
     fn clone(&self) -> Self {
-        Self::with_extractors(
-            self.extractors
-                .iter()
-                .map(|e| e.clone_box())
-                .collect(),
-        )
+        Self::with_extractors(self.extractors.iter().map(|e| e.clone_box()).collect())
     }
 }
 
@@ -602,6 +640,37 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_pdf_text_with_converts_panic_to_pdf_error() {
+        let result = extract_pdf_text_with(
+            b"fake pdf bytes",
+            |_| -> Result<String, pdf_extract::OutputError> {
+                panic!("assertion failed: name == \"Identity-H\"");
+            },
+        );
+
+        match result {
+            Err(ExtractError::Pdf(message)) => {
+                assert!(message.contains("third-party extractor panicked"));
+                assert!(message.contains("Identity-H"));
+            }
+            other => panic!("expected Pdf error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_pdf_text_with_converts_library_error_to_pdf_error() {
+        let result = extract_pdf_text_with(b"fake pdf bytes", |_| {
+            pdf_extract::extract_text_from_mem(b"not a pdf")
+        });
+
+        assert!(
+            matches!(result, Err(ExtractError::Pdf(_))),
+            "expected Pdf error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
     fn test_clean_pdf_uses_embedded_text_without_ocr_dependencies() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("clean.pdf");
@@ -616,6 +685,75 @@ mod tests {
         let text = extractor.extract(&path).unwrap();
 
         assert!(text.contains("Clean embedded text"));
+    }
+
+    #[test]
+    fn test_pdf_extractor_auto_mode_recovers_from_embedded_text_panic_with_ocr() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("panic.pdf");
+        fs::write(&pdf_path, b"%PDF-1.4\n% fake scanned pdf\n").unwrap();
+
+        let renderer_path = dir.path().join("fake-pdftoppm");
+        fs::write(
+            &renderer_path,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-pdftoppm; exit 0; fi\nprefix=\"$3\"\nprintf 'fake image' > \"${prefix}-1.png\"\n",
+        )
+        .unwrap();
+        make_executable(&renderer_path);
+
+        let tesseract_path = dir.path().join("fake-tesseract");
+        fs::write(
+            &tesseract_path,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-tesseract; exit 0; fi\necho 'ocr text after panic'\n",
+        )
+        .unwrap();
+        make_executable(&tesseract_path);
+
+        let ocr = OcrConfig {
+            mode: OcrMode::Auto,
+            ocr_binary_path: Some(tesseract_path),
+            pdf_renderer_path: Some(renderer_path),
+            ..OcrConfig::default()
+        };
+
+        let extracted =
+            extract_pdf_text_with_fallback(&pdf_path, b"fake pdf bytes", &ocr, |bytes| {
+                extract_pdf_text_with(bytes, |_| -> Result<String, pdf_extract::OutputError> {
+                    panic!("assertion failed: name == \"Identity-H\"");
+                })
+            })
+            .unwrap();
+
+        assert!(extracted.contains("ocr text after panic"));
+    }
+
+    #[test]
+    fn test_pdf_extractor_auto_mode_reports_combined_error_after_panic_and_ocr_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("panic.pdf");
+        fs::write(&pdf_path, b"%PDF-1.4\n% fake scanned pdf\n").unwrap();
+
+        let ocr = OcrConfig {
+            mode: OcrMode::Auto,
+            ocr_binary_path: Some(PathBuf::from("/definitely/missing/tesseract")),
+            pdf_renderer_path: Some(PathBuf::from("/definitely/missing/pdftoppm")),
+            ..OcrConfig::default()
+        };
+
+        let result = extract_pdf_text_with_fallback(&pdf_path, b"fake pdf bytes", &ocr, |bytes| {
+            extract_pdf_text_with(bytes, |_| -> Result<String, pdf_extract::OutputError> {
+                panic!("assertion failed: name == \"Identity-H\"");
+            })
+        });
+
+        match result {
+            Err(ExtractError::Pdf(message)) => {
+                assert!(message.contains("embedded extraction failed"));
+                assert!(message.contains("third-party extractor panicked"));
+                assert!(message.contains("OCR fallback failed"));
+            }
+            other => panic!("expected combined Pdf error, got {other:?}"),
+        }
     }
 
     #[test]
