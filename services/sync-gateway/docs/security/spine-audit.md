@@ -6,7 +6,7 @@ This document tracks the security posture of the Spine sync gateway. Spine is de
 
 | # | Requirement | Status |
 |---|---|---|
-| 1 | Server never stores private keys | ✅ Devices generate and hold Ed25519/X25519 keys locally |
+| 1 | Server never stores private keys | ✅ Devices generate and hold Ed25519 identity keys locally |
 | 2 | Server cannot decrypt payloads | ✅ `encrypted_payload` is stored as opaque `BYTEA` |
 | 3 | No decryption logic in codebase | ✅ Verified: zero matches for `decrypt`, `Decrypt`, `unencrypt`, `Unencrypt` |
 | 4 | Encrypted payload never logged | ✅ Verified: `encrypted_payload` only appears in DB read/write paths |
@@ -16,10 +16,9 @@ This document tracks the security posture of the Spine sync gateway. Spine is de
 
 | # | Primitive | Usage | Implementation |
 |---|---|---|---|
-| 1 | Ed25519 | Device JWT signing | `crypto/ed25519` (Go standard library) |
-| 2 | X25519 | Device pairing ECDH | Stored as raw bytes; exchange happens client-side |
-| 3 | SHA-256 | Bundle integrity | `crypto/sha256` (Go standard library) |
-| 4 | AES-256-GCM | Payload encryption | Client-side only; server stores ciphertext |
+| 1 | Ed25519 | Device JWT signing **and** pairing identity exchange (see PRD §Implementation Notes & Divergences §1 — current impl uses the persistent Ed25519 identity key during pairing instead of an ephemeral X25519 ECDH key) | `crypto/ed25519` (Go standard library) |
+| 2 | SHA-256 | Bundle integrity | `crypto/sha256` (Go standard library) |
+| 3 | AES-256-GCM | Payload encryption | Client-side only; server stores ciphertext |
 
 ## Authentication
 
@@ -30,6 +29,7 @@ This document tracks the security posture of the Spine sync gateway. Spine is de
 | 3 | `iss` and `aud` claims validated | ✅ `jwt.WithIssuer` and `jwt.WithAudience` used |
 | 4 | `jti` blacklist checked via Redis | ✅ Prevents token replay |
 | 5 | Deactivated devices rejected | ✅ `is_active` enforced in auth middleware |
+| 6 | `devices.id` is the client-supplied UUIDv4 | ✅ Pairing handler accepts `device_uuid` field (PRD 003 §Impl Note 1.2); conflict with a different fingerprint returns `409 UUID_CONFLICT` |
 
 ## Transport Security
 
