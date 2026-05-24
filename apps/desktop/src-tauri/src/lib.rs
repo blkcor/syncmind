@@ -480,12 +480,15 @@ pub fn run() {
                 MenuItemBuilder::with_id("indexing_status", "Indexing Status").build(app)?;
             let settings_item =
                 MenuItemBuilder::with_id("settings", "Settings").build(app)?;
+            let devices_item =
+                MenuItemBuilder::with_id("devices", "Sync devices…").build(app)?;
             let quit_item =
                 MenuItemBuilder::with_id("quit", "Quit SyncMind").build(app)?;
             let tray_menu = MenuBuilder::new(app)
                 .item(&open_palette_item)
                 .item(&indexing_status_item)
                 .item(&settings_item)
+                .item(&devices_item)
                 .separator()
                 .item(&quit_item)
                 .build()?;
@@ -511,6 +514,12 @@ pub fn run() {
                         if let Some(window) = app.get_webview_window("main") {
                             show_and_focus(&window);
                             let _ = window.emit("tray-navigate", "settings");
+                        }
+                    }
+                    "devices" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            show_and_focus(&window);
+                            let _ = window.emit("tray-navigate", "devices");
                         }
                     }
                     "quit" => app.exit(0),
