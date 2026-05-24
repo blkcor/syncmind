@@ -221,6 +221,7 @@ pub fn run() {
             unpin_chunk,
             is_chunk_pinned,
             list_pinned_chunks,
+            list_indexed_file_types,
             validate_file_filter,
         ])
         .setup(|app| {
