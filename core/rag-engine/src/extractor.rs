@@ -133,29 +133,59 @@ impl Extractor for PdfExtractor {
         let bytes = fs::read(&path)?;
         if self.ocr.mode != OcrMode::Force {
             match extract_pdf_text_from_mem(&bytes) {
+                Ok(text) if self.ocr.mode == OcrMode::Auto => {
+                    match run_pdf_text_fallback(&path, &self.ocr) {
+                        Ok(poppler_text)
+                            if should_prefer_pdf_text_fallback(&text, &poppler_text) =>
+                        {
+                            return Ok(poppler_text);
+                        }
+                        Err(e) => {
+                            warn!(path = %path.display(), error = %e, "PDF text fallback unavailable");
+                        }
+                        _ => {}
+                    }
+
+                    if text_quality(&text) >= self.ocr.pdf_text_quality_threshold {
+                        return Ok(text);
+                    }
+
+                    match run_pdf_ocr(&path, &self.ocr) {
+                        Ok(ocr_text) => return Ok(ocr_text),
+                        Err(e) if !text.trim().is_empty() => {
+                            warn!(path = %path.display(), error = %e, "PDF OCR fallback unavailable; preserving embedded text");
+                            return Ok(text);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
                 Ok(text)
                     if self.ocr.mode == OcrMode::Disabled
                         || text_quality(&text) >= self.ocr.pdf_text_quality_threshold =>
                 {
                     return Ok(text);
                 }
-                Ok(text) if self.ocr.mode == OcrMode::Auto => match run_pdf_ocr(&path, &self.ocr) {
-                    Ok(ocr_text) => return Ok(ocr_text),
-                    Err(e) if !text.trim().is_empty() => {
-                        warn!(path = %path.display(), error = %e, "PDF OCR fallback unavailable; preserving embedded text");
-                        return Ok(text);
-                    }
-                    Err(e) => return Err(e),
-                },
                 Ok(text) => return Ok(text),
-                Err(e) if self.ocr.mode == OcrMode::Auto => match run_pdf_ocr(&path, &self.ocr) {
-                    Ok(ocr_text) => return Ok(ocr_text),
-                    Err(ocr_err) => {
-                        return Err(ExtractError::Pdf(format!(
-                            "embedded extraction failed: {e:?}; OCR fallback failed: {ocr_err}"
-                        )));
+                Err(e) if self.ocr.mode == OcrMode::Auto => {
+                    match run_pdf_text_fallback(&path, &self.ocr) {
+                        Ok(poppler_text) if !poppler_text.trim().is_empty() => {
+                            return Ok(poppler_text);
+                        }
+                        Err(text_err) => {
+                            warn!(path = %path.display(), error = %text_err, "PDF text fallback unavailable");
+                        }
+                        _ => {}
                     }
-                },
+
+                    match run_pdf_ocr(&path, &self.ocr) {
+                        Ok(ocr_text) => return Ok(ocr_text),
+                        Err(ocr_err) => {
+                            return Err(ExtractError::Pdf(format!(
+                                "embedded extraction failed: {e:?}; OCR fallback failed: {ocr_err}"
+                            )));
+                        }
+                    }
+                }
                 Err(e) => return Err(ExtractError::Pdf(format!("{e:?}"))),
             }
         }
@@ -264,6 +294,17 @@ impl OcrConfig {
             .clone()
             .unwrap_or_else(|| resolve_command("pdftoppm"))
     }
+
+    fn text_extractor_command(&self) -> PathBuf {
+        if let Some(renderer) = self.pdf_renderer_path.as_ref() {
+            if let Some(candidate) = sibling_poppler_text_command(renderer) {
+                if command_exists("pdftotext", &candidate) {
+                    return candidate;
+                }
+            }
+        }
+        resolve_command("pdftotext")
+    }
 }
 
 fn command_available(command: &Path) -> bool {
@@ -280,6 +321,20 @@ fn pdf_renderer_command_available(command: &Path) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn pdf_text_command_available(command: &Path) -> bool {
+    Command::new(command)
+        .arg("-v")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn sibling_poppler_text_command(renderer: &Path) -> Option<PathBuf> {
+    let file_name = renderer.file_name()?.to_string_lossy();
+    let text_name = file_name.strip_suffix("pdftoppm")?.to_owned() + "pdftotext";
+    Some(renderer.with_file_name(text_name))
 }
 
 fn resolve_command(name: &str) -> PathBuf {
@@ -303,6 +358,7 @@ fn command_exists(name: &str, command: &Path) -> bool {
     }
     match name {
         "pdftoppm" => pdf_renderer_command_available(command),
+        "pdftotext" => pdf_text_command_available(command),
         _ => command_available(command),
     }
 }
@@ -315,6 +371,10 @@ pub fn pdf_renderer_available(config: &OcrConfig) -> bool {
     command_exists("pdftoppm", &config.renderer_command())
 }
 
+fn pdf_text_extractor_available(config: &OcrConfig) -> bool {
+    command_exists("pdftotext", &config.text_extractor_command())
+}
+
 fn text_quality(text: &str) -> f64 {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -325,6 +385,73 @@ fn text_quality(text: &str) -> f64 {
         .filter(|c| c.is_alphanumeric() || c.is_whitespace())
         .count();
     useful as f64 / trimmed.chars().count().max(1) as f64
+}
+
+fn cjk_ratio(text: &str) -> f64 {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return 0.0;
+    }
+    let cjk = trimmed.chars().filter(|c| is_cjk(*c)).count();
+    cjk as f64 / trimmed.chars().count().max(1) as f64
+}
+
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+            | 0x2CEB0..=0x2EBEF
+    )
+}
+
+fn should_prefer_pdf_text_fallback(embedded: &str, fallback: &str) -> bool {
+    let fallback = fallback.trim();
+    if fallback.is_empty() {
+        return false;
+    }
+
+    let fallback_quality = text_quality(fallback);
+    if fallback_quality < 0.35 {
+        return false;
+    }
+
+    let embedded_cjk = cjk_ratio(embedded);
+    let fallback_cjk = cjk_ratio(fallback);
+    if fallback_cjk >= 0.15 && embedded_cjk < 0.02 {
+        return true;
+    }
+
+    fallback_quality > text_quality(embedded) + 0.25 && fallback.len() > embedded.trim().len() / 2
+}
+
+fn run_pdf_text_fallback(path: &Path, config: &OcrConfig) -> Result<String, ExtractError> {
+    let pdftotext = config.text_extractor_command();
+    if !pdf_text_extractor_available(config) {
+        return Err(ExtractError::OcrUnavailable(format!(
+            "PDF text extractor not available: {}",
+            pdftotext.display()
+        )));
+    }
+
+    let output = Command::new(&pdftotext)
+        .arg("-layout")
+        .arg(path)
+        .arg("-")
+        .output()
+        .map_err(ExtractError::Io)?;
+    if !output.status.success() {
+        return Err(ExtractError::OcrUnavailable(format!(
+            "PDF text fallback failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn run_pdf_ocr(path: &Path, config: &OcrConfig) -> Result<String, ExtractError> {
@@ -809,12 +936,12 @@ mod tests {
     fn test_image_ocr_uses_local_binary_when_available() {
         let dir = tempfile::tempdir().unwrap();
         let image_path = dir.path().join("scan.png");
-        fs::write(&image_path, b"fake image bytes").unwrap();
+        fs::write(&image_path, b"syncmind image ocr marker").unwrap();
 
         let tesseract_path = dir.path().join("fake-tesseract");
         fs::write(
             &tesseract_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-tesseract; exit 0; fi\necho 'ocr text from image'\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-tesseract; exit 0; fi\nif ! grep -q 'syncmind image ocr marker' \"$1\"; then echo 'unexpected OCR input' >&2; exit 2; fi\necho 'ocr text from image marker'\n",
         )
         .unwrap();
         make_executable(&tesseract_path);
@@ -826,7 +953,7 @@ mod tests {
         });
         let text = extractor.extract(&image_path).unwrap();
 
-        assert!(text.contains("ocr text from image"));
+        assert!(text.contains("ocr text from image marker"));
     }
 
     #[test]
@@ -866,6 +993,47 @@ mod tests {
     }
 
     #[test]
+    fn test_pdf_text_fallback_prefers_cjk_text_over_encoded_gibberish() {
+        let embedded = "eta i) $230231013A1 FRAME hs 2a AT BEE ( SUM) BIR ERE";
+        let fallback = "重庆邮电大学\n普通高校毕业生就业协议书\n用人单位 棋行科技";
+
+        assert!(should_prefer_pdf_text_fallback(embedded, fallback));
+    }
+
+    #[test]
+    fn test_pdf_text_fallback_uses_sibling_poppler_text_extractor() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("doc.pdf");
+        fs::write(&pdf_path, b"%PDF-1.4\n% fake pdf\n").unwrap();
+
+        let renderer_path = dir.path().join("fake-pdftoppm");
+        fs::write(
+            &renderer_path,
+            "#!/bin/sh\nif [ \"$1\" = \"-h\" ]; then echo fake-pdftoppm; exit 0; fi\nexit 1\n",
+        )
+        .unwrap();
+        make_executable(&renderer_path);
+
+        let text_path = dir.path().join("fake-pdftotext");
+        fs::write(
+            &text_path,
+            "#!/bin/sh\nif [ \"$1\" = \"-v\" ]; then echo fake-pdftotext >&2; exit 0; fi\nif [ \"$1\" != \"-layout\" ]; then echo 'missing layout flag' >&2; exit 2; fi\nif ! grep -q 'fake pdf' \"$2\"; then echo 'unexpected PDF input' >&2; exit 3; fi\necho '重庆邮电大学 普通高校毕业生就业协议书'\n",
+        )
+        .unwrap();
+        make_executable(&text_path);
+
+        let extractor = PdfExtractor::new(OcrConfig {
+            mode: OcrMode::Auto,
+            pdf_renderer_path: Some(renderer_path),
+            ocr_binary_path: Some(PathBuf::from("/definitely/missing/tesseract")),
+            ..OcrConfig::default()
+        });
+        let text = extractor.extract(&pdf_path).unwrap();
+
+        assert!(text.contains("重庆邮电大学"));
+    }
+
+    #[test]
     fn test_pdf_ocr_uses_local_renderer_and_ocr_when_available() {
         let dir = tempfile::tempdir().unwrap();
         let pdf_path = dir.path().join("scan.pdf");
@@ -874,7 +1042,7 @@ mod tests {
         let renderer_path = dir.path().join("fake-pdftoppm");
         fs::write(
             &renderer_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-pdftoppm; exit 0; fi\nprefix=\"$3\"\nprintf 'fake image' > \"${prefix}-1.png\"\n",
+            "#!/bin/sh\nif [ \"$1\" = \"-h\" ]; then echo fake-pdftoppm; exit 0; fi\nif [ \"$1\" != \"-png\" ]; then echo 'unexpected renderer probe' >&2; exit 2; fi\nif ! grep -q 'fake scanned pdf' \"$2\"; then echo 'unexpected PDF input' >&2; exit 3; fi\nprefix=\"$3\"\nprintf 'rendered page marker from pdf' > \"${prefix}-1.png\"\n",
         )
         .unwrap();
         make_executable(&renderer_path);
@@ -882,7 +1050,7 @@ mod tests {
         let tesseract_path = dir.path().join("fake-tesseract");
         fs::write(
             &tesseract_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-tesseract; exit 0; fi\necho 'ocr text from rendered pdf'\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-tesseract; exit 0; fi\nif ! grep -q 'rendered page marker from pdf' \"$1\"; then echo 'unexpected rendered page input' >&2; exit 2; fi\necho 'ocr text from rendered pdf marker'\n",
         )
         .unwrap();
         make_executable(&tesseract_path);
@@ -895,7 +1063,7 @@ mod tests {
         });
         let text = extractor.extract(&pdf_path).unwrap();
 
-        assert!(text.contains("ocr text from rendered pdf"));
+        assert!(text.contains("ocr text from rendered pdf marker"));
     }
 
     #[test]

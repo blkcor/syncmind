@@ -333,7 +333,7 @@ mod tests {
     fn fake_tesseract(path: &std::path::Path) {
         fs::write(
             path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'tesseract fake'; exit 0; fi\necho 'ocr image text from local fixture'\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'tesseract fake'; exit 0; fi\nif ! grep -q 'syncmind image ocr fixture' \"$1\"; then echo 'unexpected OCR input' >&2; exit 2; fi\necho 'ocr image text from local fixture'\n",
         )
         .unwrap();
         make_executable(path);
@@ -400,7 +400,7 @@ mod tests {
         let tesseract = temp.path().join("fake-tesseract");
 
         fs::write(&clean_pdf, minimal_text_pdf("clean embedded pdf text")).unwrap();
-        fs::write(&image, b"not a real image; fake tesseract ignores input").unwrap();
+        fs::write(&image, b"syncmind image ocr fixture").unwrap();
         fs::write(&java, "public class Example {\n  public void run() {}\n}\n").unwrap();
         fs::write(&unsupported, "unsupported_text = \"still falls back\"").unwrap();
         fake_tesseract(&tesseract);

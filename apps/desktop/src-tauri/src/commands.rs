@@ -259,6 +259,11 @@ pub async fn trigger_reindex(
         on_result(&path, result.as_ref().map(|_| ()));
         result.map_err(|e| format!("Re-index failed: {}", e))?;
     } else {
+        state
+            .store
+            .clear_index()
+            .map_err(|e| format!("Failed to clear existing index: {}", e))?;
+
         for path in &config.registered_files {
             let chunker =
                 syncmind_indexing::chunker_for_path(path, config.chunk_size, config.chunk_overlap);
