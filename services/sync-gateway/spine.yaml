@@ -1,5 +1,5 @@
-database_url: "postgres://postgres:postgres@localhost:5432/syncmind?sslmode=disable"
-redis_addr: "localhost:6379"
+database_url: "postgres://postgres:postgres@postgres:5432/syncmind?sslmode=disable"
+redis_addr: "redis:6379"
 bind_addr: ":8080"
 tls_cert: ""
 tls_key: ""

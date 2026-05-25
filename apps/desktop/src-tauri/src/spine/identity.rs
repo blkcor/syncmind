@@ -204,7 +204,9 @@ pub fn reset_identity(data_dir: &Path) -> Result<(), SpineError> {
     if fallback.exists() {
         match fs::remove_file(&fallback) {
             Ok(()) => any_succeeded = true,
-            Err(e) => warn!(error = %e, path = %fallback.display(), "failed to remove fallback key file"),
+            Err(e) => {
+                warn!(error = %e, path = %fallback.display(), "failed to remove fallback key file")
+            }
         }
     } else {
         any_succeeded = true;
@@ -344,9 +346,7 @@ fn persist_to_fallback(data_dir: &Path, sk: &SigningKey) -> Result<(), SpineErro
 }
 
 fn fallback_path(data_dir: &Path) -> PathBuf {
-    data_dir
-        .join(LINUX_FALLBACK_DIR)
-        .join(LINUX_FALLBACK_FILE)
+    data_dir.join(LINUX_FALLBACK_DIR).join(LINUX_FALLBACK_FILE)
 }
 
 #[cfg(unix)]
@@ -393,8 +393,7 @@ fn decode_signing_key_b64(b64: &str) -> Result<SigningKey, SpineError> {
 fn read_metadata(path: &Path) -> Result<DeviceMetadata, SpineError> {
     let raw = fs::read_to_string(path)
         .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
-    serde_json::from_str(&raw)
-        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))
+    serde_json::from_str(&raw).map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))
 }
 
 fn write_metadata(path: &Path, m: &DeviceMetadata) -> Result<(), SpineError> {
@@ -407,8 +406,7 @@ fn write_metadata(path: &Path, m: &DeviceMetadata) -> Result<(), SpineError> {
     // Atomic-ish write: tmp + rename.
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, raw).map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
-    fs::rename(&tmp, path)
-        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))
+    fs::rename(&tmp, path).map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))
 }
 
 #[cfg(test)]
@@ -423,7 +421,9 @@ mod tests {
         let fp = fingerprint_hex(&pk);
         // 64 lower-hex chars.
         assert_eq!(fp.len(), 64);
-        assert!(fp.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(fp
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         // Stable: a second derivation matches.
         assert_eq!(fp, fingerprint_hex(&pk));
     }
@@ -450,6 +450,110 @@ mod tests {
         let pkcs8 = sk.to_pkcs8_der().unwrap();
         let b64 = B64.encode(pkcs8.as_bytes());
         let restored = decode_signing_key_b64(&b64).unwrap();
-        assert_eq!(restored.verifying_key().to_bytes(), sk.verifying_key().to_bytes());
+        assert_eq!(
+            restored.verifying_key().to_bytes(),
+            sk.verifying_key().to_bytes()
+        );
+    }
+
+    #[cfg(feature = "keyring-mock")]
+    mod keyring_mock_tests {
+        use super::*;
+        use keyring::credential::{CredentialApi, CredentialBuilderApi, CredentialPersistence};
+        use keyring::{Credential, Error};
+        use std::any::Any;
+        use std::collections::HashMap;
+        use std::sync::{Mutex, Once, OnceLock};
+
+        #[derive(Debug)]
+        struct ProcessMockCredential {
+            key: String,
+        }
+
+        impl CredentialApi for ProcessMockCredential {
+            fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
+                mock_store()
+                    .lock()
+                    .expect("mock keyring store poisoned")
+                    .insert(self.key.clone(), secret.to_vec());
+                Ok(())
+            }
+
+            fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+                mock_store()
+                    .lock()
+                    .expect("mock keyring store poisoned")
+                    .get(&self.key)
+                    .cloned()
+                    .ok_or(Error::NoEntry)
+            }
+
+            fn delete_credential(&self) -> keyring::Result<()> {
+                mock_store()
+                    .lock()
+                    .expect("mock keyring store poisoned")
+                    .remove(&self.key)
+                    .map(|_| ())
+                    .ok_or(Error::NoEntry)
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        #[derive(Debug)]
+        struct ProcessMockBuilder;
+
+        impl CredentialBuilderApi for ProcessMockBuilder {
+            fn build(
+                &self,
+                target: Option<&str>,
+                service: &str,
+                user: &str,
+            ) -> keyring::Result<Box<Credential>> {
+                Ok(Box::new(ProcessMockCredential {
+                    key: format!("{}:{service}:{user}", target.unwrap_or("")),
+                }))
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn persistence(&self) -> CredentialPersistence {
+                CredentialPersistence::ProcessOnly
+            }
+        }
+
+        fn mock_store() -> &'static Mutex<HashMap<String, Vec<u8>>> {
+            static STORE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+            STORE.get_or_init(|| Mutex::new(HashMap::new()))
+        }
+
+        fn install_mock_keyring() {
+            static INSTALL: Once = Once::new();
+            INSTALL.call_once(|| {
+                keyring::set_default_credential_builder(Box::new(ProcessMockBuilder));
+            });
+            mock_store()
+                .lock()
+                .expect("mock keyring store poisoned")
+                .clear();
+        }
+
+        #[test]
+        fn identity_generate_then_load_roundtrips_through_mock_keyring() {
+            install_mock_keyring();
+            let dir = tempdir().unwrap();
+
+            let first = ensure_identity(dir.path(), "desktop").unwrap();
+            let second = ensure_identity(dir.path(), "desktop").unwrap();
+
+            assert_eq!(second.fingerprint(), first.fingerprint());
+            assert_eq!(second.device_uuid(), first.device_uuid());
+            assert_eq!(second.public_key_bytes(), first.public_key_bytes());
+            assert!(!fallback_path(dir.path()).exists());
+        }
     }
 }

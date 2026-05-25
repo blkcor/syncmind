@@ -124,8 +124,8 @@ pub fn list_inbox(data_dir: &Path) -> Result<Vec<InboxEntry>, SpineError> {
         return Ok(Vec::new());
     }
     let mut entries = Vec::new();
-    for raw in fs::read_dir(&dir)
-        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?
+    for raw in
+        fs::read_dir(&dir).map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?
     {
         let raw = raw.map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
         let path = raw.path();
@@ -164,8 +164,8 @@ pub fn clear_inbox(data_dir: &Path) -> Result<usize, SpineError> {
         return Ok(0);
     }
     let mut count = 0usize;
-    for raw in fs::read_dir(&dir)
-        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?
+    for raw in
+        fs::read_dir(&dir).map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?
     {
         let raw = raw.map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
         let p = raw.path();
@@ -357,12 +357,9 @@ mod tests {
         let data_dir = tempdir().unwrap();
         let envelope = BundleEnvelope::new_note("a.md", "x", None);
 
-        let err = write_envelope_and_index(
-            data_dir.path(),
-            &envelope,
-            "bid",
-            |_path| async move { Err(anyhow::anyhow!("indexer down")) },
-        )
+        let err = write_envelope_and_index(data_dir.path(), &envelope, "bid", |_path| async move {
+            Err(anyhow::anyhow!("indexer down"))
+        })
         .await
         .unwrap_err();
         assert_eq!(err.code, "INTERNAL_ERROR");

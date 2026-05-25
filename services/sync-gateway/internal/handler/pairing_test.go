@@ -47,9 +47,10 @@ func TestPairingInitiate(t *testing.T) {
 	for i := range pubkey {
 		pubkey[i] = byte(i)
 	}
+	deviceID := uuid.New()
 
 	reqBody, _ := json.Marshal(map[string]string{
-		"device_uuid":      uuid.New().String(),
+		"device_uuid":      deviceID.String(),
 		"initiator_pubkey": base64.RawURLEncoding.EncodeToString(pubkey),
 		"device_type":      "desktop",
 	})
@@ -80,6 +81,15 @@ func TestPairingInitiate(t *testing.T) {
 	}
 	if resp.ExpiresAt == "" {
 		t.Fatal("Expected expires_at to be set")
+	}
+
+	deviceStore := model.NewDeviceStore(pool)
+	device, err := deviceStore.GetByID(context.Background(), deviceID)
+	if err != nil {
+		t.Fatalf("expected device row with client-supplied UUID: %v", err)
+	}
+	if device.ID != deviceID {
+		t.Fatalf("expected device ID %s, got %s", deviceID, device.ID)
 	}
 }
 
@@ -193,8 +203,9 @@ func TestPairingComplete(t *testing.T) {
 	respPubkey[0] = 1
 
 	// Initiate
+	initiatorID := uuid.New()
 	reqBody, _ := json.Marshal(map[string]string{
-		"device_uuid":      uuid.New().String(),
+		"device_uuid":      initiatorID.String(),
 		"initiator_pubkey": base64.RawURLEncoding.EncodeToString(initPubkey),
 		"device_type":      "desktop",
 	})
@@ -207,9 +218,10 @@ func TestPairingComplete(t *testing.T) {
 	json.Unmarshal(ctx.Response.Body(), &initResp)
 
 	// Complete
+	responderID := uuid.New()
 	completeBody, _ := json.Marshal(map[string]string{
 		"session_id":       initResp.SessionID,
-		"device_uuid":      uuid.New().String(),
+		"device_uuid":      responderID.String(),
 		"responder_pubkey": base64.RawURLEncoding.EncodeToString(respPubkey),
 		"device_type":      "mobile",
 	})
@@ -230,6 +242,22 @@ func TestPairingComplete(t *testing.T) {
 	}
 	if session.Status != "completed" {
 		t.Fatalf("Expected status completed, got %s", session.Status)
+	}
+
+	deviceStore := model.NewDeviceStore(pool)
+	initiator, err := deviceStore.GetByID(context.Background(), initiatorID)
+	if err != nil {
+		t.Fatalf("expected initiator row with client-supplied UUID: %v", err)
+	}
+	if initiator.ID != initiatorID {
+		t.Fatalf("expected initiator ID %s, got %s", initiatorID, initiator.ID)
+	}
+	responder, err := deviceStore.GetByID(context.Background(), responderID)
+	if err != nil {
+		t.Fatalf("expected responder row with client-supplied UUID: %v", err)
+	}
+	if responder.ID != responderID {
+		t.Fatalf("expected responder ID %s, got %s", responderID, responder.ID)
 	}
 }
 

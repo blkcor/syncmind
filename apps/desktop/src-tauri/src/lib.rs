@@ -176,8 +176,9 @@ fn unavailable_embedder(
     config: &syncmind_core::Config,
     message: String,
 ) -> Arc<dyn syncmind_rag_engine::embedder::Embedder> {
-    let embedding_dim = syncmind_core::Config::expected_embedding_dim_for_model(&config.ollama_model)
-        .unwrap_or(config.embedding_dim);
+    let embedding_dim =
+        syncmind_core::Config::expected_embedding_dim_for_model(&config.ollama_model)
+            .unwrap_or(config.embedding_dim);
     Arc::new(UnavailableEmbedder {
         message,
         embedding_dim,
@@ -360,10 +361,25 @@ pub fn run() {
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             let spine_runtime = match spine::identity::ensure_identity(&data_dir, "desktop") {
                 Ok(identity) => {
-                    let runtime = Arc::new(spine::state::SpineRuntime::new(data_dir.clone(), identity));
+                    let spine_status_app = app.handle().clone();
+                    let status_sink: Arc<dyn Fn(spine::ws::WsStatus) + Send + Sync> =
+                        Arc::new(move |status| {
+                            let _ = spine_status_app.emit("spine://status", status.as_str());
+                        });
+                    let spine_pull_app = app.handle().clone();
+                    let on_new_bundle: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                        spine::commands::spawn_pull_bundles(spine_pull_app.clone());
+                    });
+                    let runtime = Arc::new(spine::state::SpineRuntime::new(
+                        data_dir.clone(),
+                        identity,
+                        on_new_bundle,
+                        status_sink,
+                    ));
                     // Rebuild client from existing config (if URL already set).
                     let initial_url = config.spine.url.clone();
                     let initial_ca = config.spine.trust_ca_path.clone();
+                    let initial_paired = config.spine.is_paired();
                     let runtime_for_init = Arc::clone(&runtime);
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = runtime_for_init
@@ -371,6 +387,10 @@ pub fn run() {
                             .await
                         {
                             tracing::warn!(error = %e, "initial spine client build failed");
+                            return;
+                        }
+                        if let Err(e) = runtime_for_init.refresh_live_sync(initial_paired).await {
+                            tracing::warn!(error = %e, "initial spine live sync activation failed");
                         }
                     });
                     runtime
@@ -390,7 +410,21 @@ pub fn run() {
                             created_at: chrono::Utc::now().to_rfc3339(),
                         },
                     );
-                    Arc::new(spine::state::SpineRuntime::new(data_dir, placeholder))
+                    let spine_status_app = app.handle().clone();
+                    let status_sink: Arc<dyn Fn(spine::ws::WsStatus) + Send + Sync> =
+                        Arc::new(move |status| {
+                            let _ = spine_status_app.emit("spine://status", status.as_str());
+                        });
+                    let spine_pull_app = app.handle().clone();
+                    let on_new_bundle: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                        spine::commands::spawn_pull_bundles(spine_pull_app.clone());
+                    });
+                    Arc::new(spine::state::SpineRuntime::new(
+                        data_dir,
+                        placeholder,
+                        on_new_bundle,
+                        status_sink,
+                    ))
                 }
             };
 

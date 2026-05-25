@@ -3,7 +3,7 @@
 - [x] 1.1 Add new Rust crates to `apps/desktop/src-tauri/Cargo.toml`: `keyring = "3"`, `ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }`, `x25519-dalek = "2"`, `curve25519-dalek = "4"`, `aes-gcm = "0.10"`, `hkdf = "0.12"`, `sha2 = "0.10"`, `qrcode = "0.14"`, `image = "0.25"`, `reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }`, `tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }`, `jsonwebtoken = "9"`, `uuid = { version = "1", features = ["v4", "serde"] }`, `base64 = "0.22"`, `chrono = { version = "0.4", features = ["serde"] }`, `tracing = "0.1"`, `rustls-pemfile = "2"`, `url = "2"`
 - [x] 1.2 Verify `cargo check -p syncmind-desktop` (or the actual desktop crate name) passes with new deps
 - [x] 1.3 Confirm every new dep is MIT or Apache-2.0; record any exceptions in `design.md`
-- [ ] 1.4 Add `keyring` mock feature gating for CI tests
+- [x] 1.4 Add `keyring` mock feature gating for CI tests
 
 ## 2. Server amendments (services/sync-gateway)
 
@@ -11,8 +11,8 @@
 - [x] 2.2 Validate `device_uuid` parses as UUIDv4; return `400 INVALID_REQUEST` on failure
 - [x] 2.3 Implement conflict check on `initiate`: existing `devices` row with same UUID but different `public_key_fingerprint` → `409 UUID_CONFLICT`
 - [x] 2.4 Implement conflict check on `complete`: same UUID-vs-fingerprint logic for the responder
-- [ ] 2.5 Insert `devices` rows using the client-supplied UUID as primary key (override `gen_random_uuid()` default)
-- [ ] 2.6 Add `WithID(uuid.UUID)` option to `internal/model/device.go::CreateDevice`
+- [x] 2.5 Insert `devices` rows using the client-supplied UUID as primary key (override `gen_random_uuid()` default)
+- [x] 2.6 Add regression coverage that `DeviceStore.Create` persists caller-supplied `Device.ID` instead of relying on the DB default
 - [x] 2.7 Update existing pairing handler unit tests to include `device_uuid` in request bodies
 - [x] 2.8 Add new unit test: missing `device_uuid` → 400
 - [x] 2.9 Add new unit test: UUID conflict scenario → 409
@@ -92,9 +92,9 @@
 - [x] 10.2 Reply to `{"type":"ping"}` immediately with `{"type":"pong"}`
 - [x] 10.3 On `{"type":"new_bundle", ...}` trigger `list_bundles` + `process_pending_bundles`
 - [x] 10.4 Implement exponential backoff reconnect: 1s, 2s, 4s, 8s, 16s, 32s, 60s cap with ±20% jitter
-- [ ] 10.5 Spawn 30-second polling fallback task active only while `ConnectionState` is `Reconnecting` or `Offline`
-- [ ] 10.6 On WS resume, immediately trigger one extra `list_bundles` catch-up
-- [ ] 10.7 Emit `spine://status` Tauri events on every `ConnectionState` transition
+- [x] 10.5 Spawn 30-second polling fallback task active only while `ConnectionState` is `Reconnecting` or `Offline`
+- [x] 10.6 On WS resume, immediately trigger one extra `list_bundles` catch-up
+- [x] 10.7 Emit `spine://status` Tauri events on every `ConnectionState` transition
 
 ## 11. Bundle encode/decode (spine/bundle.rs)
 
@@ -179,7 +179,7 @@
 ## Implementation snapshot (2026-05-24)
 
 ### Landed in `feat/desktop-spine-client`
-- Server amendments (§2): client-supplied `device_uuid` accepted, 409 `UUID_CONFLICT` on mismatch, conflict tests added. Note: 2.5/2.6 were duplicates of 2.1's outcome and are subsumed by the implementation — the handler passes the supplied UUID directly to the existing `model.Device { ID: deviceID, ... }` and no `WithID` option is required.
+- Server amendments (§2): client-supplied `device_uuid` accepted, 409 `UUID_CONFLICT` on mismatch, and regression coverage confirms `DeviceStore.Create` persists the supplied `Device.ID`. The handler passes the supplied UUID directly to the existing `model.Device { ID: deviceID, ... }`, so no separate `WithID` option is required.
 - PRD 003 amendment (§3): §Impl Note 1.1 (dalek conversion) and 1.2 (client UUID) added.
 - Core `Config.spine` extension (§4): all five `SpineConfig` fields landed via `String`/`PathBuf` (no `chrono::DateTime` / `uuid::Uuid` deps added to the daemon crate). 4.5/4.6 were superseded by the in-place helpers `is_enabled`, `is_plain_http`, `is_paired`, `clear_pairing` plus client-side PEM validation in `spine_set_trust_ca`.
 - `index_file_once` (§5): added with idempotency + `IngestionReport`. 5.6's structured-error-variant ask is partially met (the function returns `anyhow::Error` that surfaces extract/embed/upsert errors verbatim); a typed wrapper is a follow-up.

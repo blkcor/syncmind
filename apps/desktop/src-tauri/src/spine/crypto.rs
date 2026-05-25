@@ -206,12 +206,12 @@ pub fn mint_jwt(sk: &SigningKey, device_uuid: &str) -> Result<MintedJwt, SpineEr
 #[cfg(test)]
 pub(crate) fn decode_unverified_claims(jwt: &str) -> Result<JwtClaims, SpineError> {
     let mut parts = jwt.splitn(3, '.');
-    let _header = parts.next().ok_or_else(|| {
-        SpineError::new(SpineErrorCode::Internal, "jwt missing header segment")
-    })?;
-    let payload = parts.next().ok_or_else(|| {
-        SpineError::new(SpineErrorCode::Internal, "jwt missing payload segment")
-    })?;
+    let _header = parts
+        .next()
+        .ok_or_else(|| SpineError::new(SpineErrorCode::Internal, "jwt missing header segment"))?;
+    let payload = parts
+        .next()
+        .ok_or_else(|| SpineError::new(SpineErrorCode::Internal, "jwt missing payload segment"))?;
     let raw = B64URL
         .decode(payload)
         .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
@@ -238,10 +238,9 @@ mod tests {
         let salt = (0u8..=12).collect::<Vec<u8>>();
         let info: [u8; 10] = [0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9];
         let okm = hkdf_sha256_32(&ikm, &salt, &info);
-        let expected = hex::decode(
-            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf",
-        )
-        .unwrap();
+        let expected =
+            hex::decode("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf")
+                .unwrap();
         assert_eq!(okm.to_vec(), expected);
     }
 
@@ -308,7 +307,8 @@ mod tests {
         // SHA-256("abc") known answer.
         let got = sha256(b"abc");
         let expected =
-            hex::decode("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad").unwrap();
+            hex::decode("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+                .unwrap();
         assert_eq!(got.to_vec(), expected);
     }
 

@@ -5,14 +5,6 @@
 //! `spine::commands::spine_pull_bundles`-equivalent logic). Reconnects with exponential
 //! backoff and a 30-second polling fallback during outages.
 //!
-//! TODO(post-merge): auto-spawn this loop from `SpineRuntime::rebuild_client` when the
-//! device is paired so notifications are live without an explicit user action. That
-//! requires piping a closure with access to `AppState` (for the per-bundle ingestion
-//! pipeline). The implementation in this module is complete; only the activation site is
-//! pending. Until then, the Devices tab's existing 1.5 s refresh loop (which calls
-//! `spine_pull_bundles` on demand) covers the same UX for users actively viewing the tab.
-#![allow(dead_code)]
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,6 +34,18 @@ pub enum WsStatus {
     Connected,
     Reconnecting,
     Offline,
+}
+
+impl WsStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WsStatus::Disabled => "disabled",
+            WsStatus::Connecting => "connecting",
+            WsStatus::Connected => "connected",
+            WsStatus::Reconnecting => "reconnecting",
+            WsStatus::Offline => "offline",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -95,6 +99,7 @@ pub fn spawn_loop(
             status_sink(WsStatus::Reconnecting);
             let delay = compute_backoff(attempt);
             attempt = attempt.saturating_add(1);
+            status_sink(WsStatus::Offline);
 
             // Run a 30 s polling fallback during the backoff window.
             let poll_deadline = tokio::time::Instant::now() + delay;
@@ -125,21 +130,27 @@ async fn try_connect_and_serve(
     let host = parsed
         .host_str()
         .ok_or_else(|| {
-            SpineError::new(crate::spine::SpineErrorCode::InvalidUrl, "websocket URL has no host")
+            SpineError::new(
+                crate::spine::SpineErrorCode::InvalidUrl,
+                "websocket URL has no host",
+            )
         })?
         .to_string();
 
     let minted = jwt.current_or_mint(&identity).await?;
 
-    let mut request = url.as_str().into_client_request().map_err(|e| {
-        SpineError::new(crate::spine::SpineErrorCode::Internal, e.to_string())
-    })?;
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .map_err(|e| SpineError::new(crate::spine::SpineErrorCode::Internal, e.to_string()))?;
     let headers = request.headers_mut();
     headers.insert(
         AUTHORIZATION,
-        format!("Bearer {}", minted.token).parse().map_err(|e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
-            SpineError::new(crate::spine::SpineErrorCode::Internal, e.to_string())
-        })?,
+        format!("Bearer {}", minted.token).parse().map_err(
+            |e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
+                SpineError::new(crate::spine::SpineErrorCode::Internal, e.to_string())
+            },
+        )?,
     );
     headers.insert(HOST, host.parse().unwrap());
     headers.insert(UPGRADE, "websocket".parse().unwrap());
@@ -150,8 +161,14 @@ async fn try_connect_and_serve(
     info!(%url, "spine websocket connecting");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(request)
         .await
-        .map_err(|e| SpineError::new(crate::spine::SpineErrorCode::SpineUnreachable, e.to_string()))?;
+        .map_err(|e| {
+            SpineError::new(
+                crate::spine::SpineErrorCode::SpineUnreachable,
+                e.to_string(),
+            )
+        })?;
     status_sink(WsStatus::Connected);
+    on_new_bundle();
     info!("spine websocket connected");
 
     // Read loop with a 40 s soft deadline (PRD 003 §Impl Note 5).
@@ -178,9 +195,7 @@ async fn try_connect_and_serve(
                 if let Ok(parsed) = serde_json::from_str::<Inbound>(&text) {
                     match parsed {
                         Inbound::Ping => {
-                            let _ = ws
-                                .send(Message::Text(r#"{"type":"pong"}"#.into()))
-                                .await;
+                            let _ = ws.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
                         }
                         Inbound::NewBundle { .. } => {
                             on_new_bundle();

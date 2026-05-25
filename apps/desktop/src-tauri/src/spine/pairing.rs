@@ -40,6 +40,7 @@ pub struct PairingHandleView {
 pub struct PairingCompletion {
     pub peer_fingerprint: String,
     pub peer_device_id: Option<String>,
+    pub peer_pubkey_raw: [u8; 32],
     /// SHA-256 lower-hex of `sync_key` — purely for UI display so the user can spot-verify
     /// against the peer's identical display. NOT the sync_key itself.
     pub sync_key_fingerprint: String,
@@ -97,9 +98,9 @@ async fn classify_status(
                     "status=completed but server returned no responder_pubkey",
                 )
             })?;
-            let raw = B64URL.decode(responder_b64).map_err(|e| {
-                SpineError::new(SpineErrorCode::Internal, e.to_string())
-            })?;
+            let raw = B64URL
+                .decode(responder_b64)
+                .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
             if raw.len() != 32 {
                 return Err(SpineError::new(
                     SpineErrorCode::Internal,
@@ -108,9 +109,8 @@ async fn classify_status(
             }
             let mut peer_bytes = [0u8; 32];
             peer_bytes.copy_from_slice(&raw);
-            let peer_vk = VerifyingKey::from_bytes(&peer_bytes).map_err(|e| {
-                SpineError::new(SpineErrorCode::Internal, e.to_string())
-            })?;
+            let peer_vk = VerifyingKey::from_bytes(&peer_bytes)
+                .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
             let peer_fp = identity::fingerprint_hex(&peer_bytes);
 
             let sync_key =
@@ -125,6 +125,7 @@ async fn classify_status(
             Ok(PollOutcome::Completed(PairingCompletion {
                 peer_fingerprint: peer_fp,
                 peer_device_id: status.paired_device_id.clone(),
+                peer_pubkey_raw: peer_bytes,
                 sync_key_fingerprint: sync_key_fp,
             }))
         }
@@ -159,9 +160,8 @@ pub fn spawn_poller(
 /// Render a QR encoding of `payload` to a base64-encoded PNG. The resulting `data:` URL can
 /// be set as `<img src=...>` directly.
 fn render_qr_png_base64(payload: &str) -> Result<String, SpineError> {
-    let code = QrCode::with_error_correction_level(payload, qrcode::EcLevel::M).map_err(|e| {
-        SpineError::new(SpineErrorCode::Internal, format!("qr encode: {e}"))
-    })?;
+    let code = QrCode::with_error_correction_level(payload, qrcode::EcLevel::M)
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, format!("qr encode: {e}")))?;
     let modules = code.width() as u32;
     let scale = (QR_PNG_SIDE_PX / modules).max(1);
     let side = modules * scale;
@@ -220,7 +220,12 @@ mod tests {
         assert!(url.starts_with("data:image/png;base64,"));
         // PNG magic after the data URL prefix.
         let b64 = url.trim_start_matches("data:image/png;base64,");
-        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
-        assert!(bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]), "expected PNG magic");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
+        assert!(
+            bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+            "expected PNG magic"
+        );
     }
 }

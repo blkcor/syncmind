@@ -11,9 +11,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
-use reqwest::header::{
-    HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE,
-};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Certificate, Client, ClientBuilder, Method, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -186,9 +184,8 @@ impl SpineClient {
             .timeout(Duration::from_secs(60));
 
         if let Some(pem_path) = trust_ca_path {
-            let pem = std::fs::read(pem_path).map_err(|e| {
-                SpineError::new(SpineErrorCode::TrustCaNotReadable, e.to_string())
-            })?;
+            let pem = std::fs::read(pem_path)
+                .map_err(|e| SpineError::new(SpineErrorCode::TrustCaNotReadable, e.to_string()))?;
             let certs = parse_pem_certs(&pem)?;
             if certs.is_empty() {
                 return Err(SpineError::new(
@@ -235,9 +232,8 @@ impl SpineClient {
                 ))
             }
         };
-        u.set_scheme(new_scheme).map_err(|()| {
-            SpineError::new(SpineErrorCode::Internal, "set_scheme failed")
-        })?;
+        u.set_scheme(new_scheme)
+            .map_err(|()| SpineError::new(SpineErrorCode::Internal, "set_scheme failed"))?;
         Ok(u.to_string())
     }
 
@@ -325,12 +321,13 @@ impl SpineClient {
         }
         let content_type = header_string(resp.headers(), X_CONTENT_TYPE_HEADER)
             .unwrap_or_else(|| "application/octet-stream".to_string());
-        let payload_hash = header_string(resp.headers(), X_PAYLOAD_HASH_HEADER).ok_or_else(|| {
-            SpineError::new(
-                SpineErrorCode::EnvelopeIntegrityFailed,
-                "missing X-Syncmind-Payload-Hash header on bundle download",
-            )
-        })?;
+        let payload_hash =
+            header_string(resp.headers(), X_PAYLOAD_HASH_HEADER).ok_or_else(|| {
+                SpineError::new(
+                    SpineErrorCode::EnvelopeIntegrityFailed,
+                    "missing X-Syncmind-Payload-Hash header on bundle download",
+                )
+            })?;
         let payload = resp
             .bytes()
             .await
@@ -485,12 +482,10 @@ fn parse_pem_certs(pem: &[u8]) -> Result<Vec<Certificate>, SpineError> {
     let mut reader = std::io::Cursor::new(pem);
     let mut out = Vec::new();
     for entry in rustls_pemfile::certs(&mut reader) {
-        let der = entry.map_err(|e| {
-            SpineError::new(SpineErrorCode::TrustCaInvalidPem, e.to_string())
-        })?;
-        let cert = Certificate::from_der(&der).map_err(|e| {
-            SpineError::new(SpineErrorCode::TrustCaInvalidPem, e.to_string())
-        })?;
+        let der =
+            entry.map_err(|e| SpineError::new(SpineErrorCode::TrustCaInvalidPem, e.to_string()))?;
+        let cert = Certificate::from_der(&der)
+            .map_err(|e| SpineError::new(SpineErrorCode::TrustCaInvalidPem, e.to_string()))?;
         out.push(cert);
     }
     Ok(out)
@@ -500,9 +495,7 @@ fn unreachable_to_spine_err(e: reqwest::Error) -> SpineError {
     SpineError::new(SpineErrorCode::SpineUnreachable, e.to_string())
 }
 
-async fn json_or_error<T: for<'de> Deserialize<'de>>(
-    resp: Response,
-) -> Result<T, SpineError> {
+async fn json_or_error<T: for<'de> Deserialize<'de>>(resp: Response) -> Result<T, SpineError> {
     let status = resp.status();
     if !status.is_success() {
         return Err(http_status_to_spine_err_owned(resp).await);

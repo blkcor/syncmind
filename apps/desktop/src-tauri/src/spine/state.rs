@@ -30,18 +30,29 @@ pub struct SpineRuntime {
     /// In-progress pairing handle. `pub(crate)` so the command layer can drain a finished
     /// poller without going through an extra accessor.
     pub(crate) pairing: Mutex<Option<ActivePairing>>,
+    ws_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    on_new_bundle: Arc<dyn Fn() + Send + Sync>,
+    status_sink: Arc<dyn Fn(crate::spine::ws::WsStatus) + Send + Sync>,
 }
 
 impl SpineRuntime {
     /// Construct from a freshly-resolved identity. The HTTP client is built lazily on the
     /// first call that needs it.
-    pub fn new(data_dir: PathBuf, identity: Identity) -> Self {
+    pub fn new(
+        data_dir: PathBuf,
+        identity: Identity,
+        on_new_bundle: Arc<dyn Fn() + Send + Sync>,
+        status_sink: Arc<dyn Fn(crate::spine::ws::WsStatus) + Send + Sync>,
+    ) -> Self {
         Self {
             data_dir,
             identity: Arc::new(identity),
             jwt: Arc::new(JwtHolder::new()),
             client: RwLock::new(None),
             pairing: Mutex::new(None),
+            ws_worker: Mutex::new(None),
+            on_new_bundle,
+            status_sink,
         }
     }
 
@@ -70,6 +81,36 @@ impl SpineRuntime {
         }
         // Drop any cached JWT — it's tied to the previous client's auth round-trip identity.
         self.jwt.clear().await;
+        Ok(())
+    }
+
+    pub async fn refresh_live_sync(&self, is_paired: bool) -> Result<(), SpineError> {
+        let next_client = if is_paired {
+            self.client.read().await.clone()
+        } else {
+            None
+        };
+
+        let mut guard = self.ws_worker.lock().await;
+        if let Some(prev) = guard.take() {
+            prev.abort();
+        }
+
+        match next_client {
+            Some(client) => {
+                *guard = Some(crate::spine::ws::spawn_loop(
+                    client,
+                    Arc::clone(&self.identity),
+                    Arc::clone(&self.jwt),
+                    Arc::clone(&self.on_new_bundle),
+                    Arc::clone(&self.status_sink),
+                ));
+            }
+            None => {
+                (self.status_sink)(crate::spine::ws::WsStatus::Disabled);
+            }
+        }
+
         Ok(())
     }
 
@@ -111,9 +152,13 @@ impl SpineRuntime {
     /// Wipe local pairing state. Used by `spine_unpair`.
     pub async fn local_unpair(&self, peer_fingerprint: &str) {
         self.cancel_pairing().await;
+        if let Some(prev) = self.ws_worker.lock().await.take() {
+            prev.abort();
+        }
         if let Err(e) = identity::wipe_sync_key(peer_fingerprint) {
             warn!(error = %e, peer = %peer_fingerprint, "failed to wipe sync_key");
         }
         self.jwt.clear().await;
+        (self.status_sink)(crate::spine::ws::WsStatus::Disabled);
     }
 }

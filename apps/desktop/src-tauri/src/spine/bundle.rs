@@ -177,10 +177,7 @@ mod tests {
         assert_eq!(env.kind, KIND_NOTE);
         assert_eq!(env.content_utf8, "hello");
         assert!(!env.captured_at.is_empty());
-        assert_eq!(
-            env.sha256,
-            hex::encode(crypto::sha256(b"hello"))
-        );
+        assert_eq!(env.sha256, hex::encode(crypto::sha256(b"hello")));
         assert!(env.validate().is_ok());
     }
 

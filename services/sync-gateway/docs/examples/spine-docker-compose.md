@@ -14,13 +14,25 @@ cd services/sync-gateway
 make dev
 ```
 
+If Docker Hub is unstable in your region, override the images before `make dev`:
+
+```bash
+export POSTGRES_IMAGE=docker.m.daocloud.io/library/postgres:17-alpine
+export REDIS_IMAGE=docker.m.daocloud.io/library/redis:7-alpine
+export GO_IMAGE=docker.m.daocloud.io/library/golang:1.25-alpine
+export RUNTIME_IMAGE=docker.m.daocloud.io/library/alpine:latest
+make dev
+```
+
+The compose file keeps Docker Hub defaults, so this only affects your local shell.
+
 This starts three services:
 
 | Service    | Address                     | Purpose               |
 | ---------- | --------------------------- | --------------------- |
 | spine      | http://localhost:8080       | Sync gateway API      |
 | postgres   | postgres://localhost:5432   | Persistence           |
-| redis      | redis://localhost:6379      | Pub/Sub & rate limits |
+| redis      | internal only               | Pub/Sub & rate limits |
 
 ## Verify Health
 

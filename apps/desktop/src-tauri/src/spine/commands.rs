@@ -11,7 +11,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as _B64URL_UNUSED;
 use base64::Engine as _;
 use ed25519_dalek::VerifyingKey as _VerifyingKeyUnused;
 use serde::Serialize;
-use tauri::State;
+use tauri::{Manager, State};
 use tracing::{info, warn};
 
 use crate::spine::bundle::{self, BundleEnvelope};
@@ -23,6 +23,14 @@ use crate::spine::pairing::{self, PairingCompletion, PairingHandleView, PollOutc
 use crate::spine::state::ActivePairing;
 use crate::spine::{SpineError, SpineErrorCode};
 use crate::AppState;
+
+#[derive(Clone)]
+struct PullContext {
+    config: syncmind_core::Config,
+    store: Arc<syncmind_storage::VectorStore>,
+    embedder: Arc<dyn syncmind_rag_engine::embedder::Embedder>,
+    spine: Arc<crate::spine::state::SpineRuntime>,
+}
 
 // ---------------------------------------------------------------------------
 // View models
@@ -86,7 +94,10 @@ pub async fn spine_get_config(state: State<'_, AppState>) -> Result<SpineConfigV
 }
 
 #[tauri::command]
-pub async fn spine_set_url(url: String, state: State<'_, AppState>) -> Result<SpineConfigView, String> {
+pub async fn spine_set_url(
+    url: String,
+    state: State<'_, AppState>,
+) -> Result<SpineConfigView, String> {
     let url_trimmed = url.trim().to_string();
     let parsed_check = if url_trimmed.is_empty() {
         Ok::<_, SpineError>(None)
@@ -112,6 +123,11 @@ pub async fn spine_set_url(url: String, state: State<'_, AppState>) -> Result<Sp
     state
         .spine
         .rebuild_client(new_view.url.as_deref(), trust_ca.as_deref())
+        .await
+        .map_err(String::from)?;
+    state
+        .spine
+        .refresh_live_sync(new_view.is_paired())
         .await
         .map_err(String::from)?;
     Ok(view_of_config(&new_view))
@@ -160,6 +176,11 @@ pub async fn spine_set_trust_ca(
         .rebuild_client(new_view.url.as_deref(), new_view.trust_ca_path.as_deref())
         .await
         .map_err(String::from)?;
+    state
+        .spine
+        .refresh_live_sync(new_view.is_paired())
+        .await
+        .map_err(String::from)?;
     Ok(view_of_config(&new_view))
 }
 
@@ -180,9 +201,7 @@ pub async fn spine_get_identity(state: State<'_, AppState>) -> Result<IdentityVi
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn spine_start_pairing(
-    state: State<'_, AppState>,
-) -> Result<PairingHandleView, String> {
+pub async fn spine_start_pairing(state: State<'_, AppState>) -> Result<PairingHandleView, String> {
     let runtime = Arc::clone(&state.spine);
 
     // Reject if already paired.
@@ -203,8 +222,11 @@ pub async fn spine_start_pairing(
         .map_err(String::from)?;
 
     // Spawn the polling task.
-    let poller =
-        pairing::spawn_poller(Arc::clone(&client), Arc::clone(&runtime.identity), session_id.clone());
+    let poller = pairing::spawn_poller(
+        Arc::clone(&client),
+        Arc::clone(&runtime.identity),
+        session_id.clone(),
+    );
     runtime
         .set_pairing(Some(ActivePairing { session_id, poller }))
         .await;
@@ -212,9 +234,7 @@ pub async fn spine_start_pairing(
 }
 
 #[tauri::command]
-pub async fn spine_pair_status(
-    state: State<'_, AppState>,
-) -> Result<PairingStateView, String> {
+pub async fn spine_pair_status(state: State<'_, AppState>) -> Result<PairingStateView, String> {
     let runtime = Arc::clone(&state.spine);
 
     // Drain a finished poller if any.
@@ -230,7 +250,9 @@ pub async fn spine_pair_status(
         let result = finished.poller.await;
         match result {
             Ok(Ok(PollOutcome::Completed(comp))) => {
-                persist_pairing_completion(&state, &comp).map_err(|e| e.to_string())?;
+                persist_pairing_completion(&state, &comp)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 return Ok(PairingStateView {
                     state: "paired".to_string(),
                     session_id: Some(session_id),
@@ -349,25 +371,7 @@ pub async fn spine_send_note(
 
 #[tauri::command]
 pub async fn spine_pull_bundles(state: State<'_, AppState>) -> Result<PullResult, String> {
-    let (client, sync_key, _) = ensure_paired_resources(&state).await?;
-    let local_pub = state.spine.identity.public_key_bytes();
-    let data_dir = state.spine.data_dir.clone();
-
-    let list: Vec<BundleListItem> = client.list_bundles(50).await.map_err(String::from)?;
-    let mut processed = 0usize;
-    let mut failed = 0usize;
-
-    for item in list {
-        match process_inbound_bundle(&state, &client, &item, &sync_key, &local_pub, &data_dir).await {
-            Ok(()) => processed += 1,
-            Err(e) => {
-                warn!(bundle_id = %item.bundle_id, error = %e, "inbound bundle failed");
-                failed += 1;
-            }
-        }
-    }
-
-    Ok(PullResult { processed, failed })
+    pull_bundles_for_state(&state).await.map_err(String::from)
 }
 
 #[tauri::command]
@@ -396,6 +400,11 @@ pub async fn spine_unpair(
         state.spine.local_unpair(fp).await;
     } else {
         state.spine.cancel_pairing().await;
+        state
+            .spine
+            .refresh_live_sync(false)
+            .await
+            .map_err(String::from)?;
     }
 
     let new_view = {
@@ -408,6 +417,8 @@ pub async fn spine_unpair(
     if clear_inbox {
         let _ = inbox::clear_inbox(&state.spine.data_dir);
     }
+
+    let _ = state.spine.refresh_live_sync(false).await;
 
     Ok(view_of_config(&new_view))
 }
@@ -430,6 +441,7 @@ pub async fn spine_reset_identity(state: State<'_, AppState>) -> Result<(), Stri
         state.spine.local_unpair(fp).await;
     } else {
         state.spine.cancel_pairing().await;
+        let _ = state.spine.refresh_live_sync(false).await;
     }
     {
         let mut cfg = state.config.lock().expect("config mutex poisoned");
@@ -473,20 +485,30 @@ fn view_of_config(cfg: &syncmind_core::SpineConfig) -> SpineConfigView {
     }
 }
 
-fn persist_pairing_completion(
+async fn persist_pairing_completion(
     state: &AppState,
     completion: &PairingCompletion,
 ) -> Result<(), SpineError> {
-    let mut cfg = state.config.lock().expect("config mutex poisoned");
-    cfg.spine.paired_peer_fingerprint = Some(completion.peer_fingerprint.clone());
-    // We don't currently learn the peer's self-reported device_type from the status
-    // response; leave it None and let the UI fill in "remote" until a /me-style endpoint
-    // exists. Mobile / desktop telemetry can be added later.
-    cfg.spine.paired_peer_device_type = None;
-    cfg.spine.paired_at = Some(chrono::Utc::now().to_rfc3339());
-    cfg.spine.peer_device_id_uuid = completion.peer_device_id.clone();
-    cfg.save()
-        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+    persist_peer_pubkey_raw(
+        &state.spine.data_dir,
+        &completion.peer_fingerprint,
+        &completion.peer_pubkey_raw,
+    )?;
+
+    {
+        let mut cfg = state.config.lock().expect("config mutex poisoned");
+        cfg.spine.paired_peer_fingerprint = Some(completion.peer_fingerprint.clone());
+        // We don't currently learn the peer's self-reported device_type from the status
+        // response; leave it None and let the UI fill in "remote" until a /me-style endpoint
+        // exists. Mobile / desktop telemetry can be added later.
+        cfg.spine.paired_peer_device_type = None;
+        cfg.spine.paired_at = Some(chrono::Utc::now().to_rfc3339());
+        cfg.spine.peer_device_id_uuid = completion.peer_device_id.clone();
+        cfg.save()
+            .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+    }
+
+    state.spine.refresh_live_sync(true).await?;
     Ok(())
 }
 
@@ -534,8 +556,12 @@ async fn ensure_paired_resources(
 
 fn load_peer_pubkey_raw(data_dir: &std::path::Path, peer_fp: &str) -> Result<[u8; 32], SpineError> {
     let path = data_dir.join("peers").join(format!("{peer_fp}.pub"));
-    let bytes = std::fs::read(&path)
-        .map_err(|e| SpineError::new(SpineErrorCode::NotPaired, format!("peer pubkey not on disk: {e}")))?;
+    let bytes = std::fs::read(&path).map_err(|e| {
+        SpineError::new(
+            SpineErrorCode::NotPaired,
+            format!("peer pubkey not on disk: {e}"),
+        )
+    })?;
     if bytes.len() != 32 {
         return Err(SpineError::new(
             SpineErrorCode::Internal,
@@ -568,7 +594,7 @@ pub fn persist_peer_pubkey_raw(
 }
 
 async fn process_inbound_bundle(
-    state: &State<'_, AppState>,
+    ctx: &PullContext,
     client: &crate::spine::client::SpineClient,
     item: &BundleListItem,
     sync_key: &[u8; 32],
@@ -585,15 +611,11 @@ async fn process_inbound_bundle(
     let envelope = bundle::decrypt(&downloaded.payload, sync_key, local_pub)?;
 
     // Build the inbox indexer closure: invoke `syncmind_indexing::index_file_once`.
-    let extractor = syncmind_rag_engine::extractor::CompositeExtractor::from_config(
-        &state.config.lock().expect("config mutex poisoned").clone(),
-    );
-    let embedder = Arc::clone(&state.embedder);
-    let store = Arc::clone(&state.store);
-    let (chunk_size, chunk_overlap) = {
-        let cfg = state.config.lock().expect("config mutex poisoned");
-        (cfg.chunk_size, cfg.chunk_overlap)
-    };
+    let extractor = syncmind_rag_engine::extractor::CompositeExtractor::from_config(&ctx.config);
+    let embedder = Arc::clone(&ctx.embedder);
+    let store = Arc::clone(&ctx.store);
+    let chunk_size = ctx.config.chunk_size;
+    let chunk_overlap = ctx.config.chunk_overlap;
 
     let report = inbox::write_envelope_and_index(
         data_dir,
@@ -640,4 +662,73 @@ fn _consumed_imports() {
     let _ = _VerifyingKeyUnused::from_bytes(&[0u8; 32]);
     let _ = _B64URL_UNUSED.encode([0u8; 1]);
     let _ = crypto::sha256(b"");
+}
+
+fn pull_context_from_app(state: &AppState) -> PullContext {
+    PullContext {
+        config: state.config.lock().expect("config mutex poisoned").clone(),
+        store: Arc::clone(&state.store),
+        embedder: Arc::clone(&state.embedder),
+        spine: Arc::clone(&state.spine),
+    }
+}
+
+pub fn spawn_pull_bundles(app_handle: tauri::AppHandle) {
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return;
+    };
+    let ctx = pull_context_from_app(&state);
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = pull_bundles_with_context(&ctx).await {
+            warn!(error = %e, "background spine_pull_bundles failed");
+        }
+    });
+}
+
+pub async fn pull_bundles_for_state(state: &AppState) -> Result<PullResult, SpineError> {
+    let ctx = pull_context_from_app(state);
+    pull_bundles_with_context(&ctx).await
+}
+
+async fn pull_bundles_with_context(ctx: &PullContext) -> Result<PullResult, SpineError> {
+    let (client, sync_key, _) = ensure_paired_resources_runtime(ctx).await?;
+    let local_pub = ctx.spine.identity.public_key_bytes();
+    let data_dir = ctx.spine.data_dir.clone();
+
+    let list: Vec<BundleListItem> = client.list_bundles(50).await?;
+    let mut processed = 0usize;
+    let mut failed = 0usize;
+
+    for item in list {
+        match process_inbound_bundle(ctx, &client, &item, &sync_key, &local_pub, &data_dir).await {
+            Ok(()) => processed += 1,
+            Err(e) => {
+                warn!(bundle_id = %item.bundle_id, error = %e, "inbound bundle failed");
+                failed += 1;
+            }
+        }
+    }
+
+    Ok(PullResult { processed, failed })
+}
+
+async fn ensure_paired_resources_runtime(
+    ctx: &PullContext,
+) -> Result<(Arc<crate::spine::client::SpineClient>, [u8; 32], [u8; 32]), SpineError> {
+    let runtime = &ctx.spine;
+    let client = runtime.require_client().await?;
+
+    let peer_fp = ctx.config.spine.paired_peer_fingerprint.clone();
+    let peer_fp = peer_fp
+        .ok_or_else(|| SpineError::new(SpineErrorCode::NotPaired, "device is not paired"))?;
+
+    let sync_key = identity::load_sync_key(&peer_fp)?.ok_or_else(|| {
+        SpineError::new(
+            SpineErrorCode::NotPaired,
+            "sync_key missing from keychain (re-pair to recover)",
+        )
+    })?;
+    let peer_pub = load_peer_pubkey_raw(&runtime.data_dir, &peer_fp)?;
+
+    Ok((client, sync_key, peer_pub))
 }

@@ -1,5 +1,6 @@
-import { createSignal, onMount, onCleanup, Show, For } from 'solid-js';
+import { createSignal, onMount, onCleanup, Show } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 
 interface SpineConfigView {
@@ -46,7 +47,7 @@ interface InboxEntry {
 const POLL_MS = 1500;
 
 function shortFingerprint(fp: string | null | undefined): string {
-  if (!fp) return '';
+  if (!fp) return '—';
   return `${fp.slice(0, 8)}…${fp.slice(-4)}`;
 }
 
@@ -66,12 +67,25 @@ function formatTimestamp(ts: string | null | undefined): string {
   }
 }
 
+function humanizeStatus(status: string | null | undefined): string {
+  if (!status) return 'idle';
+  return status.replace(/_/g, ' ');
+}
+
+function dotTone(status: string | null | undefined, liveValues: string[]): 'live' | 'warn' | 'muted' {
+  if (!status) return 'muted';
+  if (liveValues.includes(status)) return 'live';
+  if (['reconnecting', 'offline', 'failed', 'expired', 'cancelled'].includes(status)) return 'warn';
+  return 'muted';
+}
+
 export default function DevicesTab() {
   const [config, setConfig] = createSignal<SpineConfigView | null>(null);
   const [identity, setIdentity] = createSignal<IdentityView | null>(null);
   const [pairState, setPairState] = createSignal<PairingStateView | null>(null);
   const [pairHandle, setPairHandle] = createSignal<PairingHandleView | null>(null);
   const [inbox, setInbox] = createSignal<InboxEntry[]>([]);
+  const [connectionStatus, setConnectionStatus] = createSignal('disabled');
 
   const [urlDraft, setUrlDraft] = createSignal('');
   const [busy, setBusy] = createSignal(false);
@@ -106,6 +120,15 @@ export default function DevicesTab() {
   onMount(() => {
     refresh();
     pollTimer = window.setInterval(refresh, POLL_MS);
+    let unlistenStatus: UnlistenFn | undefined;
+    listen<string>('spine://status', (event) => {
+      setConnectionStatus(event.payload);
+    }).then((unlisten) => {
+      unlistenStatus = unlisten;
+    });
+    onCleanup(() => {
+      unlistenStatus?.();
+    });
   });
 
   onCleanup(() => {
@@ -271,187 +294,238 @@ export default function DevicesTab() {
     };
   };
 
+  const connTone = () => dotTone(connectionStatus(), ['connected']);
+  const pairTone = () => dotTone(pairState()?.state, ['paired']);
+
   return (
-    <div class="devices-tab" style={{ padding: '16px', overflow: 'auto', height: '100%' }}>
-      <h2 style={{ 'margin-top': 0 }}>Devices</h2>
+    <div class="tab-content devices-tab">
+      <h2>Spine</h2>
 
       <Show when={error()}>
         {(message) => (
-          <div style={{ background: '#3a1e1e', padding: '8px 12px', 'border-radius': '6px', 'margin-bottom': '12px' }}>
-            {message()}
-            <button style={{ float: 'right' }} onClick={() => setError(null)}>×</button>
+          <div class="devices-alert">
+            <div>{message()}</div>
+            <button class="devices-alert-dismiss" onClick={() => setError(null)}>×</button>
           </div>
         )}
       </Show>
 
-      {/* Spine URL card */}
-      <section style={{ 'margin-bottom': '16px', padding: '12px', background: '#1e1e1e', 'border-radius': '8px' }}>
-        <h3 style={{ 'margin-top': 0 }}>Spine server</h3>
-        <Show when={config()?.plain_http}>
-          <div style={{ background: '#3a3019', padding: '8px 12px', 'border-radius': '6px', 'margin-bottom': '8px' }}>
-            ⚠️ Spine URL uses plain HTTP. End-to-end encryption still applies, but consider HTTPS.
+      <Show when={config()?.plain_http}>
+        <div class="devices-alert devices-alert-warn">
+          <div>Plain HTTP is active. End-to-end encryption still applies, but transport metadata is less protected.</div>
+        </div>
+      </Show>
+
+      <div class="devices-section">
+        <h3>Status</h3>
+        <div class="devices-status-row">
+          <div class="devices-status-card">
+            <span class="devices-status-label">Connection</span>
+            <span class="devices-status-value">
+              <span class={`devices-status-dot devices-status-dot-${connTone()}`} />
+              {humanizeStatus(connectionStatus())}
+            </span>
           </div>
-        </Show>
-        <div style={{ display: 'flex', gap: '8px' }}>
+          <div class="devices-status-card">
+            <span class="devices-status-label">Pairing</span>
+            <span class="devices-status-value">
+              <span class={`devices-status-dot devices-status-dot-${pairTone()}`} />
+              {humanizeStatus(pairState()?.state)}
+            </span>
+          </div>
+          <div class="devices-status-card">
+            <span class="devices-status-label">Inbox</span>
+            <span class="devices-status-value devices-status-value-mono">
+              {inboxStats().count} · {formatBytes(inboxStats().totalBytes)}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="devices-section">
+        <h3>Server</h3>
+        <div class="devices-input-row">
           <input
+            class="devices-input"
             type="text"
             value={urlDraft()}
             placeholder="https://spine.example.com"
             onInput={(e) => setUrlDraft(e.currentTarget.value)}
-            style={{ flex: 1, padding: '6px 8px' }}
           />
-          <button disabled={busy()} onClick={saveUrl}>
-            Save URL
+          <button class="action-btn" disabled={busy()} onClick={saveUrl}>
+            Save
           </button>
         </div>
-        <div style={{ 'margin-top': '8px', display: 'flex', gap: '8px', 'align-items': 'center' }}>
-          <button disabled={busy()} onClick={pickTrustCa}>
+        <div class="devices-inline-row">
+          <button class="action-btn" disabled={busy()} onClick={pickTrustCa}>
             Trust self-signed CA…
           </button>
           <Show when={config()?.trust_ca_path}>
             {(p) => (
               <>
-                <code style={{ 'font-size': '0.9em' }}>{p()}</code>
-                <button disabled={busy()} onClick={clearTrustCa}>
+                <span class="devices-trust-path" title={p()}>{p()}</span>
+                <button class="action-btn" disabled={busy()} onClick={clearTrustCa}>
                   Clear
                 </button>
               </>
             )}
           </Show>
         </div>
-      </section>
+      </div>
 
-      {/* Local identity card */}
-      <section style={{ 'margin-bottom': '16px', padding: '12px', background: '#1e1e1e', 'border-radius': '8px' }}>
-        <h3 style={{ 'margin-top': 0 }}>This device</h3>
-        <Show when={identity()} fallback={<div>—</div>}>
+      <div class="devices-section">
+        <h3>Identity</h3>
+        <Show when={identity()} fallback={<div class="empty-state">—</div>}>
           {(id) => (
-            <div style={{ display: 'flex', 'flex-direction': 'column', gap: '4px' }}>
-              <div>
-                <strong>Fingerprint:</strong>{' '}
-                <code title={id().fingerprint}>{shortFingerprint(id().fingerprint)}</code>{' '}
-                <button onClick={() => copyFingerprint(id().fingerprint)}>Copy</button>
+            <div class="devices-meta-list">
+              <div class="devices-meta-row">
+                <span class="devices-meta-label">Fingerprint</span>
+                <span class="devices-meta-value" title={id().fingerprint}>{shortFingerprint(id().fingerprint)}</span>
+                <button class="action-btn" onClick={() => copyFingerprint(id().fingerprint)}>Copy</button>
               </div>
-              <div>
-                <strong>UUID:</strong> <code>{id().device_uuid}</code>
+              <div class="devices-meta-row">
+                <span class="devices-meta-label">UUID</span>
+                <span class="devices-meta-value">{id().device_uuid}</span>
               </div>
-              <div>
-                <strong>Type:</strong> {id().device_type}
+              <div class="devices-meta-row">
+                <span class="devices-meta-label">Type</span>
+                <span class="devices-meta-value devices-meta-value-plain">{id().device_type}</span>
               </div>
-              <div>
-                <strong>Created:</strong> {formatTimestamp(id().created_at)}
+              <div class="devices-meta-row">
+                <span class="devices-meta-label">Created</span>
+                <span class="devices-meta-value devices-meta-value-plain">{formatTimestamp(id().created_at)}</span>
               </div>
             </div>
           )}
         </Show>
-      </section>
+        <div class="field-note">
+          The device key lives locally in the OS keychain. Pairing only shares public identity.
+        </div>
+      </div>
 
-      {/* Pairing card */}
-      <section style={{ 'margin-bottom': '16px', padding: '12px', background: '#1e1e1e', 'border-radius': '8px' }}>
-        <h3 style={{ 'margin-top': 0 }}>Pairing</h3>
+      <div class="devices-section">
+        <h3>Pairing</h3>
         <Show
           when={config()?.is_paired}
           fallback={
-            <div>
-              <Show when={!pairHandle()}>
-                <button disabled={busy() || !config()?.is_enabled} onClick={startPairing}>
-                  Start pairing
-                </button>
-                <Show when={!config()?.is_enabled}>
-                  <p style={{ color: '#999' }}>Configure a Spine URL first.</p>
-                </Show>
-              </Show>
-              <Show when={pairHandle()}>
-                {(h) => (
-                  <div style={{ 'text-align': 'center' }}>
-                    <img src={h().qr_png_base64} alt="pairing QR" style={{ width: '320px', height: '320px' }} />
-                    <div style={{ 'font-size': '1.6em', 'font-family': 'monospace', 'margin-top': '8px' }}>
-                      {h().short_code}
-                    </div>
-                    <div style={{ 'margin-top': '4px', color: '#999' }}>
-                      Expires {formatTimestamp(h().expires_at)}
-                    </div>
-                    <div style={{ 'margin-top': '4px', color: '#bbb' }}>
-                      State: <strong>{pairState()?.state ?? 'pending'}</strong>
-                    </div>
-                    <button onClick={cancelPairing} disabled={busy()} style={{ 'margin-top': '12px' }}>
-                      Cancel
-                    </button>
+            <Show
+              when={pairHandle()}
+              fallback={
+                <div class="devices-pair-empty">
+                  <div class="devices-pair-empty-copy">
+                    Generate a QR payload and a 6-digit short code for the second device. No account, no relay-side identity.
                   </div>
-                )}
-              </Show>
-            </div>
+                  <div class="devices-action-row">
+                    <button class="action-btn" disabled={busy() || !config()?.is_enabled} onClick={startPairing}>
+                      Start pairing
+                    </button>
+                    <Show when={!config()?.is_enabled}>
+                      <span class="field-note">Configure a Spine URL first.</span>
+                    </Show>
+                  </div>
+                </div>
+              }
+            >
+              {(h) => (
+                <div class="devices-pair-stage">
+                  <div class="devices-qr">
+                    <img src={h().qr_png_base64} alt="pairing QR" />
+                  </div>
+                  <div class="devices-pair-copy">
+                    <span class="devices-status-label">Short code</span>
+                    <div class="devices-short-code">{h().short_code}</div>
+                    <div class="devices-pair-meta-row">
+                      <span>Session {h().session_id.slice(0, 8)}…</span>
+                      <span>Expires {formatTimestamp(h().expires_at)}</span>
+                      <span>State: {humanizeStatus(pairState()?.state ?? 'pending')}</span>
+                    </div>
+                    <div class="devices-action-row">
+                      <button class="action-btn" onClick={cancelPairing} disabled={busy()}>
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </Show>
           }
         >
-          <div>
-            <div>
-              <strong>Peer fingerprint:</strong>{' '}
-              <code title={config()?.paired_peer_fingerprint ?? ''}>
+          <div class="devices-meta-list">
+            <div class="devices-meta-row">
+              <span class="devices-meta-label">Peer fingerprint</span>
+              <span class="devices-meta-value" title={config()?.paired_peer_fingerprint ?? ''}>
                 {shortFingerprint(config()?.paired_peer_fingerprint)}
-              </code>{' '}
-              <button onClick={() => copyFingerprint(config()?.paired_peer_fingerprint ?? '')}>Copy</button>
+              </span>
+              <button class="action-btn" onClick={() => copyFingerprint(config()?.paired_peer_fingerprint ?? '')}>
+                Copy
+              </button>
             </div>
             <Show when={config()?.peer_device_id_uuid}>
-              <div>
-                <strong>Peer UUID:</strong> <code>{config()?.peer_device_id_uuid}</code>
+              <div class="devices-meta-row">
+                <span class="devices-meta-label">Peer UUID</span>
+                <span class="devices-meta-value">{config()?.peer_device_id_uuid}</span>
               </div>
             </Show>
-            <div>
-              <strong>Paired at:</strong> {formatTimestamp(config()?.paired_at)}
+            <div class="devices-meta-row">
+              <span class="devices-meta-label">Paired at</span>
+              <span class="devices-meta-value devices-meta-value-plain">{formatTimestamp(config()?.paired_at)}</span>
             </div>
-            <div style={{ 'margin-top': '12px', display: 'flex', gap: '8px' }}>
-              <button onClick={() => setSendNoteOpen(true)} disabled={busy()}>
-                Send note
-              </button>
-              <button onClick={pullNow} disabled={busy()}>
-                Pull now
-              </button>
-              <button onClick={() => setShowUnpairConfirm(true)} disabled={busy()} style={{ color: '#f88' }}>
-                Unpair
-              </button>
+            <div class="devices-meta-row">
+              <span class="devices-meta-label">Live sync</span>
+              <span class="devices-meta-value devices-meta-value-plain">
+                <span class={`devices-status-dot devices-status-dot-${connTone()}`} />
+                {humanizeStatus(connectionStatus())}
+              </span>
             </div>
+          </div>
+          <div class="devices-action-row">
+            <button class="action-btn" onClick={() => setSendNoteOpen(true)} disabled={busy()}>
+              Send note
+            </button>
+            <button class="action-btn" onClick={pullNow} disabled={busy()}>
+              Pull now
+            </button>
+            <button class="action-btn danger-btn" onClick={() => setShowUnpairConfirm(true)} disabled={busy()}>
+              Unpair
+            </button>
           </div>
         </Show>
-      </section>
+      </div>
 
-      {/* Inbox card */}
-      <section style={{ 'margin-bottom': '16px', padding: '12px', background: '#1e1e1e', 'border-radius': '8px' }}>
-        <h3 style={{ 'margin-top': 0 }}>Sync inbox</h3>
-        <div>
-          <div>
-            <strong>Files:</strong> {inboxStats().count}
+      <div class="devices-section">
+        <h3>Inbox</h3>
+        <div class="devices-status-row">
+          <div class="devices-status-card">
+            <span class="devices-status-label">Files</span>
+            <span class="devices-status-value devices-status-value-mono">{inboxStats().count}</span>
           </div>
-          <div>
-            <strong>Total size:</strong> {formatBytes(inboxStats().totalBytes)}
+          <div class="devices-status-card">
+            <span class="devices-status-label">Total size</span>
+            <span class="devices-status-value devices-status-value-mono">{formatBytes(inboxStats().totalBytes)}</span>
           </div>
-          <div>
-            <strong>Latest:</strong> {inboxStats().latest}
+          <div class="devices-status-card">
+            <span class="devices-status-label">Latest write</span>
+            <span class="devices-status-value devices-status-value-mono">{inboxStats().latest}</span>
           </div>
         </div>
-        <div style={{ 'margin-top': '12px' }}>
+        <div class="field-note">
+          Decrypted notes are materialized into <code>sync-inbox/</code> and indexed locally after write completion.
+        </div>
+        <div class="devices-action-row">
           <button
+            class="action-btn"
             onClick={() => setShowClearInboxConfirm(true)}
             disabled={busy() || inboxStats().count === 0}
           >
             Empty inbox…
           </button>
         </div>
-      </section>
+      </div>
 
-      {/* Unpair confirm dialog */}
       <Show when={showUnpairConfirm()}>
-        <div
-          style={{
-            position: 'fixed',
-            inset: '0',
-            background: 'rgba(0,0,0,0.6)',
-            display: 'flex',
-            'align-items': 'center',
-            'justify-content': 'center',
-          }}
-        >
-          <div style={{ background: '#2a2a2a', padding: '24px', 'border-radius': '8px', 'max-width': '480px' }}>
-            <h3 style={{ 'margin-top': 0 }}>Unpair this device?</h3>
+        <div class="devices-modal-backdrop">
+          <div class="devices-modal">
+            <h3>Unpair this device?</h3>
             <p>This will:</p>
             <ul>
               <li>Revoke the current authentication token on the Spine</li>
@@ -459,19 +533,19 @@ export default function DevicesTab() {
               <li>Disconnect the live notification channel</li>
               <li>Preserve the sync-inbox files unless you check the box below</li>
             </ul>
-            <label style={{ display: 'block', 'margin-top': '12px' }}>
+            <label class="devices-checkbox-row">
               <input
                 type="checkbox"
                 checked={unpairClearInbox()}
                 onChange={(e) => setUnpairClearInbox(e.currentTarget.checked)}
-              />{' '}
+              />
               Also empty sync-inbox (cannot be undone)
             </label>
-            <div style={{ 'margin-top': '16px', display: 'flex', 'justify-content': 'flex-end', gap: '8px' }}>
-              <button onClick={() => setShowUnpairConfirm(false)} disabled={busy()}>
+            <div class="devices-modal-actions">
+              <button class="action-btn" onClick={() => setShowUnpairConfirm(false)} disabled={busy()}>
                 Cancel
               </button>
-              <button onClick={performUnpair} disabled={busy()} style={{ color: '#f88' }}>
+              <button class="action-btn danger-btn" onClick={performUnpair} disabled={busy()}>
                 Unpair
               </button>
             </div>
@@ -479,29 +553,19 @@ export default function DevicesTab() {
         </div>
       </Show>
 
-      {/* Clear inbox confirm dialog */}
       <Show when={showClearInboxConfirm()}>
-        <div
-          style={{
-            position: 'fixed',
-            inset: '0',
-            background: 'rgba(0,0,0,0.6)',
-            display: 'flex',
-            'align-items': 'center',
-            'justify-content': 'center',
-          }}
-        >
-          <div style={{ background: '#2a2a2a', padding: '24px', 'border-radius': '8px', 'max-width': '420px' }}>
-            <h3 style={{ 'margin-top': 0 }}>Empty sync inbox?</h3>
+        <div class="devices-modal-backdrop">
+          <div class="devices-modal">
+            <h3>Empty sync inbox?</h3>
             <p>
               {inboxStats().count} file(s), {formatBytes(inboxStats().totalBytes)} will be deleted from{' '}
               <code>sync-inbox/</code>. The indexed content remains in the vector store.
             </p>
-            <div style={{ 'margin-top': '16px', display: 'flex', 'justify-content': 'flex-end', gap: '8px' }}>
-              <button onClick={() => setShowClearInboxConfirm(false)} disabled={busy()}>
+            <div class="devices-modal-actions">
+              <button class="action-btn" onClick={() => setShowClearInboxConfirm(false)} disabled={busy()}>
                 Cancel
               </button>
-              <button onClick={performClearInbox} disabled={busy()} style={{ color: '#f88' }}>
+              <button class="action-btn danger-btn" onClick={performClearInbox} disabled={busy()}>
                 Empty inbox
               </button>
             </div>
@@ -509,45 +573,35 @@ export default function DevicesTab() {
         </div>
       </Show>
 
-      {/* Send note dialog */}
       <Show when={sendNoteOpen()}>
-        <div
-          style={{
-            position: 'fixed',
-            inset: '0',
-            background: 'rgba(0,0,0,0.6)',
-            display: 'flex',
-            'align-items': 'center',
-            'justify-content': 'center',
-          }}
-        >
-          <div style={{ background: '#2a2a2a', padding: '24px', 'border-radius': '8px', 'max-width': '560px', width: '90%' }}>
-            <h3 style={{ 'margin-top': 0 }}>Send note to paired device</h3>
-            <label style={{ display: 'block', 'margin-bottom': '8px' }}>
-              Filename
+        <div class="devices-modal-backdrop">
+          <div class="devices-modal devices-modal-wide">
+            <h3>Send note to paired device</h3>
+            <label class="devices-form-field">
+              <span>Filename</span>
               <input
+                class="devices-input"
                 type="text"
                 value={sendFilename()}
                 onInput={(e) => setSendFilename(e.currentTarget.value)}
                 placeholder="note.md"
-                style={{ width: '100%', padding: '6px 8px', 'margin-top': '4px' }}
               />
             </label>
-            <label style={{ display: 'block' }}>
-              Body
+            <label class="devices-form-field">
+              <span>Body</span>
               <textarea
+                class="devices-textarea"
                 rows={8}
                 value={sendBody()}
                 onInput={(e) => setSendBody(e.currentTarget.value)}
                 placeholder="Type your note…"
-                style={{ width: '100%', padding: '6px 8px', 'margin-top': '4px' }}
               />
             </label>
-            <div style={{ 'margin-top': '16px', display: 'flex', 'justify-content': 'flex-end', gap: '8px' }}>
-              <button onClick={() => setSendNoteOpen(false)} disabled={busy()}>
+            <div class="devices-modal-actions">
+              <button class="action-btn" onClick={() => setSendNoteOpen(false)} disabled={busy()}>
                 Cancel
               </button>
-              <button onClick={sendNote} disabled={busy() || !sendBody()}>
+              <button class="action-btn" onClick={sendNote} disabled={busy() || !sendBody()}>
                 Send
               </button>
             </div>
