@@ -1,9 +1,9 @@
 //! Cryptographic primitives used by the spine client.
 //!
 //! All algorithms in this module are normative — they MUST produce identical bytes on every
-//! client implementation so that paired devices interoperate. See PRD 003 §Impl Note 1.1 and
-//! 1.2 (the dalek conversion contract and client-supplied UUIDs) and PRD 004 §US-023, §US-025,
-//! §US-026.
+//! client implementation so that paired devices interoperate. See PRD 002 §Impl Note 1.1 and
+//! 1.2 (the dalek conversion contract and client-supplied UUIDs) and PRD 004 §US-031, §US-033,
+//! §US-034.
 //!
 //! No function here performs I/O. Functions are deterministic except those that explicitly
 //! source randomness (`random_nonce`, `mint_jwt` via the `jti` UUID generator).
@@ -45,7 +45,7 @@ pub fn random_nonce_12() -> [u8; 12] {
 /// Encrypt `plaintext` with AES-256-GCM, producing `ciphertext || tag`.
 ///
 /// `aad` is bound into the GCM tag — paired sender and receiver must agree on it. See
-/// PRD 004 §US-025: AAD is `SHA-256(peer_ed25519_pubkey_raw_32_bytes)`.
+/// PRD 004 §US-033: AAD is `SHA-256(peer_ed25519_pubkey_raw_32_bytes)`.
 pub fn aes_256_gcm_encrypt(
     key: &[u8; 32],
     nonce: &[u8; 12],
@@ -110,7 +110,7 @@ pub fn ed25519_verifying_key_to_x25519_pubkey(vk: &VerifyingKey) -> [u8; 32] {
 ///
 /// Given the local Ed25519 signing key, the peer's Ed25519 verifying key, and the pairing
 /// session ID (as a UTF-8 string), returns `HKDF-SHA256(x25519(...), session_id, "syncmind-v1")`.
-/// This is the canonical derivation specified in PRD 003 §Impl Note 1.1.
+/// This is the canonical derivation specified in PRD 002 §Impl Note 1.1.
 pub fn derive_sync_key(
     local_sk: &SigningKey,
     peer_vk: &VerifyingKey,
@@ -130,7 +130,7 @@ pub fn sign(sk: &SigningKey, msg: &[u8]) -> Signature {
 }
 
 // ---------------------------------------------------------------------------
-// JWT (EdDSA) — PRD 004 §US-024
+// JWT (EdDSA) — PRD 004 §US-032
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

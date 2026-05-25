@@ -327,7 +327,7 @@ The Spine 是 SyncMind 从"单设备本地引擎"迈向"多端协同知识网络
 - **共享秘密**：`shared_secret = x25519(local_x25519_priv, peer_x25519_pub)`，长度 32 字节。
 - **派生**：`sync_key = HKDF-SHA256(ikm = shared_secret, salt = session_id_str.as_bytes(), info = b"syncmind-v1")`，输出 32 字节。
 
-非 Rust 客户端实现应使用等价的转换（如 libsodium `crypto_sign_ed25519_sk_to_curve25519` 与 `crypto_sign_ed25519_pk_to_curve25519`）以保证派生结果一致。详细的桌面端实现参见 **PRD 004 §US-023** 与 **`openspec/changes/desktop-spine-client/specs/device-pairing/spec.md`** 中的规范性场景。
+非 Rust 客户端实现应使用等价的转换（如 libsodium `crypto_sign_ed25519_sk_to_curve25519` 与 `crypto_sign_ed25519_pk_to_curve25519`）以保证派生结果一致。详细的桌面端实现参见 **PRD 004 §US-031** 与 **`openspec/changes/desktop-spine-client/specs/device-pairing/spec.md`** 中的规范性场景。
 
 #### 1.2 客户端自定 `device_uuid` (规范性，与 §1.1 同步引入)
 
@@ -338,7 +338,7 @@ UUID 冲突语义：
 - 同 UUID + 同 `public_key_fingerprint` → 视作设备恢复，允许。
 - 同 UUID + 不同 `public_key_fingerprint` → 返回 `409 UUID_CONFLICT`。
 
-参见 PRD 004 §US-021、`openspec/changes/desktop-spine-client/specs/device-pairing/spec.md` 与 `specs/device-auth/spec.md`。
+参见 PRD 004 §US-029、`openspec/changes/desktop-spine-client/specs/device-pairing/spec.md` 与 `specs/device-auth/spec.md`。
 
 ### 2. Go-Zero 使用范围缩小
 - **PRD 原设计 (US-010 / US-018):** 计划引入 `go-zero` 作为完整服务脚手架，包括 `rest`、`zrpc` 等组件。

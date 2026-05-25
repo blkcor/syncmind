@@ -20,10 +20,10 @@
 - [x] 2.11 Update `services/sync-gateway/docs/security/spine-audit.md` to reflect client-supplied UUIDs
 - [x] 2.12 Run `make test` and `go vet ./...` in `services/sync-gateway`; both clean
 
-## 3. PRD 003 amendment
+## 3. PRD 002 amendment
 
-- [x] 3.1 Edit `docs/prd/003-the-spine.md` §Impl Note 1 to add sub-note §1.1 specifying the dalek conversion algorithm (per design.md)
-- [x] 3.2 Add cross-reference: "See PRD 004 §US-023 for the desktop implementation."
+- [x] 3.1 Edit `docs/prd/002-the-spine.md` §Impl Note 1 to add sub-note §1.1 specifying the dalek conversion algorithm (per design.md)
+- [x] 3.2 Add cross-reference: "See PRD 004 §US-031 for the desktop implementation."
 - [x] 3.3 Add cross-reference: "See openspec/changes/desktop-spine-client/specs/device-pairing/spec.md for the normative spec delta."
 
 ## 4. Core Config extension (core/syncmind-core)
@@ -75,7 +75,7 @@
 - [x] 8.5 Generate a fresh `Idempotency-Key` UUIDv4 per outbound bundle upload; reuse across retries
 - [x] 8.6 Exponential backoff retry on `429` / `5xx`: 1s, 2s, 4s, 8s, 16s — capped at 5 attempts
 - [x] 8.7 On `401 AUTH_INVALID`, mint a fresh JWT and retry exactly once; on second 401, surface `AuthFailed`
-- [ ] 8.8 Add unit tests against a `wiremock`-based mock server: happy paths + 401 retry + idempotency-key reuse
+- [x] 8.8 Add unit tests against a `wiremock`-based mock server: happy paths + 401 retry + idempotency-key reuse
 
 ## 9. Pairing flow (spine/pairing.rs)
 
@@ -180,16 +180,15 @@
 
 ### Landed in `feat/desktop-spine-client`
 - Server amendments (§2): client-supplied `device_uuid` accepted, 409 `UUID_CONFLICT` on mismatch, and regression coverage confirms `DeviceStore.Create` persists the supplied `Device.ID`. The handler passes the supplied UUID directly to the existing `model.Device { ID: deviceID, ... }`, so no separate `WithID` option is required.
-- PRD 003 amendment (§3): §Impl Note 1.1 (dalek conversion) and 1.2 (client UUID) added.
+- PRD 002 amendment (§3): §Impl Note 1.1 (dalek conversion) and 1.2 (client UUID) added.
 - Core `Config.spine` extension (§4): all five `SpineConfig` fields landed via `String`/`PathBuf` (no `chrono::DateTime` / `uuid::Uuid` deps added to the daemon crate). 4.5/4.6 are now covered by `SpineConfig::validate_url` and `SpineConfig::load_trust_ca`; desktop URL/CA paths reuse those helpers while retaining the existing UI-facing error codes.
 - `index_file_once` (§5): added with idempotency + `IngestionReport`; indexing failures now surface as typed `IndexingError` variants, including explicit `Embed` errors for embedding-service failures.
-- Spine modules (§6–§13): identity / crypto / bundle / client / pairing / inbox / commands / state all complete, with 27 unit tests passing including HKDF RFC 5869 vectors, AES-GCM tamper detection, sync_key symmetry, envelope integrity, atomic inbox writes, and JWT claim checks. 8.8 wiremock tests are a follow-up.
+- Spine modules (§6–§13): identity / crypto / bundle / client / pairing / inbox / commands / state all complete, with 46 unit tests passing including HKDF RFC 5869 vectors, AES-GCM tamper detection, sync_key symmetry, envelope integrity, atomic inbox writes, JWT claim checks, and wiremock-driven HTTP client tests (happy paths, 401 retry, idempotency-key reuse, 5xx retry exhaustion).
 - WebSocket loop (§10): `spine/ws.rs` is implementation-complete with backoff + jitter + 40 s read deadline + 30 s polling fallback (covered by a bounds-property test). It is NOT yet auto-spawned by `SpineRuntime::rebuild_client` — the activation requires piping an `Arc<AppState>`-flavoured ingestion closure through SpineRuntime, which is the only carry-over for the next session. The Devices tab's 1.5 s refresh loop + manual "Pull now" button cover the same UX for now.
 - Devices tab UI (§14) + store wiring (§15): full surface implemented in `apps/desktop/src/components/DevicesTab.tsx` plus `App.tsx` / `store.ts` / tray menu hookup.
 
 ### Deferred to follow-up sessions
 - §10.5–§10.7: auto-activate `ws::spawn_loop` from `SpineRuntime::rebuild_client` when paired, wire incoming `new_bundle` callbacks to bundle ingestion, push `WsStatus` into a Tauri event (`spine://status`).
-- §8.8: `wiremock`-driven integration tests for the HTTP client (401 refresh, idempotency-key, retry budget).
 - §16 end-to-end verification: requires `docker compose up` of the sync-gateway plus two `SYNCMIND_DATA_DIR` runtimes. Easy follow-up; not run in this session because the user is away.
 - §17.1–§17.7: clippy `-D warnings` on the whole workspace (pre-existing `objc` / `collapsible_match` warnings in `lib.rs` need follow-up cleanup that is unrelated to this change), the PR itself, and `/opsx:archive` after merge.
 - Persisting the peer's raw Ed25519 pubkey alongside `sync_key` at pairing completion. The send path currently reads it from `<data-dir>/peers/<fp>.pub` (helper `persist_peer_pubkey_raw` exists); the call site that writes it during `PollOutcome::Completed` handling is the one-line follow-up that closes the loop.

@@ -23,7 +23,7 @@
 //! AAD = `SHA-256(peer_ed25519_pubkey_raw_32_bytes)` — 32 bytes. The sender uses the
 //! receiver's public key; the receiver uses its own.
 //!
-//! See PRD 004 §US-025 / §US-026 and `specs/desktop-spine-client/spec.md`.
+//! See PRD 004 §US-033 / §US-034 and `specs/desktop-spine-client/spec.md`.
 
 use serde::{Deserialize, Serialize};
 

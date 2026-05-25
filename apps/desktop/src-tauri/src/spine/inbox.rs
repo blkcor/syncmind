@@ -1,6 +1,6 @@
 //! Sync-inbox: materialize decrypted notes to disk and feed them into the local index.
 //!
-//! PRD 004 §US-028. Files land under `<data-dir>/sync-inbox/`. Writing is atomic
+//! PRD 004 §US-036. Files land under `<data-dir>/sync-inbox/`. Writing is atomic
 //! (tmp → fsync → rename), filename input is sanitized to neutralize path traversal,
 //! and `syncmind_indexing::index_file_once` is invoked synchronously after rename so the
 //! caller knows whether to ACK the bundle.
@@ -101,7 +101,7 @@ where
     }
 
     // Index the freshly-rename'd file. If this fails, we DO return an error to the caller
-    // so the bundle is not ACKed (PRD 004 §US-028 acceptance criteria).
+    // so the bundle is not ACKed (PRD 004 §US-036 acceptance criteria).
     let chunks_added = indexer(final_path.clone())
         .await
         .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;

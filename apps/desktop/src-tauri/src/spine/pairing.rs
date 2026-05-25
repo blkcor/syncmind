@@ -1,6 +1,6 @@
 //! Pairing flow: initiate, poll for completion, derive sync_key.
 //!
-//! PRD 004 §US-022 / §US-023. The desktop acts as the initiator — it displays a QR PNG
+//! PRD 004 §US-030 / §US-031. The desktop acts as the initiator — it displays a QR PNG
 //! plus a 6-digit short code and polls `GET /v1/pairing/:session_id/status` every second
 //! until the responder completes the session or the TTL elapses.
 
@@ -19,7 +19,7 @@ use crate::spine::crypto;
 use crate::spine::identity::{self, Identity};
 use crate::spine::{SpineError, SpineErrorCode};
 
-/// 1-second polling interval for the pairing status loop (PRD 004 §US-022).
+/// 1-second polling interval for the pairing status loop (PRD 004 §US-030).
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// QR PNG side length in pixels.
@@ -44,6 +44,41 @@ pub struct PairingCompletion {
     /// SHA-256 lower-hex of `sync_key` — purely for UI display so the user can spot-verify
     /// against the peer's identical display. NOT the sync_key itself.
     pub sync_key_fingerprint: String,
+}
+
+/// Complete pairing as the responder using a gateway short code.
+pub async fn complete_with_short_code(
+    client: &SpineClient,
+    identity: &Identity,
+    short_code: &str,
+) -> Result<PairingCompletion, SpineError> {
+    let normalized = normalize_short_code(short_code)?;
+    let resp = client
+        .pairing_complete_short_code(
+            &normalized,
+            &identity.public_key_bytes(),
+            identity.device_type(),
+        )
+        .await?;
+    if resp.status != "completed" {
+        return Err(SpineError::new(
+            SpineErrorCode::Internal,
+            format!("unexpected pairing completion status: {}", resp.status),
+        ));
+    }
+    let session_id = resp.session_id.as_deref().ok_or_else(|| {
+        SpineError::new(
+            SpineErrorCode::Internal,
+            "short-code completion response missing session_id",
+        )
+    })?;
+    let initiator_b64 = resp.initiator_pubkey.as_deref().ok_or_else(|| {
+        SpineError::new(
+            SpineErrorCode::Internal,
+            "short-code completion response missing initiator_pubkey",
+        )
+    })?;
+    completion_from_peer_pubkey(identity, session_id, initiator_b64, resp.initiator_id).await
 }
 
 /// Outcome of a single `poll_once` iteration.
@@ -98,42 +133,74 @@ async fn classify_status(
                     "status=completed but server returned no responder_pubkey",
                 )
             })?;
-            let raw = B64URL
-                .decode(responder_b64)
-                .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
-            if raw.len() != 32 {
-                return Err(SpineError::new(
-                    SpineErrorCode::Internal,
-                    "responder_pubkey is not 32 bytes",
-                ));
-            }
-            let mut peer_bytes = [0u8; 32];
-            peer_bytes.copy_from_slice(&raw);
-            let peer_vk = VerifyingKey::from_bytes(&peer_bytes)
-                .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
-            let peer_fp = identity::fingerprint_hex(&peer_bytes);
-
-            let sync_key =
-                identity.with_signing_key(|sk| crypto::derive_sync_key(sk, &peer_vk, session_id));
-            let sync_key_fp = hex::encode(crypto::sha256(&sync_key));
-            identity::store_sync_key(&peer_fp, &sync_key)?;
-            info!(
-                peer_fingerprint = %peer_fp,
-                "pairing completed, sync_key derived and cached"
-            );
-
-            Ok(PollOutcome::Completed(PairingCompletion {
-                peer_fingerprint: peer_fp,
-                peer_device_id: status.paired_device_id.clone(),
-                peer_pubkey_raw: peer_bytes,
-                sync_key_fingerprint: sync_key_fp,
-            }))
+            completion_from_peer_pubkey(
+                identity,
+                session_id,
+                responder_b64,
+                status.paired_device_id.clone(),
+            )
+            .await
+            .map(PollOutcome::Completed)
         }
         other => Err(SpineError::new(
             SpineErrorCode::Internal,
             format!("unknown pairing status: {other}"),
         )),
     }
+}
+
+async fn completion_from_peer_pubkey(
+    identity: &Identity,
+    session_id: &str,
+    peer_pubkey_b64: &str,
+    peer_device_id: Option<String>,
+) -> Result<PairingCompletion, SpineError> {
+    let peer_bytes = decode_pubkey(peer_pubkey_b64, "peer_pubkey")?;
+    let peer_vk = VerifyingKey::from_bytes(&peer_bytes)
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+    let peer_fp = identity::fingerprint_hex(&peer_bytes);
+
+    let sync_key =
+        identity.with_signing_key(|sk| crypto::derive_sync_key(sk, &peer_vk, session_id));
+    let sync_key_fp = hex::encode(crypto::sha256(&sync_key));
+    identity::store_sync_key(&peer_fp, &sync_key)?;
+    info!(
+        peer_fingerprint = %peer_fp,
+        "pairing completed, sync_key derived and cached"
+    );
+
+    Ok(PairingCompletion {
+        peer_fingerprint: peer_fp,
+        peer_device_id,
+        peer_pubkey_raw: peer_bytes,
+        sync_key_fingerprint: sync_key_fp,
+    })
+}
+
+fn decode_pubkey(encoded: &str, field: &str) -> Result<[u8; 32], SpineError> {
+    let raw = B64URL
+        .decode(encoded)
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+    if raw.len() != 32 {
+        return Err(SpineError::new(
+            SpineErrorCode::Internal,
+            format!("{field} is not 32 bytes"),
+        ));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&raw);
+    Ok(out)
+}
+
+pub fn normalize_short_code(input: &str) -> Result<String, SpineError> {
+    let digits = input.trim().replace('-', "");
+    if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(SpineError::new(
+            SpineErrorCode::InvalidShortCode,
+            "short code must contain 6 digits",
+        ));
+    }
+    Ok(format!("{}-{}", &digits[..3], &digits[3..]))
 }
 
 /// Spawn a polling loop on the supplied tokio runtime. Returns a future that the caller
@@ -201,7 +268,7 @@ pub async fn unpair(
     peer_fingerprint: &str,
     config: &mut syncmind_core::Config,
 ) -> Result<(), SpineError> {
-    // Best-effort revoke; failure does not block the rest of unpair (PRD 004 §US-030).
+    // Best-effort revoke; failure does not block the rest of unpair (PRD 004 §US-038).
     if let Err(e) = client.auth_revoke().await {
         warn!(error = %e, "auth_revoke failed during unpair (continuing)");
     }
@@ -226,6 +293,25 @@ mod tests {
         assert!(
             bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
             "expected PNG magic"
+        );
+    }
+
+    #[test]
+    fn normalize_short_code_accepts_hyphenated_and_digits_only() {
+        assert_eq!(normalize_short_code("123-456").unwrap(), "123-456");
+        assert_eq!(normalize_short_code("123456").unwrap(), "123-456");
+        assert_eq!(normalize_short_code(" 123456 ").unwrap(), "123-456");
+    }
+
+    #[test]
+    fn normalize_short_code_rejects_invalid_input() {
+        assert_eq!(
+            normalize_short_code("12345").unwrap_err().code,
+            "INVALID_SHORT_CODE"
+        );
+        assert_eq!(
+            normalize_short_code("abc-def").unwrap_err().code,
+            "INVALID_SHORT_CODE"
         );
     }
 }

@@ -233,6 +233,7 @@ pub fn run() {
             spine::commands::spine_set_trust_ca,
             spine::commands::spine_get_identity,
             spine::commands::spine_start_pairing,
+            spine::commands::spine_complete_pairing_short_code,
             spine::commands::spine_pair_status,
             spine::commands::spine_cancel_pairing,
             spine::commands::spine_send_note,

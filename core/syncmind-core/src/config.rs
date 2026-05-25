@@ -56,18 +56,18 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SpineConfig {
     /// Spine sync gateway URL (e.g. `https://spine.example.com` or `http://192.168.1.10:8080`).
-    /// `None` disables the desktop sync subsystem entirely. See PRD 004 §US-020.
+    /// `None` disables the desktop sync subsystem entirely. See PRD 004 §US-028.
     #[serde(default)]
     pub url: Option<String>,
 
     /// Optional PEM file containing a self-signed CA certificate that the HTTP client should
-    /// trust in addition to the system roots. Per PRD 004 §US-020, plain HTTP and IP-host
+    /// trust in addition to the system roots. Per PRD 004 §US-028, plain HTTP and IP-host
     /// URLs are allowed; users opting into HTTPS with a private CA point this at the PEM.
     #[serde(default)]
     pub trust_ca_path: Option<PathBuf>,
 
     /// SHA-256 hex fingerprint (64 chars) of the paired peer's Ed25519 public key.
-    /// `None` when no pairing has completed. See PRD 004 §US-022.
+    /// `None` when no pairing has completed. See PRD 004 §US-030.
     #[serde(default)]
     pub paired_peer_fingerprint: Option<String>,
 
@@ -81,7 +81,7 @@ pub struct SpineConfig {
 
     /// UUIDv4 (as a string) of the paired peer's `devices.id` on the Spine. Cached locally
     /// so the desktop can render it in the UI without an extra `/me` round-trip. See PRD 004
-    /// §US-022 and the OpenSpec change `desktop-spine-client`.
+    /// §US-030 and the OpenSpec change `desktop-spine-client`.
     #[serde(default)]
     pub peer_device_id_uuid: Option<String>,
 }
@@ -142,7 +142,7 @@ impl SpineConfig {
     }
 
     /// Returns true when the configured URL uses plain HTTP (used by the desktop UI to render
-    /// a non-blocking warning banner per PRD 004 §US-020). Returns false when no URL is set
+    /// a non-blocking warning banner per PRD 004 §US-028). Returns false when no URL is set
     /// or the URL is malformed.
     pub fn is_plain_http(&self) -> bool {
         self.url

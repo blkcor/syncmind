@@ -68,6 +68,13 @@ pub struct PairingStateView {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct CompletePairingResult {
+    pub peer_fingerprint: String,
+    pub peer_device_id: Option<String>,
+    pub config: SpineConfigView,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SendNoteResult {
     pub bundle_id: String,
 }
@@ -329,6 +336,40 @@ pub async fn spine_cancel_pairing(state: State<'_, AppState>) -> Result<(), Stri
     Ok(())
 }
 
+#[tauri::command]
+pub async fn spine_complete_pairing_short_code(
+    short_code: String,
+    state: State<'_, AppState>,
+) -> Result<CompletePairingResult, String> {
+    let runtime = Arc::clone(&state.spine);
+
+    {
+        let cfg = state.config.lock().expect("config mutex poisoned");
+        if cfg.spine.is_paired() {
+            return Err(SpineError::new(
+                SpineErrorCode::AlreadyPaired,
+                "device is already paired; unpair first",
+            )
+            .to_string());
+        }
+    }
+
+    runtime.cancel_pairing().await;
+    let client = runtime.require_client().await.map_err(String::from)?;
+    let completion =
+        pairing::complete_with_short_code(&client, &runtime.identity, &short_code).await?;
+    persist_pairing_completion(&state, &completion)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let cfg = state.config.lock().expect("config mutex poisoned").clone();
+    Ok(CompletePairingResult {
+        peer_fingerprint: completion.peer_fingerprint,
+        peer_device_id: completion.peer_device_id,
+        config: view_of_config(&cfg.spine),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Send / pull / unpair
 // ---------------------------------------------------------------------------
@@ -528,7 +569,7 @@ async fn ensure_paired_resources(
     // fingerprint is a one-way hash. The send path needs the peer pubkey for AAD; the
     // recv path needs the local pubkey. We persist the peer's raw pubkey alongside the
     // config when pairing completes — but we haven't yet. Fall back to passing the
-    // fingerprint bytes as AAD instead: PRD 004 §US-025 specifies AAD =
+    // fingerprint bytes as AAD instead: PRD 004 §US-033 specifies AAD =
     // SHA-256(peer_ed25519_pubkey_raw_32_bytes), and the fingerprint IS exactly that hash.
     // So treating the hex-decoded fingerprint as the AAD-key-derivation pre-image breaks
     // the spec.

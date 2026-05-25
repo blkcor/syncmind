@@ -29,7 +29,7 @@ This document tracks the security posture of the Spine sync gateway. Spine is de
 | 3 | `iss` and `aud` claims validated | ✅ `jwt.WithIssuer` and `jwt.WithAudience` used |
 | 4 | `jti` blacklist checked via Redis | ✅ Prevents token replay |
 | 5 | Deactivated devices rejected | ✅ `is_active` enforced in auth middleware |
-| 6 | `devices.id` is the client-supplied UUIDv4 | ✅ Pairing handler accepts `device_uuid` field (PRD 003 §Impl Note 1.2); conflict with a different fingerprint returns `409 UUID_CONFLICT` |
+| 6 | `devices.id` is the client-supplied UUIDv4 | ✅ Pairing handler accepts `device_uuid` field (PRD 002 §Impl Note 1.2); conflict with a different fingerprint returns `409 UUID_CONFLICT` |
 
 ## Transport Security
 

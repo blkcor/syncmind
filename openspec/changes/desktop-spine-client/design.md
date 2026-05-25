@@ -1,8 +1,8 @@
 ## Context
 
-PRD 004 (`docs/prd/004-desktop-spine-client.md`) defines US-020..US-030 for the desktop side of the Spine protocol. PRD 003 and the OpenSpec archive `2026-05-20-the-spine/` shipped the server: a deliberately blind sync gateway that stores opaque AES-GCM ciphertext, exposes pairing + bundle + WebSocket APIs over HTTPS, and verifies EdDSA JWTs against per-device Ed25519 public keys.
+PRD 004 (`docs/prd/004-desktop-spine-client.md`) defines US-028..US-038 for the desktop side of the Spine protocol. PRD 002 and the OpenSpec archive `2026-05-20-the-spine/` shipped the server: a deliberately blind sync gateway that stores opaque AES-GCM ciphertext, exposes pairing + bundle + WebSocket APIs over HTTPS, and verifies EdDSA JWTs against per-device Ed25519 public keys.
 
-The desktop app today (`apps/desktop/`) is a Tauri v2 + SolidJS shell with four tabs (Search / Pinned / RAG Lab / Settings), a tray icon, and direct Cargo `path` dependencies on `syncmind-core`, `syncmind-storage`, `syncmind-rag-engine`, `syncmind-indexing`, and `syncmind-file-watcher`. It has no secrets storage, no networking, no QR rendering, no WebSocket client. PRD 003 §Impl Notes §1 confirmed that all key generation, ECDH, encryption, JWT signing, and bundle interpretation are explicit client responsibilities.
+The desktop app today (`apps/desktop/`) is a Tauri v2 + SolidJS shell with four tabs (Search / Pinned / RAG Lab / Settings), a tray icon, and direct Cargo `path` dependencies on `syncmind-core`, `syncmind-storage`, `syncmind-rag-engine`, `syncmind-indexing`, and `syncmind-file-watcher`. It has no secrets storage, no networking, no QR rendering, no WebSocket client. PRD 002 §Impl Notes §1 confirmed that all key generation, ECDH, encryption, JWT signing, and bundle interpretation are explicit client responsibilities.
 
 Constraints (from CLAUDE.md and PRD 004):
 - Privacy is absolute — vectors and plaintext stay on-device; the server never sees keys.
@@ -14,11 +14,11 @@ Constraints (from CLAUDE.md and PRD 004):
 ## Goals / Non-Goals
 
 **Goals:**
-- Implement PRD 004's US-020..US-030: identity, pairing UI, sync_key derivation, JWT, bundle encryption/decryption with integrity verification, WebSocket + polling fallback, sync-inbox materialization, unpair/reset.
+- Implement PRD 004's US-028..US-038: identity, pairing UI, sync_key derivation, JWT, bundle encryption/decryption with integrity verification, WebSocket + polling fallback, sync-inbox materialization, unpair/reset.
 - Keep the desktop binary's RSS increase below 20 MB at steady state and below 80 MB during a 100-bundle catch-up burst.
 - Make all crypto operations testable with deterministic golden vectors so the protocol can be cross-verified against a future mobile client.
 - Coordinate the small server amendment (client-supplied `device_uuid` in pairing) inside this same change so the protocol contract evolves atomically.
-- Amend PRD 003 §Impl Note 1 with the exact Ed25519↔X25519 conversion contract so future clients implement it identically.
+- Amend PRD 002 §Impl Note 1 with the exact Ed25519↔X25519 conversion contract so future clients implement it identically.
 
 **Non-Goals:**
 - No QR scanning / camera support — desktop is the QR-displaying initiator only (PRD 004 §NG-15).
@@ -44,12 +44,12 @@ Constraints (from CLAUDE.md and PRD 004):
 - Plaintext 0600 file always — rejected as the default: too weak for a key that grants access to all synced content. Retained as the Linux fallback when libsecret is absent, with a stderr warning.
 
 ### 3. Ed25519 ↔ X25519 conversion uses dalek's native helpers
-**Rationale:** PRD 003 §Impl Note 1 leaves the conversion algorithm unspecified. The dalek family (`ed25519-dalek 2`, `curve25519-dalek 4`) ships the canonical conversion: `SigningKey::to_scalar_bytes()` on the private side and `CompressedEdwardsY::decompress()?.to_montgomery().to_bytes()` on the public side. Fixing this now via a PRD 003 amendment makes the contract reproducible for the future mobile client.
+**Rationale:** PRD 002 §Impl Note 1 leaves the conversion algorithm unspecified. The dalek family (`ed25519-dalek 2`, `curve25519-dalek 4`) ships the canonical conversion: `SigningKey::to_scalar_bytes()` on the private side and `CompressedEdwardsY::decompress()?.to_montgomery().to_bytes()` on the public side. Fixing this now via a PRD 002 amendment makes the contract reproducible for the future mobile client.
 
 **Alternatives considered:** Third-party crates like `ed25519-to-curve25519` — rejected: pulls in extra transitive deps; dalek's API already covers it.
 
 ### 4. Client mints its own UUIDv4 at identity creation; server amended to accept it
-**Rationale:** PRD 003 §US-013 made `JWT.sub = devices.id` and the server currently generates `devices.id` server-side at pairing. That forces the client to either (a) round-trip to learn the UUID after pairing before it can sign anything, or (b) keep two identifiers in sync. Letting the client supply the UUID at `pairing/initiate` and `pairing/complete` and having the server persist it as `devices.id` removes a state-coupling round-trip and matches the user's answer to Open Question 3.
+**Rationale:** PRD 002 §US-013 made `JWT.sub = devices.id` and the server currently generates `devices.id` server-side at pairing. That forces the client to either (a) round-trip to learn the UUID after pairing before it can sign anything, or (b) keep two identifiers in sync. Letting the client supply the UUID at `pairing/initiate` and `pairing/complete` and having the server persist it as `devices.id` removes a state-coupling round-trip and matches the user's answer to Open Question 3.
 
 **Alternatives considered:**
 - Server-assigned, client-fetches-via-/me — rejected: requires a new `/v1/me` endpoint and adds latency before the first signed request.
@@ -77,7 +77,7 @@ Constraints (from CLAUDE.md and PRD 004):
 - Add directory recursion to `core/file-watcher` — rejected for this change; deferred per the user.
 
 ### 8. WebSocket-first with 30-second polling fallback
-**Rationale:** WebSocket gives sub-second latency on the happy path; polling guarantees eventual delivery during reconnect storms. Exponential backoff on WS reconnect (1 → 60 s cap, ±20% jitter) plus a 30-second polling loop while WS is `Reconnecting` or `Offline` matches PRD 004 §US-027. On WS resume, an immediate `GET /v1/sync/bundles` catches up anything queued during the gap.
+**Rationale:** WebSocket gives sub-second latency on the happy path; polling guarantees eventual delivery during reconnect storms. Exponential backoff on WS reconnect (1 → 60 s cap, ±20% jitter) plus a 30-second polling loop while WS is `Reconnecting` or `Offline` matches PRD 004 §US-035. On WS resume, an immediate `GET /v1/sync/bundles` catches up anything queued during the gap.
 
 **Alternatives considered:**
 - WS-only — rejected: stale data during outages.
@@ -216,11 +216,11 @@ No DB migration is required — `devices.id` is already UUID PRIMARY KEY; the ha
 
 `CreateDevice` gains a `WithID(uuid.UUID)` option; the existing default-creation path is unchanged.
 
-### PRD 003 §Impl Note 1 amendment
+### PRD 002 §Impl Note 1 amendment
 
 The note currently reads (paraphrased): "pairing sessions store Ed25519 pubkeys, not X25519; clients derive sync_key locally." It will be extended with a normative sub-note pinning the conversion:
 
-> **§1.1 (added):** Clients SHALL convert Ed25519 keys to X25519 using `ed25519-dalek::SigningKey::to_scalar_bytes()` on the private side and `curve25519_dalek::edwards::CompressedEdwardsY::decompress(...).to_montgomery().to_bytes()` on the public side. The shared secret is `X25519(local_x25519_priv, peer_x25519_pub)`; `sync_key = HKDF-SHA256(shared_secret, salt = session_id_bytes, info = b"syncmind-v1")`. See PRD 004 §US-023.
+> **§1.1 (added):** Clients SHALL convert Ed25519 keys to X25519 using `ed25519-dalek::SigningKey::to_scalar_bytes()` on the private side and `curve25519_dalek::edwards::CompressedEdwardsY::decompress(...).to_montgomery().to_bytes()` on the public side. The shared secret is `X25519(local_x25519_priv, peer_x25519_pub)`; `sync_key = HKDF-SHA256(shared_secret, salt = session_id_bytes, info = b"syncmind-v1")`. See PRD 004 §US-031.
 
 ## Risks / Trade-offs
 
@@ -240,7 +240,7 @@ The note currently reads (paraphrased): "pairing sessions store Ed25519 pubkeys,
 There is no production deployment yet (the Spine has no clients; the desktop has no sync feature). Migration is therefore a single coordinated change with no rollout sequencing:
 
 1. Land server amendments (section 2 of `tasks.md`) first so the server accepts the new pairing payload.
-2. Land the PRD 003 §Impl Note 1 amendment.
+2. Land the PRD 002 §Impl Note 1 amendment.
 3. Land core/syncmind-core Config extension + core/syncmind-indexing `index_file_once`.
 4. Land the desktop `spine/` modules.
 5. Land the SolidJS Devices tab.

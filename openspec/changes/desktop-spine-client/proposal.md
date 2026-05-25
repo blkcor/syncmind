@@ -1,6 +1,6 @@
 ## Why
 
-Phase 3 shipped a fully implemented, blind Spine sync gateway (`services/sync-gateway/`), but the protocol has no client. Without a client, end-to-end E2EE behavior is unverified and Phase 4 (mobile capture) cannot land. PRD 004 (`docs/prd/004-desktop-spine-client.md`) defined US-020..US-030 for the desktop counterpart; this change implements that PRD so two desktops can cross-sync notes today and the protocol gets its first production validation.
+Phase 3 shipped a fully implemented, blind Spine sync gateway (`services/sync-gateway/`), but the protocol has no client. Without a client, end-to-end E2EE behavior is unverified and Phase 4 (mobile capture) cannot land. PRD 004 (`docs/prd/004-desktop-spine-client.md`) defined US-028..US-038 for the desktop counterpart; this change implements that PRD so two desktops can cross-sync notes today and the protocol gets its first production validation.
 
 ## What Changes
 
@@ -9,7 +9,7 @@ Phase 3 shipped a fully implemented, blind Spine sync gateway (`services/sync-ga
 - Extend `core/syncmind-core::Config` with a `[spine]` section (`url`, `paired_peer_fingerprint`, `paired_peer_device_type`, `paired_at`, `peer_device_id_uuid`, `trust_ca_path`).
 - Add a new single-file indexing entry point in `core/syncmind-indexing` (`index_file_once`) so decrypted notes land synchronously without depending on file-watcher directory recursion.
 - **BREAKING (server, additive on the wire):** `services/sync-gateway` accepts a required `device_uuid` field in `POST /v1/pairing/initiate` and `POST /v1/pairing/complete` and uses it as `devices.id` instead of `gen_random_uuid()`. Existing archived spec wording is superseded.
-- Amend `docs/prd/003-the-spine.md` §Impl Note 1 to fix the Ed25519↔X25519 conversion as the protocol-level contract (dalek `to_scalar_bytes()` + `CompressedEdwardsY::to_montgomery()`).
+- Amend `docs/prd/002-the-spine.md` §Impl Note 1 to fix the Ed25519↔X25519 conversion as the protocol-level contract (dalek `to_scalar_bytes()` + `CompressedEdwardsY::to_montgomery()`).
 
 ## Capabilities
 
@@ -24,7 +24,7 @@ Phase 3 shipped a fully implemented, blind Spine sync gateway (`services/sync-ga
 
 ## Impact
 
-- **Affected code**: `apps/desktop/src-tauri/*`, `apps/desktop/src/*`, `core/syncmind-core/src/config.rs`, `core/syncmind-indexing/*`, `services/sync-gateway/internal/handler/pairing.go`, `services/sync-gateway/internal/model/pairing.go`, `docs/prd/003-the-spine.md`.
+- **Affected code**: `apps/desktop/src-tauri/*`, `apps/desktop/src/*`, `core/syncmind-core/src/config.rs`, `core/syncmind-indexing/*`, `services/sync-gateway/internal/handler/pairing.go`, `services/sync-gateway/internal/model/pairing.go`, `docs/prd/002-the-spine.md`.
 - **New dependencies (Rust, `apps/desktop/src-tauri/Cargo.toml`)**: `keyring`, `ed25519-dalek`, `x25519-dalek`, `curve25519-dalek`, `aes-gcm`, `hkdf`, `sha2`, `qrcode`, `image`, `reqwest` (rustls), `tokio-tungstenite` (rustls + webpki-roots), `jsonwebtoken`, `uuid`, `base64`, `chrono`, `tracing`. License audit: all MIT/Apache-2.0.
 - **Build & test gates**:
   - `cd apps/desktop/src-tauri && cargo check && cargo clippy --all-targets -- -D warnings && cargo test`

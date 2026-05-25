@@ -57,7 +57,7 @@
 
 ## 6. Documentation & Spec Alignment
 
-- [x] 6.1 PRD 002 reflects US-028, FR-9, FR-10, and the updated US-023 / US-025 acceptance criteria
+- [x] 6.1 PRD 003 reflects US-027, FR-9, FR-10, and the updated US-023 / US-025 acceptance criteria
 - [x] 6.2 Update `apps/desktop/README.md` with the new Tauri commands and keyboard shortcuts
 - [x] 6.3 Add a short note in `core/storage/README.md` describing the `pinned_chunks` table
 

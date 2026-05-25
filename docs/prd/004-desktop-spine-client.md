@@ -2,17 +2,17 @@
 
 ## Introduction
 
-PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/sync-gateway/`，Go + Hertz + PostgreSQL + Redis），它对密钥、明文与同步包内容**一无所知**。这种零知识架构的代价是把所有"懂业务"的责任全部留给了客户端——配对、密钥派生、加解密、传输、解包、注入索引管道，全部需要在设备本地完成。
+PRD 002《The Spine》交付了一个完整的盲中继同步网关（`services/sync-gateway/`，Go + Hertz + PostgreSQL + Redis），它对密钥、明文与同步包内容**一无所知**。这种零知识架构的代价是把所有"懂业务"的责任全部留给了客户端——配对、密钥派生、加解密、传输、解包、注入索引管道，全部需要在设备本地完成。
 
 本 PRD 定义桌面端作为 Spine 协议的**第一个生产客户端**应当提供的能力：
 
 1. **设备身份与密钥保管：** 在 OS 钥匙串中生成并持久化 Ed25519 身份密钥对，作为 JWT 签名与配对的唯一身份凭证。
-2. **配对发起方 UI：** 显示 QR 码与 6 位短码，轮询 `pairing/status` 直到对端完成；与 PRD 003 §US-012 形成完整闭环。
+2. **配对发起方 UI：** 显示 QR 码与 6 位短码，轮询 `pairing/status` 直到对端完成；与 PRD 002 §US-012 形成完整闭环。
 3. **客户端 E2EE：** 派生 `sync_key`、AES-256-GCM 加密/解密、payload hash 校验、versioned plaintext envelope。
 4. **网络层：** HTTP 客户端（上传/下载/ACK/Revoke）+ WebSocket 长连接（实时通知 + 心跳 + 指数退避重连 + 轮询兜底）。
 5. **本地注入：** 解密后的 Note 落到 `<data-dir>/sync-inbox/`，由现有的 `core/file-watcher` → `core/rag-engine` → `core/storage` 流水线接管；**不修改 `core/storage` 的公共 API**。
 
-桌面端是 Phase 4（移动端）抵达之前唯一能完整跑通 Spine 协议的实体。本 PRD 同时承担"协议回环验证基础设施"的角色：两台桌面端互配，可以替代尚不存在的移动端，对 PRD 003 的端到端假设进行验证。
+桌面端是 Phase 4（移动端）抵达之前唯一能完整跑通 Spine 协议的实体。本 PRD 同时承担"协议回环验证基础设施"的角色：两台桌面端互配，可以替代尚不存在的移动端，对 PRD 002 的端到端假设进行验证。
 
 ## Goals
 
@@ -25,7 +25,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
 
 ## User Stories
 
-### US-020: 同步配置与 Spine URL 管理
+### US-028: 同步配置与 Spine URL 管理
 **Description:** 作为自托管用户，我希望在桌面端设置面板中配置我自己的 Spine 服务地址，并能查看当前同步状态。
 
 **Acceptance Criteria:**
@@ -43,7 +43,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
 - [ ] 新增 Tauri 命令 `spine_get_config()` / `spine_set_url(url: String)`；命令注册位置：`apps/desktop/src-tauri/src/lib.rs:209-225`。
 - [ ] 未配置 URL 时，所有其他 Spine 命令应返回 `SPINE_NOT_CONFIGURED` 错误码，前端据此显示引导文案。
 
-### US-021: 设备身份（Ed25519 密钥对）与 OS 钥匙串
+### US-029: 设备身份（Ed25519 密钥对）与 OS 钥匙串
 **Description:** 作为系统，我需要在设备本地生成一对持久的 Ed25519 身份密钥对，存储于操作系统的安全密钥库中，跨进程重启可读但永远不暴露给前端。
 
 **Acceptance Criteria:**
@@ -62,7 +62,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
 - [ ] 命令 `spine_get_identity()` 仅返回 `{ fingerprint, device_uuid?, created_at }`；私钥永远不通过 IPC 跨进程边界。
 - [ ] 单元测试：keyring `mock` provider 下的 generate-then-read 闭环；签名/验证黄金向量。
 
-### US-022: 配对发起（QR / 短码显示 + 状态轮询）
+### US-030: 配对发起（QR / 短码显示 + 状态轮询）
 **Description:** 作为用户，我希望在桌面端点击"开始配对"，看到一个 QR 码与 6 位短码，让我的另一台设备扫描或手输完成配对，无需任何账号。
 
 **Acceptance Criteria:**
@@ -74,7 +74,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
 - [ ] QR 图像渲染：`qrcode = "0.14"` + `image = "0.25"` 生成 PNG bytes（边长 ≥ 256px，纠错级别 `M`），通过 Tauri 命令返回 base64 data URL 给前端。
 - [ ] 轮询任务 `poll_status(session_id)`：
   - 间隔 1 秒，调用 `GET /v1/pairing/:session_id/status`。
-  - 状态机：`pending` → 继续；`completed` → 触发 US-023；`expired` / `cancelled` → 向前端 emit `spine://pairing/expired`。
+  - 状态机：`pending` → 继续；`completed` → 触发 US-031；`expired` / `cancelled` → 向前端 emit `spine://pairing/expired`。
   - 上限：TTL 内（5 分钟）持续轮询；TTL 到期自动停止。
 - [ ] 命令：
   - `spine_start_pairing() -> { session_id, short_code, qr_png_base64, expires_at }`。
@@ -86,7 +86,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
   - 网络错误 → `SPINE_UNREACHABLE`，UI 显示重试按钮。
 - [ ] 单元测试：QR payload 解析与生成的对称性；轮询任务对 `expired` 状态的优雅停止。
 
-### US-023: 共享密钥派生与缓存（`sync_key`）
+### US-031: 共享密钥派生与缓存（`sync_key`）
 **Description:** 作为系统，配对完成后我需要根据双方的 Ed25519 公钥派生出对称密钥 `sync_key`，并安全缓存以供后续 Bundle 加解密。
 
 **Acceptance Criteria:**
@@ -96,15 +96,15 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
   - 上述转换需在 PR 中附带 dalek 官方文档引用，并被 code-reviewer agent 单独审计。
 - [ ] `shared_secret = X25519(local_x25519_sk, peer_x25519_pk)`（32 字节）。
 - [ ] `sync_key = HKDF-SHA256(ikm = shared_secret, salt = session_id.as_bytes(), info = b"syncmind-v1")`，输出 32 字节。
-  - `session_id` 来自配对会话（UUID 字符串），与 PRD 003 §US-012 一致。
+  - `session_id` 来自配对会话（UUID 字符串），与 PRD 002 §US-012 一致。
 - [ ] 缓存：
   - 写入 keychain：`service = "syncmind"`, `account = "sync-key:<peer_fingerprint>"`，value 为 base64(`sync_key`)。
   - 选择 keychain 而非每次重新派生的理由：unpair 时可单点擦除；私钥短暂泄露时 sync_key 也能独立轮换（再次配对即可）。
 - [ ] `sync_key` 永远不通过 IPC 暴露给前端，不写入磁盘其他位置，不出现在任何日志中。
 - [ ] 单元测试：HKDF 黄金向量；keychain 缓存写入/读取闭环；unpair 后读取应失败。
-- [ ] **本 US 与 PRD 003 §Impl Note 1 强相关**：003 实现使用 Ed25519 公钥而非 X25519 作为配对会话存储。本 US 是对应客户端转换流程的权威定义。如转换细节与 003 不一致，应向 003 提交 amendment（参见 Open Question 1）。
+- [ ] **本 US 与 PRD 002 §Impl Note 1 强相关**：PRD 002 实现使用 Ed25519 公钥而非 X25519 作为配对会话存储。本 US 是对应客户端转换流程的权威定义。如转换细节与 PRD 002 不一致，应向 PRD 002 提交 amendment（参见 Open Question 1）。
 
-### US-024: JWT 签发、轮换与撤销
+### US-032: JWT 签发、轮换与撤销
 **Description:** 作为系统，我需要使用本地 Ed25519 私钥签发短期 JWT 作为所有 Spine 请求的认证凭证。
 
 **Acceptance Criteria:**
@@ -121,7 +121,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
 - [ ] 设备 UUID 来源：首次成功调用任意已认证端点（如 `GET /v1/sync/bundles`）后，从服务端响应中读取并缓存（服务端目前未直接返回 UUID — 见 Open Question 3，临时方案是从 `sub` claim 自验证 / 或调用专用 `/me` 端点；本 US 假设有可用来源）。
 - [ ] 单元测试：claim 字段完整性；过期前 5 分钟触发刷新；EdDSA 签名可被独立 `jsonwebtoken` 验证。
 
-### US-025: Bundle 加密与上传客户端
+### US-033: Bundle 加密与上传客户端
 **Description:** 作为桌面端，我需要把一段 Note 文本封装成 versioned envelope，AES-256-GCM 加密后上传到 Spine，使其能被对端解密并注入 RAG 管道。
 
 **Acceptance Criteria:**
@@ -139,7 +139,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
   ```
 - [ ] envelope 序列化为 UTF-8 JSON，UTF-8 NFC 归一化 `filename` 与 `content_utf8`。
 - [ ] AES-256-GCM 加密：
-  - Key：`sync_key`（来自 US-023）。
+  - Key：`sync_key`（来自 US-031）。
   - Nonce：12 字节随机（`OsRng`）。
   - AAD：**对端 fingerprint 的 32 字节原始 SHA-256 值**（防止跨配对会话的密文误用）。
   - 输出 wire format：`bundle_blob = nonce(12) ‖ ciphertext_and_tag(N+16)`。
@@ -164,7 +164,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
   - AES-GCM roundtrip：sender 加密 → receiver 解密 → 原 envelope；篡改 ciphertext 任意 1 byte 应失败。
   - AAD mismatch 解密失败。
 
-### US-026: Bundle 列表 / 下载 / 解密 / ACK
+### US-034: Bundle 列表 / 下载 / 解密 / ACK
 **Description:** 作为桌面端，我需要拉取 Spine 上属于我的未读 Bundle，逐个下载、解密、校验、落地，最后向 Spine 确认。
 
 **Acceptance Criteria:**
@@ -177,13 +177,13 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
   - 校验 2：`X-Syncmind-Content-Type == "application/syncmind.note+json"`（v1 仅接受此类型；其他类型记 warning + 跳过 + 不 ACK）。
 - [ ] 解密：
   - 拆出 nonce / ciphertext。
-  - AAD：**本设备 fingerprint 的 32 字节原始 SHA-256 值**（与 US-025 发送方使用的对端 fingerprint 对称）。
+  - AAD：**本设备 fingerprint 的 32 字节原始 SHA-256 值**（与 US-033 发送方使用的对端 fingerprint 对称）。
   - 解密失败（包括 tag mismatch）→ 跳过 + `failed_bundles` + 不 ACK。
 - [ ] envelope 校验：
   - `schema_version == 1`，否则记 warning 并跳过（前向兼容预留）。
   - `kind == "note"`。
   - `lower_hex(SHA-256(content_utf8.as_bytes())) == envelope.sha256`，失败 → 跳过 + 不 ACK。
-- [ ] 通过 US-028 落地。
+- [ ] 通过 US-036 落地。
 - [ ] 落地成功后 `DELETE /v1/sync/bundles/:id`；DELETE 失败不阻塞，已落地内容不重复处理（通过本地 `processed_bundle_ids` 集合判重）。
 - [ ] 本地集合持久化：
   - 文件 `<data-dir>/spine-state.json`（单文件，原子写）。
@@ -193,7 +193,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
   - mock HTTP server 返回篡改的 ciphertext / hash mismatch / 解密失败 / envelope 损坏；分别验证不会 ACK 且不会落地。
   - 重复下载同一 bundle_id 时仅落地一次。
 
-### US-027: 实时通知（WebSocket + 心跳 + 轮询兜底）
+### US-035: 实时通知（WebSocket + 心跳 + 轮询兜底）
 **Description:** 作为桌面端，我希望在对端上传新 Bundle 后立即收到通知；网络抖动时不丢消息。
 
 **Acceptance Criteria:**
@@ -202,7 +202,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
   - Header `Authorization: Bearer <jwt>` 通过 `http::Request` 注入 upgrade 握手。
 - [ ] 消息处理：
   - 收到 `{"type":"ping"}` → 立即回复 `{"type":"pong"}`。
-  - 收到 `{"type":"new_bundle", ...}` → 触发一次 US-026 列表拉取（不直接根据消息中的 bundle_id 单点下载，避免乱序与遗漏其他离线积压）。
+  - 收到 `{"type":"new_bundle", ...}` → 触发一次 US-034 列表拉取（不直接根据消息中的 bundle_id 单点下载，避免乱序与遗漏其他离线积压）。
 - [ ] 心跳超时：40 秒未收到任何消息（与 003 §Impl Note 5 对齐）→ 主动 close 连接，进入重连逻辑。
 - [ ] 重连：指数退避 1s, 2s, 4s, 8s, 16s, 32s, 60s（cap），每次实际等待 = base × (0.8 + rand × 0.4)（±20% 抖动）。无限重试，直到 unpair 或用户停止。
 - [ ] 轮询兜底：
@@ -217,20 +217,20 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
   - 抖动间隔的统计分布合理。
   - 40 秒静默后主动重连。
 
-### US-028: 本地落地（sync-inbox + watcher 集成）
+### US-036: 本地落地（sync-inbox + watcher 集成）
 **Description:** 作为系统，我希望解密后的 Note 自动进入 SyncMind 的索引流水线，无需用户手动导入。
 
 **Acceptance Criteria:**
 - [ ] 启动时确保目录存在：`<data-dir>/sync-inbox/`（权限 `0700`）。
 - [ ] 将该目录注册到 `core/file-watcher`：
   - **前置条件验证**（实现前必须确认 — 见 Open Question 2）：当前 `core/file-watcher` 是否支持目录级 watch 且能递归发现新文件。
-  - 若仅支持文件列表：US-028 退化为"写入后主动调用 indexing 流水线"，需要新增 `core::syncmind_indexing::index_single_file` 之类的入口；该退化路径需要在 PRD 实施阶段补充。
+  - 若仅支持文件列表：US-036 退化为"写入后主动调用 indexing 流水线"，需要新增 `core::syncmind_indexing::index_single_file` 之类的入口；该退化路径需要在 PRD 实施阶段补充。
 - [ ] 模块 `apps/desktop/src-tauri/src/spine/inbox.rs::write_note(envelope, bundle_id) -> PathBuf`：
   - 文件名构造：`{captured_at_unix_ms}-{sanitized_filename}`，扩展名沿用 envelope 中的 filename（如 `.md`、`.txt`）；若 envelope filename 无扩展名，默认 `.md`。
   - `sanitize`：保留 ASCII 字母数字 / `-` / `_` / `.`；其他字符替换为 `_`；上限 200 字节。
   - 冲突时追加 `(2)`, `(3)`, ... 直到不冲突。
   - 写入流程：写入 `*.tmp` → `fsync` → `rename` 到最终路径（原子可见）。
-- [ ] 落地成功后才向 US-026 返回 OK，触发 DELETE ACK；防止"已 ACK 但内容未持久化"的丢失。
+- [ ] 落地成功后才向 US-034 返回 OK，触发 DELETE ACK；防止"已 ACK 但内容未持久化"的丢失。
 - [ ] **不删除** sync-inbox 文件（保留作为本地审计副本）。设置 UI 提供"清理 sync-inbox"按钮（默认保留所有；清理需二次确认）。
 - [ ] 元数据落盘：每个 inbox 文件旁可选 `*.meta.json`，记录 `{ bundle_id, from_device_uuid, captured_at, sha256, source_path? }`，供未来知识图谱回溯（非必需，但本 US 推荐实现）。
 - [ ] 单元测试：
@@ -238,7 +238,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
   - 冲突计数器正确。
   - 异常中断（写 tmp 后未 rename）不应被 watcher 拾起。
 
-### US-029: Devices / Sync 设置 UI
+### US-037: Devices / Sync 设置 UI
 **Description:** 作为用户，我希望在桌面端设置面板有一个独立的"Devices"标签页，能看到我的设备身份、配对状态、连接状态，并能发起配对或解除配对。
 
 **Acceptance Criteria:**
@@ -257,7 +257,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
 - [ ] 与现有 `src/store.ts:48` Solid store 集成：新增 `spineState: { url, fingerprint, deviceUuid?, paired: boolean, peer?: {...}, connectionStatus, pairing?: {...} }`。
 - [ ] 错误显示：所有 Spine 错误码（`SPINE_NOT_CONFIGURED` / `ALREADY_PAIRED` / `SPINE_UNREACHABLE` / `AUTH_INVALID` / `RATE_LIMITED` / ...）映射为可读中文文案。
 
-### US-030: 解配对、密钥轮换与设备 Reset
+### US-038: 解配对、密钥轮换与设备 Reset
 **Description:** 作为用户，我希望能随时切断与对端的同步关系，并在丢机或换设备时彻底清除身份。
 
 **Acceptance Criteria:**
@@ -266,14 +266,14 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
   2. 主动 close WebSocket。
   3. 擦除 keychain 中所有 `account = "sync-key:*"` 条目。
   4. 清空 `Config.spine.paired_*` 字段并 save。
-  5. 清空内存中的 `processed_bundle_ids` / `failed_bundle_ids`（保留 `<data-dir>/sync-inbox/` 本身，除非用户在 US-029 勾选清空）。
+  5. 清空内存中的 `processed_bundle_ids` / `failed_bundle_ids`（保留 `<data-dir>/sync-inbox/` 本身，除非用户在 US-037 勾选清空）。
   6. emit `spine://unpaired` 给前端。
-- [ ] `spine_reset_identity()` 命令（位于 US-029 危险区之下的更深层"Advanced"折叠面板）：
+- [ ] `spine_reset_identity()` 命令（位于 US-037 危险区之下的更深层"Advanced"折叠面板）：
   1. 先执行 unpair 流程。
   2. 擦除 keychain `account = "device-identity"`。
   3. 删除 `<data-dir>/device.json`。
   4. 下次启动将生成全新身份。
-  5. 服务端会留下一行孤儿 `devices`，依赖服务端的 `last_seen_at` 老化逻辑（PRD 003 §Impl Note 7）。
+  5. 服务端会留下一行孤儿 `devices`，依赖服务端的 `last_seen_at` 老化逻辑（PRD 002 §Impl Note 7）。
 - [ ] Reset 期间禁止其他 Spine 命令并发执行（命令级互斥锁）。
 - [ ] 单元测试：unpair 后再次调用 `spine_send_note` 应返回 `NOT_PAIRED`；keychain 中 sync-key 条目应不存在。
 
@@ -285,7 +285,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
 - **FR-24:** JWT 仅在进程内存持有，不写入任何文件、数据库或日志；进程重启后必须重新签发。
 - **FR-25:** 所有 HTTP 请求使用 rustls + TLS 1.2+；生产模式拒绝 `http://` 的 Spine URL，dev 模式仅放行 `localhost` / `127.0.0.1`。
 - **FR-26:** 客户端必须在 ACK (`DELETE /v1/sync/bundles/:id`) **之前**完成 sync-inbox 文件的 `fsync + rename`；防止已 ACK 但本地未持久化导致的丢内容。
-- **FR-27:** 错误码字符串必须与 PRD 003 §Impl Note 6 的服务端约定保持一致（`AUTH_INVALID` / `DEVICE_NOT_PAIRED` / `RATE_LIMITED` / `BUNDLE_TOO_LARGE` / ...）。本 PRD 在客户端侧扩展若干新码：`SPINE_NOT_CONFIGURED` / `SPINE_UNREACHABLE` / `ALREADY_PAIRED` / `NOT_PAIRED` / `EMPTY_NOTE` / `KEYCHAIN_UNAVAILABLE`。
+- **FR-27:** 错误码字符串必须与 PRD 002 §Impl Note 6 的服务端约定保持一致（`AUTH_INVALID` / `DEVICE_NOT_PAIRED` / `RATE_LIMITED` / `BUNDLE_TOO_LARGE` / ...）。本 PRD 在客户端侧扩展若干新码：`SPINE_NOT_CONFIGURED` / `SPINE_UNREACHABLE` / `ALREADY_PAIRED` / `NOT_PAIRED` / `EMPTY_NOTE` / `KEYCHAIN_UNAVAILABLE`。
 - **FR-28:** WebSocket 与 HTTP 客户端必须共享同一 JWT 管理器，确保认证状态一致；任一通道收到 `AUTH_INVALID` 时全局强制重签 JWT。
 - **FR-29:** 客户端不得修改 `core/storage` 的公共 API；所有同步内容必须通过 `<data-dir>/sync-inbox/` + 现有文件水位线进入索引流水线。
 - **FR-30:** 桌面端不得直接读写 `services/sync-gateway/` 的 PostgreSQL；唯一的服务端接触点是 Spine 的 HTTPS / WSS API。
@@ -293,13 +293,13 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
 ## Non-Goals (Out of Scope)
 
 - **NG-15:** 不实现 QR 扫描 / 摄像头能力。桌面端仅作为配对发起方（initiator），显示 QR + 短码并轮询完成状态。
-- **NG-16:** 不实现多对端配对（与 PRD 003 §NG-10 一致，单 `paired_peer`）。
+- **NG-16:** 不实现多对端配对（与 PRD 002 §NG-10 一致，单 `paired_peer`）。
 - **NG-17:** 不实现端到端的冲突合并 (Conflict Resolution)。同名 Note 通过文件名前缀（`captured_at_unix_ms`）天然避免覆盖，由用户人工决断。
-- **NG-18:** 不实现 Double Ratchet / 前向保密；本期 `sync_key` 在一次配对生命周期内固定（与 PRD 003 §Open Question 2 一致）。
+- **NG-18:** 不实现 Double Ratchet / 前向保密；本期 `sync_key` 在一次配对生命周期内固定（与 PRD 002 §Open Question 2 一致）。
 - **NG-19:** 不实现密钥找回 / 托管流程。丢机即丢密钥；用户必须重新配对。
 - **NG-20:** 不接收/解析任何媒体类型 Bundle（`image/*` / `audio/*`），仅接受 `application/syncmind.note+json`。媒体接收能力延后到 PRD 005（Phase 4 移动端）。
 - **NG-21:** 不实现桌面之间的 P2P 直连或局域网发现；所有流量经 Spine。
-- **NG-22:** 不实现多用户隔离；与 PRD 003 §NG-14 一致，一个桌面安装对应一个用户身份。
+- **NG-22:** 不实现多用户隔离；与 PRD 002 §NG-14 一致，一个桌面安装对应一个用户身份。
 - **NG-23:** 不集成 Tauri Updater / 自动升级；密钥 schema 变更通过本 PRD 的 `schema_version` 字段而非应用层版本号管理。
 
 ## Design Considerations
@@ -346,11 +346,11 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
 - **核心 Cargo.toml 改动:** `core/syncmind-core/src/config.rs` 的 `Config` 结构扩 `[spine]` 段；不改任何其他 crate 公共 API。
 - **AAD 选择理由:** 把对端 fingerprint 的 SHA-256 原始字节放进 GCM AAD 是深度防御 — 即使两个不同的配对会话偶然共享 sync_key（理论上不可能，但属于零信任假设），AAD 不匹配会让 GCM 解密失败。
 - **Nonce 预算:** 每个 `sync_key` 寿命内 96-bit 随机 nonce，按 birthday bound `2^32` 个 bundle 时碰撞概率 `~2^-32`。本 PRD 假定单次配对生命周期内的 bundle 数远小于此；spec 明确"累计 ≥ 10^7 bundles 时强烈建议主动 unpair → re-pair 触发 sync_key 轮换"。
-- **JWT 时钟漂移:** 客户端使用本机 UTC，与服务端 PRD 003 §US-013 约定的 ±300s leeway 兼容；不实现 NTP 同步。
+- **JWT 时钟漂移:** 客户端使用本机 UTC，与服务端 PRD 002 §US-013 约定的 ±300s leeway 兼容；不实现 NTP 同步。
 - **平台差异:**
   - **macOS:** Keychain 直接可用，无额外依赖。
   - **Windows:** Credential Manager 直接可用。
-  - **Linux:** 需运行时存在 libsecret-1（GNOME Keyring / KeePassXC / kwallet 提供）。若缺失，按 US-021 降级路径。
+  - **Linux:** 需运行时存在 libsecret-1（GNOME Keyring / KeePassXC / kwallet 提供）。若缺失，按 US-029 降级路径。
   - CI 使用 `keyring` 的 mock provider；GitHub Actions Ubuntu runner 需 `apt install libsecret-1-dev` 才能跑非 mock 集成测试。
 - **测试策略:**
   - 单元测试：crypto 黄金向量、envelope serde、idempotency key 一致性、状态机不可达状态拒绝。
@@ -361,7 +361,7 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
     4. 校验 server 数据库中 `encrypted_payload` 不包含 plaintext 关键字（grep audit）。
   - 模糊测试：envelope 反序列化对随机 bytes / 截断 / 错位 schema_version 的 panic-free 表现。
 - **资源开销:** 静态分析新增 crate 二进制贡献预计 ~3MB；WS 长连接稳态占用 < 200KB；后台 task 数 ≤ 5；进程稳态新增 RSS < 20MB（与 Goal 一致）。
-- **审计点（与 PRD 003 §"E2EE 审计点"对偶）:** 客户端代码必须能通过以下静态搜索验证：
+- **审计点（与 PRD 002 §"E2EE 审计点"对偶）:** 客户端代码必须能通过以下静态搜索验证：
   - 不存在 `eprintln!.*sync_key` / `eprintln!.*shared_secret` / `dbg!.*Signing` 等模式。
   - 所有 keychain 写入路径只接受 `service = "syncmind"` 与受白名单 account 前缀。
   - Tauri 命令注册数组中不包含任何返回 `Vec<u8>` 私钥的命令。
@@ -377,12 +377,12 @@ PRD 003《The Spine》交付了一个完整的盲中继同步网关（`services/
 
 ## Implementation Notes & Divergences
 
-> 本节预留给实施阶段；PR 作者按 PRD 003 同名章节的格式记录与本 spec 的实际偏差。空段表示尚未开始实施。
+> 本节预留给实施阶段；PR 作者按 PRD 002 同名章节的格式记录与本 spec 的实际偏差。空段表示尚未开始实施。
 
 ## Open Questions
 
-1. **Ed25519 → X25519 转换的权威定义:** PRD 003 §Impl Note 1 仅说明"X25519 ECDH 在客户端本地完成"，未指定具体的密钥转换算法。本 PRD §US-023 提议使用 dalek 推荐的 `SigningKey::to_scalar_bytes()` + `CompressedEdwardsY::to_montgomery()`。建议向 PRD 003 提交 amendment，把该算法选择固化为协议层契约，以保证未来其他客户端（mobile / web）实现一致。
-2. **file-watcher 的目录监听能力:** `core/file-watcher` 当前的 `registered_files` 是否支持目录级递归监听？若仅支持文件列表，US-028 必须退化为"写入后主动调用 indexing 流水线"，并在 `core/syncmind-indexing` 暴露一个 `index_single_file` 入口；该改动需要在实施阶段先于 spine 客户端落地，或者作为本 PRD 的隐含前置条件。**实施前必须验证。**
-3. **设备 UUID 来源:** PRD 003 服务端在配对完成时为每台设备分配一个 UUID（`devices.id`），但目前的客户端流程中并未明确这个 UUID 如何回传给设备本身。临时方案是从已签发的 JWT `sub` claim 中解码自身设置的 UUID（即客户端在签发时自定 UUID 后服务端会接受？需核对），或服务端补一个 `GET /v1/me` 端点。该问题不阻塞配对，但影响 UI 文案与日志的可读性。
-4. **Spine URL 校验严格度:** 是否在 dev 模式之外也放行 IP + 自签证书？某些自托管场景（家用 NAS）没有域名也没有公网证书。建议在设置面板提供"信任自签 CA"开关 + PEM 文件路径输入，由 reqwest `add_root_certificate` 加载；该能力在 US-020 中未明确，需在实施前确认是否纳入本期范围。
-5. **sync-inbox 文件生命周期:** 本 PRD 默认保留所有 inbox 文件作为审计副本。若用户使用 1+ 年后积累数 GB 体积，是否需要内置 LRU 自动清理（按文件年龄）？或仅提供手动清理 UI（US-029）？倾向后者，但需要对长期用户做体积估算后定夺。
+1. **Ed25519 → X25519 转换的权威定义:** PRD 002 §Impl Note 1 仅说明"X25519 ECDH 在客户端本地完成"，未指定具体的密钥转换算法。本 PRD §US-031 提议使用 dalek 推荐的 `SigningKey::to_scalar_bytes()` + `CompressedEdwardsY::to_montgomery()`。建议向 PRD 002 提交 amendment，把该算法选择固化为协议层契约，以保证未来其他客户端（mobile / web）实现一致。
+2. **file-watcher 的目录监听能力:** `core/file-watcher` 当前的 `registered_files` 是否支持目录级递归监听？若仅支持文件列表，US-036 必须退化为"写入后主动调用 indexing 流水线"，并在 `core/syncmind-indexing` 暴露一个 `index_single_file` 入口；该改动需要在实施阶段先于 spine 客户端落地，或者作为本 PRD 的隐含前置条件。**实施前必须验证。**
+3. **设备 UUID 来源:** PRD 002 服务端在配对完成时为每台设备分配一个 UUID（`devices.id`），但目前的客户端流程中并未明确这个 UUID 如何回传给设备本身。临时方案是从已签发的 JWT `sub` claim 中解码自身设置的 UUID（即客户端在签发时自定 UUID 后服务端会接受？需核对），或服务端补一个 `GET /v1/me` 端点。该问题不阻塞配对，但影响 UI 文案与日志的可读性。
+4. **Spine URL 校验严格度:** 是否在 dev 模式之外也放行 IP + 自签证书？某些自托管场景（家用 NAS）没有域名也没有公网证书。建议在设置面板提供"信任自签 CA"开关 + PEM 文件路径输入，由 reqwest `add_root_certificate` 加载；该能力在 US-028 中未明确，需在实施前确认是否纳入本期范围。
+5. **sync-inbox 文件生命周期:** 本 PRD 默认保留所有 inbox 文件作为审计副本。若用户使用 1+ 年后积累数 GB 体积，是否需要内置 LRU 自动清理（按文件年龄）？或仅提供手动清理 UI（US-037）？倾向后者，但需要对长期用户做体积估算后定夺。

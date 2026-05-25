@@ -904,6 +904,25 @@ h2 {
   color: #e0e0e0;
 }
 
+.devices-short-code-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.devices-join-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 160px) max-content;
+  gap: 8px;
+  align-items: center;
+}
+
+.devices-short-code-input {
+  font-family: 'SF Mono', Monaco, Inconsolata, 'Fira Code', monospace;
+  letter-spacing: 0.08em;
+}
+
 .devices-pair-meta-row {
   display: flex;
   flex-direction: column;
@@ -1053,6 +1072,9 @@ h2 {
     grid-template-columns: 1fr;
   }
   .devices-pair-stage {
+    grid-template-columns: 1fr;
+  }
+  .devices-join-row {
     grid-template-columns: 1fr;
   }
   .devices-qr {

@@ -1,12 +1,13 @@
 //! Ed25519 device identity for the spine client.
 //!
-//! Implements PRD 004 §US-021. Responsibilities:
+//! Implements PRD 004 §US-029. Responsibilities:
 //!
 //! - Generate or load an Ed25519 signing key at first launch.
 //! - Persist the private key in the OS keychain (`service="syncmind"`, `account="device-identity"`).
-//!   Fall back to a 0600 file under `<data-dir>/keys/` on Linux when libsecret is unavailable.
+//!   Fall back to 0600 files under `<data-dir>/keys/` on Linux when libsecret is unavailable,
+//!   and in macOS dev builds where repeated Tauri rebuilds invalidate Keychain ACL trust.
 //! - Mint a UUIDv4 used as the device's `sub` claim in every JWT (and as `devices.id` on the
-//!   Spine, per PRD 003 §Impl Note 1.2).
+//!   Spine, per PRD 002 §Impl Note 1.2).
 //! - Cache the public fingerprint + UUID in `<data-dir>/device.json` (NEVER includes the
 //!   private key) so other modules can read it without reaching into the keychain.
 //! - Provide `sign(msg)` and key-export helpers but NEVER expose `SigningKey` itself across
@@ -22,7 +23,7 @@ use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -35,6 +36,8 @@ const KEYCHAIN_SYNC_KEY_ACCOUNT_PREFIX: &str = "sync-key:";
 const DEVICE_JSON: &str = "device.json";
 const LINUX_FALLBACK_DIR: &str = "keys";
 const LINUX_FALLBACK_FILE: &str = "device.ed25519";
+const FALLBACK_SYNC_KEY_PREFIX: &str = "sync-key-";
+const FALLBACK_SYNC_KEY_SUFFIX: &str = ".b64";
 
 /// Public metadata cached in `<data-dir>/device.json`. Contains nothing secret.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,18 +122,7 @@ pub enum KeyStorage {
 pub fn ensure_identity(data_dir: &Path, device_type: &str) -> Result<Identity, SpineError> {
     let device_json = data_dir.join(DEVICE_JSON);
 
-    let mut backend = KeyStorage::Keychain;
-    let stored = match try_load_from_keychain() {
-        Ok(opt) => opt,
-        Err(e) => {
-            warn!(
-                error = %e,
-                "keyring unavailable; falling back to filesystem storage. ensure the data dir is on encrypted storage."
-            );
-            backend = KeyStorage::FilesystemFallback;
-            try_load_from_fallback(data_dir)?
-        }
-    };
+    let (backend, stored) = load_stored_identity(data_dir)?;
 
     if let Some(signing_key) = stored {
         let computed_fp = fingerprint_hex(&signing_key.verifying_key().to_bytes());
@@ -185,19 +177,21 @@ pub fn ensure_identity(data_dir: &Path, device_type: &str) -> Result<Identity, S
     Ok(Identity::from_parts(signing_key, metadata))
 }
 
-/// Wipe the device identity entirely. Used by `spine_reset_identity` (PRD 004 §US-030).
+/// Wipe the device identity entirely. Used by `spine_reset_identity` (PRD 004 §US-038).
 /// Best-effort: failures on individual backends are logged but not propagated unless every
 /// destructive step failed.
 pub fn reset_identity(data_dir: &Path) -> Result<(), SpineError> {
     let mut any_succeeded = false;
 
-    match keyring_entry(KEYCHAIN_ACCOUNT_IDENTITY) {
-        Ok(entry) => match entry.delete_credential() {
-            Ok(()) => any_succeeded = true,
-            Err(keyring::Error::NoEntry) => any_succeeded = true,
-            Err(e) => warn!(error = %e, "failed to delete keychain identity entry"),
-        },
-        Err(e) => warn!(error = %e, "keyring unavailable while resetting identity"),
+    if !prefer_filesystem_secret_store() {
+        match keyring_entry(KEYCHAIN_ACCOUNT_IDENTITY) {
+            Ok(entry) => match entry.delete_credential() {
+                Ok(()) => any_succeeded = true,
+                Err(keyring::Error::NoEntry) => any_succeeded = true,
+                Err(e) => warn!(error = %e, "failed to delete keychain identity entry"),
+            },
+            Err(e) => warn!(error = %e, "keyring unavailable while resetting identity"),
+        }
     }
 
     let fallback = fallback_path(data_dir);
@@ -234,34 +228,55 @@ pub fn reset_identity(data_dir: &Path) -> Result<(), SpineError> {
 
 /// Cache a freshly-derived sync_key per peer fingerprint. Used by the pairing flow.
 pub fn store_sync_key(peer_fingerprint: &str, key: &[u8; 32]) -> Result<(), SpineError> {
+    if prefer_filesystem_secret_store() {
+        return persist_sync_key_to_fallback(peer_fingerprint, key);
+    }
+
     let account = format!("{KEYCHAIN_SYNC_KEY_ACCOUNT_PREFIX}{peer_fingerprint}");
     let entry = keyring_entry(&account)?;
-    entry
-        .set_password(&B64.encode(key))
-        .map_err(keyring_to_spine_err)
+    match entry.set_password(&B64.encode(key)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            warn!(
+                error = %e,
+                "keyring unavailable while storing sync_key; falling back to filesystem storage"
+            );
+            persist_sync_key_to_fallback(peer_fingerprint, key)
+        }
+    }
 }
 
 /// Load a previously cached sync_key. Returns `Ok(None)` if no entry exists.
 pub fn load_sync_key(peer_fingerprint: &str) -> Result<Option<[u8; 32]>, SpineError> {
+    if prefer_filesystem_secret_store() {
+        if let Some(sync_key) = try_load_sync_key_from_fallback(peer_fingerprint)? {
+            return Ok(Some(sync_key));
+        }
+        if migrate_from_keychain() {
+            if let Some(sync_key) = try_load_sync_key_from_keychain(peer_fingerprint)? {
+                persist_sync_key_to_fallback(peer_fingerprint, &sync_key)?;
+                info!(
+                    peer_fingerprint = %peer_fingerprint,
+                    "migrated sync_key from keychain to filesystem secret store"
+                );
+                return Ok(Some(sync_key));
+            }
+        }
+        return Ok(None);
+    }
+
     let account = format!("{KEYCHAIN_SYNC_KEY_ACCOUNT_PREFIX}{peer_fingerprint}");
     let entry = keyring_entry(&account)?;
     match entry.get_password() {
-        Ok(b64) => {
-            let bytes = B64
-                .decode(b64)
-                .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
-            if bytes.len() != 32 {
-                return Err(SpineError::new(
-                    SpineErrorCode::Internal,
-                    format!("cached sync_key has wrong length: {}", bytes.len()),
-                ));
-            }
-            let mut out = [0u8; 32];
-            out.copy_from_slice(&bytes);
-            Ok(Some(out))
-        }
+        Ok(b64) => decode_sync_key_b64(&b64).map(Some),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(keyring_to_spine_err(e)),
+        Err(e) => {
+            warn!(
+                error = %e,
+                "keyring unavailable while loading sync_key; falling back to filesystem storage"
+            );
+            try_load_sync_key_from_fallback(peer_fingerprint)
+        }
     }
 }
 
@@ -271,10 +286,23 @@ pub fn load_sync_key(peer_fingerprint: &str) -> Result<Option<[u8; 32]>, SpineEr
 /// peer fingerprint explicitly. For a "wipe-all" semantic at app level, supply the last
 /// known peer fingerprint from `Config.spine.paired_peer_fingerprint`.
 pub fn wipe_sync_key(peer_fingerprint: &str) -> Result<(), SpineError> {
+    if prefer_filesystem_secret_store() {
+        return wipe_sync_key_from_fallback(peer_fingerprint);
+    }
+
     let account = format!("{KEYCHAIN_SYNC_KEY_ACCOUNT_PREFIX}{peer_fingerprint}");
     match keyring_entry(&account)?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(keyring_to_spine_err(e)),
+        Ok(()) | Err(keyring::Error::NoEntry) => {
+            let _ = wipe_sync_key_from_fallback(peer_fingerprint);
+            Ok(())
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "keyring unavailable while wiping sync_key; falling back to filesystem storage"
+            );
+            wipe_sync_key_from_fallback(peer_fingerprint)
+        }
     }
 }
 
@@ -295,10 +323,60 @@ fn keyring_to_spine_err(e: keyring::Error) -> SpineError {
     SpineError::new(SpineErrorCode::KeychainUnavailable, e.to_string())
 }
 
+fn load_stored_identity(data_dir: &Path) -> Result<(KeyStorage, Option<SigningKey>), SpineError> {
+    if prefer_filesystem_secret_store() {
+        debug!("using filesystem secret store for spine identity");
+        if let Some(signing_key) = try_load_from_fallback(data_dir)? {
+            return Ok((KeyStorage::FilesystemFallback, Some(signing_key)));
+        }
+        if migrate_from_keychain() {
+            if let Some(signing_key) = try_load_from_keychain()? {
+                persist_to_fallback(data_dir, &signing_key)?;
+                info!("migrated spine identity from keychain to filesystem secret store");
+                return Ok((KeyStorage::FilesystemFallback, Some(signing_key)));
+            }
+        }
+        return Ok((KeyStorage::FilesystemFallback, None));
+    }
+
+    match try_load_from_keychain() {
+        Ok(opt) => Ok((KeyStorage::Keychain, opt)),
+        Err(e) => {
+            warn!(
+                error = %e,
+                "keyring unavailable; falling back to filesystem storage. ensure the data dir is on encrypted storage."
+            );
+            Ok((
+                KeyStorage::FilesystemFallback,
+                try_load_from_fallback(data_dir)?,
+            ))
+        }
+    }
+}
+
+fn prefer_filesystem_secret_store() -> bool {
+    std::env::var_os("SYNCMIND_DISABLE_KEYCHAIN").is_some()
+        || cfg!(all(target_os = "macos", debug_assertions))
+}
+
+fn migrate_from_keychain() -> bool {
+    std::env::var_os("SYNCMIND_MIGRATE_KEYCHAIN").is_some()
+}
+
 fn try_load_from_keychain() -> Result<Option<SigningKey>, SpineError> {
     let entry = keyring_entry(KEYCHAIN_ACCOUNT_IDENTITY)?;
     match entry.get_password() {
         Ok(b64) => Ok(Some(decode_signing_key_b64(&b64)?)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(keyring_to_spine_err(e)),
+    }
+}
+
+fn try_load_sync_key_from_keychain(peer_fingerprint: &str) -> Result<Option<[u8; 32]>, SpineError> {
+    let account = format!("{KEYCHAIN_SYNC_KEY_ACCOUNT_PREFIX}{peer_fingerprint}");
+    let entry = keyring_entry(&account)?;
+    match entry.get_password() {
+        Ok(b64) => decode_sync_key_b64(&b64).map(Some),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(keyring_to_spine_err(e)),
     }
@@ -349,6 +427,55 @@ fn fallback_path(data_dir: &Path) -> PathBuf {
     data_dir.join(LINUX_FALLBACK_DIR).join(LINUX_FALLBACK_FILE)
 }
 
+fn fallback_dir() -> Result<PathBuf, SpineError> {
+    let data_dir = syncmind_core::paths::local_data_dir()
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+    let dir = data_dir.join(LINUX_FALLBACK_DIR);
+    fs::create_dir_all(&dir)
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+    set_dir_permissions_0700(&dir)?;
+    Ok(dir)
+}
+
+fn fallback_sync_key_path(peer_fingerprint: &str) -> Result<PathBuf, SpineError> {
+    if peer_fingerprint.len() != 64 || !peer_fingerprint.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(SpineError::new(
+            SpineErrorCode::Internal,
+            "invalid peer fingerprint for sync_key storage",
+        ));
+    }
+    Ok(fallback_dir()?.join(format!(
+        "{FALLBACK_SYNC_KEY_PREFIX}{peer_fingerprint}{FALLBACK_SYNC_KEY_SUFFIX}"
+    )))
+}
+
+fn persist_sync_key_to_fallback(peer_fingerprint: &str, key: &[u8; 32]) -> Result<(), SpineError> {
+    let path = fallback_sync_key_path(peer_fingerprint)?;
+    fs::write(&path, B64.encode(key))
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+    set_file_permissions_0600(&path)
+}
+
+fn try_load_sync_key_from_fallback(peer_fingerprint: &str) -> Result<Option<[u8; 32]>, SpineError> {
+    let path = fallback_sync_key_path(peer_fingerprint)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let b64 = fs::read_to_string(&path)
+        .with_context(|| format!("read fallback sync_key file {}", path.display()))
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+    decode_sync_key_b64(b64.trim()).map(Some)
+}
+
+fn wipe_sync_key_from_fallback(peer_fingerprint: &str) -> Result<(), SpineError> {
+    let path = fallback_sync_key_path(peer_fingerprint)?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(SpineError::new(SpineErrorCode::Internal, e.to_string())),
+    }
+}
+
 #[cfg(unix)]
 fn set_dir_permissions_0700(p: &Path) -> Result<(), SpineError> {
     use std::os::unix::fs::PermissionsExt;
@@ -388,6 +515,21 @@ fn decode_signing_key_b64(b64: &str) -> Result<SigningKey, SpineError> {
     );
     SigningKey::from_pkcs8_der(&bytes)
         .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))
+}
+
+fn decode_sync_key_b64(b64: &str) -> Result<[u8; 32], SpineError> {
+    let bytes = B64
+        .decode(b64)
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+    if bytes.len() != 32 {
+        return Err(SpineError::new(
+            SpineErrorCode::Internal,
+            format!("cached sync_key has wrong length: {}", bytes.len()),
+        ));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
 }
 
 fn read_metadata(path: &Path) -> Result<DeviceMetadata, SpineError> {

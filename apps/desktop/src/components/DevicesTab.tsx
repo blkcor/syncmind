@@ -38,6 +38,12 @@ interface PairingStateView {
   error_message: string | null;
 }
 
+interface CompletePairingResult {
+  peer_fingerprint: string;
+  peer_device_id: string | null;
+  config: SpineConfigView;
+}
+
 interface InboxEntry {
   path: string;
   size_bytes: number;
@@ -96,6 +102,7 @@ export default function DevicesTab() {
   const [sendNoteOpen, setSendNoteOpen] = createSignal(false);
   const [sendFilename, setSendFilename] = createSignal('');
   const [sendBody, setSendBody] = createSignal('');
+  const [joinShortCode, setJoinShortCode] = createSignal('');
 
   let pollTimer: number | null = null;
 
@@ -199,6 +206,24 @@ export default function DevicesTab() {
     try {
       await invoke('spine_cancel_pairing');
       setPairHandle(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function completePairingShortCode() {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await invoke<CompletePairingResult>('spine_complete_pairing_short_code', {
+        shortCode: joinShortCode(),
+      });
+      setConfig(result.config);
+      setPairHandle(null);
+      setJoinShortCode('');
+      await refresh();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -413,7 +438,7 @@ export default function DevicesTab() {
               fallback={
                 <div class="devices-pair-empty">
                   <div class="devices-pair-empty-copy">
-                    Generate a QR payload and a 6-digit short code for the second device. No account, no relay-side identity.
+                    Generate a QR payload and a 6-digit short code, or enter the code from another desktop.
                   </div>
                   <div class="devices-action-row">
                     <button class="action-btn" disabled={busy() || !config()?.is_enabled} onClick={startPairing}>
@@ -422,6 +447,24 @@ export default function DevicesTab() {
                     <Show when={!config()?.is_enabled}>
                       <span class="field-note">Configure a Spine URL first.</span>
                     </Show>
+                  </div>
+                  <div class="devices-join-row">
+                    <input
+                      class="devices-input devices-short-code-input"
+                      type="text"
+                      inputMode="numeric"
+                      value={joinShortCode()}
+                      placeholder="123-456"
+                      maxLength={7}
+                      onInput={(e) => setJoinShortCode(e.currentTarget.value)}
+                    />
+                    <button
+                      class="action-btn"
+                      disabled={busy() || !config()?.is_enabled || joinShortCode().trim().length < 6}
+                      onClick={completePairingShortCode}
+                    >
+                      Join pairing
+                    </button>
                   </div>
                 </div>
               }
@@ -433,7 +476,12 @@ export default function DevicesTab() {
                   </div>
                   <div class="devices-pair-copy">
                     <span class="devices-status-label">Short code</span>
-                    <div class="devices-short-code">{h().short_code}</div>
+                    <div class="devices-short-code-row">
+                      <div class="devices-short-code">{h().short_code}</div>
+                      <button class="action-btn" onClick={() => copyFingerprint(h().short_code)}>
+                        Copy
+                      </button>
+                    </div>
                     <div class="devices-pair-meta-row">
                       <span>Session {h().session_id.slice(0, 8)}…</span>
                       <span>Expires {formatTimestamp(h().expires_at)}</span>

@@ -1,6 +1,6 @@
 //! WebSocket notifications + reconnect / polling fallback for the spine client.
 //!
-//! PRD 004 §US-027. Connects to `<spine_url>/v1/sync/live`, replies to ping/pong, and on
+//! PRD 004 §US-035. Connects to `<spine_url>/v1/sync/live`, replies to ping/pong, and on
 //! `{"type":"new_bundle"}` triggers a callback (the desktop wires this to
 //! `spine::commands::spine_pull_bundles`-equivalent logic). Reconnects with exponential
 //! backoff and a 30-second polling fallback during outages.
@@ -171,7 +171,7 @@ async fn try_connect_and_serve(
     on_new_bundle();
     info!("spine websocket connected");
 
-    // Read loop with a 40 s soft deadline (PRD 003 §Impl Note 5).
+    // Read loop with a 40 s soft deadline (PRD 002 §Impl Note 5).
     loop {
         let msg = tokio::time::timeout(Duration::from_secs(40), ws.next()).await;
         let item = match msg {
