@@ -294,7 +294,7 @@ pub fn run() {
             let app_handle_for_cb = app.handle().clone();
             let indexing_for_cb = Arc::clone(&indexing_state);
             let on_index_result: syncmind_indexing::IndexResultCallback = Arc::new(
-                move |path: &std::path::Path, result: Result<(), &anyhow::Error>| {
+                move |path: &std::path::Path, result: Result<(), &syncmind_indexing::IndexingError>| {
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)

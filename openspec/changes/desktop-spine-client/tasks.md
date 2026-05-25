@@ -32,8 +32,8 @@
 - [x] 4.2 Wire `spine: SpineConfig` into the top-level `Config` struct with `#[serde(default)]`
 - [x] 4.3 Add unit test: legacy `config.toml` without `[spine]` deserializes successfully with default empty `SpineConfig`
 - [x] 4.4 Add unit test: full roundtrip `Config { spine: ... }` through `save` then `load`
-- [ ] 4.5 Add `SpineConfig::validate_url(&self) -> Result<Url, ConfigError>` helper that allows `http://`, `https://`, and IP hosts, but emits a `WarningKind::PlainHttp` when the scheme is HTTP
-- [ ] 4.6 Add `SpineConfig::load_trust_ca(&self) -> Result<Vec<rustls_pki_types::CertificateDer>, ConfigError>` that reads and parses the PEM file at `trust_ca_path`
+- [x] 4.5 Add `SpineConfig::validate_url(&self) -> Result<Url, ConfigError>` helper that allows `http://`, `https://`, and IP hosts, but emits a `WarningKind::PlainHttp` when the scheme is HTTP
+- [x] 4.6 Add `SpineConfig::load_trust_ca(&self) -> Result<Vec<rustls_pki_types::CertificateDer>, ConfigError>` that reads and parses the PEM file at `trust_ca_path`
 
 ## 5. Single-file indexing entry point (core/syncmind-indexing)
 
@@ -42,7 +42,7 @@
 - [x] 5.3 Make the function idempotent: re-running on the same path replaces all prior chunks for that path (use existing `VectorStore::upsert_file` semantics)
 - [x] 5.4 Return `IngestionReport { file_path, chunks_added, bytes, duration_ms }`
 - [x] 5.5 Add unit tests using a temporary directory + in-memory or temp-file `VectorStore`
-- [ ] 5.6 Ensure the function does NOT swallow embedding-service errors; surface them with structured error variants
+- [x] 5.6 Ensure the function does NOT swallow embedding-service errors; surface them with structured error variants
 
 ## 6. Desktop identity module (spine/identity.rs)
 
@@ -181,8 +181,8 @@
 ### Landed in `feat/desktop-spine-client`
 - Server amendments (§2): client-supplied `device_uuid` accepted, 409 `UUID_CONFLICT` on mismatch, and regression coverage confirms `DeviceStore.Create` persists the supplied `Device.ID`. The handler passes the supplied UUID directly to the existing `model.Device { ID: deviceID, ... }`, so no separate `WithID` option is required.
 - PRD 003 amendment (§3): §Impl Note 1.1 (dalek conversion) and 1.2 (client UUID) added.
-- Core `Config.spine` extension (§4): all five `SpineConfig` fields landed via `String`/`PathBuf` (no `chrono::DateTime` / `uuid::Uuid` deps added to the daemon crate). 4.5/4.6 were superseded by the in-place helpers `is_enabled`, `is_plain_http`, `is_paired`, `clear_pairing` plus client-side PEM validation in `spine_set_trust_ca`.
-- `index_file_once` (§5): added with idempotency + `IngestionReport`. 5.6's structured-error-variant ask is partially met (the function returns `anyhow::Error` that surfaces extract/embed/upsert errors verbatim); a typed wrapper is a follow-up.
+- Core `Config.spine` extension (§4): all five `SpineConfig` fields landed via `String`/`PathBuf` (no `chrono::DateTime` / `uuid::Uuid` deps added to the daemon crate). 4.5/4.6 are now covered by `SpineConfig::validate_url` and `SpineConfig::load_trust_ca`; desktop URL/CA paths reuse those helpers while retaining the existing UI-facing error codes.
+- `index_file_once` (§5): added with idempotency + `IngestionReport`; indexing failures now surface as typed `IndexingError` variants, including explicit `Embed` errors for embedding-service failures.
 - Spine modules (§6–§13): identity / crypto / bundle / client / pairing / inbox / commands / state all complete, with 27 unit tests passing including HKDF RFC 5869 vectors, AES-GCM tamper detection, sync_key symmetry, envelope integrity, atomic inbox writes, and JWT claim checks. 8.8 wiremock tests are a follow-up.
 - WebSocket loop (§10): `spine/ws.rs` is implementation-complete with backoff + jitter + 40 s read deadline + 30 s polling fallback (covered by a bounds-property test). It is NOT yet auto-spawned by `SpineRuntime::rebuild_client` — the activation requires piping an `Arc<AppState>`-flavoured ingestion closure through SpineRuntime, which is the only carry-over for the next session. The Devices tab's 1.5 s refresh loop + manual "Pull now" button cover the same UX for now.
 - Devices tab UI (§14) + store wiring (§15): full surface implemented in `apps/desktop/src/components/DevicesTab.tsx` plus `App.tsx` / `store.ts` / tray menu hookup.

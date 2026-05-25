@@ -4777,11 +4777,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
+ "rustls-pemfile",
+ "rustls-pki-types",
  "serde",
+ "thiserror 1.0.69",
  "toml 0.8.2",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -4805,6 +4809,7 @@ dependencies = [
  "syncmind-file-watcher",
  "syncmind-rag-engine",
  "syncmind-storage",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]

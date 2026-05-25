@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
+use rustls_pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use thiserror::Error;
+use url::Url;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +29,28 @@ pub enum OcrMode {
     #[default]
     Auto,
     Force,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarningKind {
+    PlainHttp,
+}
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("spine.url is not configured")]
+    MissingSpineUrl,
+    #[error("invalid spine.url: {0}")]
+    InvalidSpineUrl(#[from] url::ParseError),
+    #[error("unsupported spine.url scheme: {0}")]
+    UnsupportedSpineUrlScheme(String),
+    #[error("failed to read trust CA file at {path}: {source}")]
+    TrustCaNotReadable {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("invalid trust CA PEM at {path}: {message}")]
+    TrustCaInvalidPem { path: PathBuf, message: String },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,6 +87,55 @@ pub struct SpineConfig {
 }
 
 impl SpineConfig {
+    pub fn validate_url(&self) -> std::result::Result<Url, ConfigError> {
+        let raw = self
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or(ConfigError::MissingSpineUrl)?;
+        let parsed = Url::parse(raw)?;
+
+        match parsed.scheme() {
+            "http" => tracing::warn!(
+                warning = ?WarningKind::PlainHttp,
+                url = %parsed,
+                "spine URL uses plain HTTP"
+            ),
+            "https" => {}
+            other => return Err(ConfigError::UnsupportedSpineUrlScheme(other.to_string())),
+        }
+
+        Ok(parsed)
+    }
+
+    pub fn load_trust_ca(&self) -> std::result::Result<Vec<CertificateDer<'static>>, ConfigError> {
+        let Some(path) = self.trust_ca_path.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        let pem = std::fs::read(path).map_err(|source| ConfigError::TrustCaNotReadable {
+            path: path.clone(),
+            source,
+        })?;
+        let mut reader = std::io::Cursor::new(&pem);
+        let certs = rustls_pemfile::certs(&mut reader)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| ConfigError::TrustCaInvalidPem {
+                path: path.clone(),
+                message: e.to_string(),
+            })?;
+
+        if certs.is_empty() {
+            return Err(ConfigError::TrustCaInvalidPem {
+                path: path.clone(),
+                message: "PEM contained no CERTIFICATE blocks".to_string(),
+            });
+        }
+
+        Ok(certs)
+    }
+
     /// Returns true when the desktop sync subsystem should be active (URL is set).
     pub fn is_enabled(&self) -> bool {
         self.url.as_deref().is_some_and(|s| !s.is_empty())
@@ -412,6 +486,89 @@ chunk_overlap = 50
     }
 
     #[test]
+    fn spine_validate_url_accepts_https_http_and_ip_hosts() {
+        let mut cfg = SpineConfig {
+            url: Some("https://spine.example.com".to_string()),
+            ..SpineConfig::default()
+        };
+        assert_eq!(cfg.validate_url().unwrap().scheme(), "https");
+
+        cfg.url = Some("http://192.168.1.10:8080".to_string());
+        let parsed = cfg.validate_url().unwrap();
+        assert_eq!(parsed.scheme(), "http");
+        assert_eq!(parsed.host_str(), Some("192.168.1.10"));
+    }
+
+    #[test]
+    fn spine_validate_url_rejects_missing_malformed_and_unsupported_urls() {
+        let mut cfg = SpineConfig::default();
+        assert!(matches!(
+            cfg.validate_url(),
+            Err(ConfigError::MissingSpineUrl)
+        ));
+
+        cfg.url = Some("not a url".to_string());
+        assert!(matches!(
+            cfg.validate_url(),
+            Err(ConfigError::InvalidSpineUrl(_))
+        ));
+
+        cfg.url = Some("ftp://spine.example.com".to_string());
+        assert!(matches!(
+            cfg.validate_url(),
+            Err(ConfigError::UnsupportedSpineUrlScheme(s)) if s == "ftp"
+        ));
+    }
+
+    #[test]
+    fn spine_load_trust_ca_returns_empty_when_unset() {
+        let cfg = SpineConfig::default();
+
+        let certs = cfg.load_trust_ca().unwrap();
+
+        assert!(certs.is_empty());
+    }
+
+    #[test]
+    fn spine_load_trust_ca_parses_pem_certificates() {
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+        temp_file.write_all(TEST_CERT_PEM.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+        let cfg = SpineConfig {
+            trust_ca_path: Some(temp_file.path().to_path_buf()),
+            ..SpineConfig::default()
+        };
+
+        let certs = cfg.load_trust_ca().unwrap();
+
+        assert_eq!(certs.len(), 1);
+    }
+
+    #[test]
+    fn spine_load_trust_ca_rejects_missing_and_empty_pem_files() {
+        let cfg = SpineConfig {
+            trust_ca_path: Some(PathBuf::from("/definitely/missing/spine-ca.pem")),
+            ..SpineConfig::default()
+        };
+        assert!(matches!(
+            cfg.load_trust_ca(),
+            Err(ConfigError::TrustCaNotReadable { .. })
+        ));
+
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+        temp_file.write_all(b"not a certificate").unwrap();
+        temp_file.flush().unwrap();
+        let cfg = SpineConfig {
+            trust_ca_path: Some(temp_file.path().to_path_buf()),
+            ..SpineConfig::default()
+        };
+        assert!(matches!(
+            cfg.load_trust_ca(),
+            Err(ConfigError::TrustCaInvalidPem { .. })
+        ));
+    }
+
+    #[test]
     fn spine_clear_pairing_resets_all_paired_fields() {
         let mut cfg = SpineConfig {
             url: Some("https://spine.example.com".to_string()),
@@ -431,4 +588,16 @@ chunk_overlap = 50
         assert!(cfg.paired_at.is_none());
         assert!(cfg.peer_device_id_uuid.is_none());
     }
+
+    const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
+MIIBlzCCAT2gAwIBAgIUB4z1qW3Q0QwN+NG6yUglExLhYkkwCgYIKoZIzj0EAwIw
+FzEVMBMGA1UEAwwMc3BpbmUtdGVzdENBMB4XDTI2MDUyNTAwMDAwMFoXDTI3MDUy
+NTAwMDAwMFowFzEVMBMGA1UEAwwMc3BpbmUtdGVzdENBMFkwEwYHKoZIzj0CAQYI
+KoZIzj0DAQcDQgAEnG6foLUF5n/WDL1tqkvMQhshxwyg1iV14tdV7W/bcWce6Rgj
+6x2oaAZRq4YtRkbWZsFq5g+vmkVQjW21D6NFMEMwDgYDVR0PAQH/BAQDAgEGMBIG
+A1UdEwEB/wQIMAYBAf8CAQAwHQYDVR0OBBYEFBK5j6cGlwSl7IpR9UYu7Y7p3sxy
+MAoGCCqGSM49BAMCA0gAMEUCIQCzwIhjPddqMpuFeIoL0Jj3PncLv1XbWgyEWGIu
+lQWsPgIgUsROfwkVxqwnme7T/kti9CuB65KYbJ71ZbUZmkFWtfc=
+-----END CERTIFICATE-----
+"#;
 }

@@ -99,14 +99,15 @@ pub async fn spine_set_url(
     state: State<'_, AppState>,
 ) -> Result<SpineConfigView, String> {
     let url_trimmed = url.trim().to_string();
-    let parsed_check = if url_trimmed.is_empty() {
-        Ok::<_, SpineError>(None)
-    } else {
-        url::Url::parse(&url_trimmed)
-            .map(Some)
-            .map_err(|e| SpineError::new(SpineErrorCode::InvalidUrl, e.to_string()))
-    };
-    let _ = parsed_check.map_err(String::from)?;
+    if !url_trimmed.is_empty() {
+        syncmind_core::SpineConfig {
+            url: Some(url_trimmed.clone()),
+            ..syncmind_core::SpineConfig::default()
+        }
+        .validate_url()
+        .map_err(SpineError::from)
+        .map_err(String::from)?;
+    }
 
     let new_view = {
         let mut cfg = state.config.lock().expect("config mutex poisoned");
@@ -138,31 +139,17 @@ pub async fn spine_set_trust_ca(
     path: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<SpineConfigView, String> {
-    // Validate the PEM if a path is given.
     let pem_path = match path.as_deref() {
         Some(p) if !p.trim().is_empty() => Some(PathBuf::from(p.trim())),
         _ => None,
     };
-    if let Some(p) = pem_path.as_ref() {
-        let pem = std::fs::read(p).map_err(|e| {
-            SpineError::new(SpineErrorCode::TrustCaNotReadable, e.to_string()).to_string()
-        })?;
-        // Reject inputs without any CERTIFICATE block.
-        let mut reader = std::io::Cursor::new(&pem);
-        let any = rustls_pemfile::certs(&mut reader)
-            .next()
-            .transpose()
-            .map_err(|e| {
-                SpineError::new(SpineErrorCode::TrustCaInvalidPem, e.to_string()).to_string()
-            })?;
-        if any.is_none() {
-            return Err(SpineError::new(
-                SpineErrorCode::TrustCaInvalidPem,
-                "PEM contained no CERTIFICATE blocks",
-            )
-            .to_string());
-        }
+    syncmind_core::SpineConfig {
+        trust_ca_path: pem_path.clone(),
+        ..syncmind_core::SpineConfig::default()
     }
+    .load_trust_ca()
+    .map_err(SpineError::from)
+    .map_err(String::from)?;
 
     let new_view = {
         let mut cfg = state.config.lock().expect("config mutex poisoned");
@@ -630,7 +617,8 @@ async fn process_inbound_bundle(
                 chunk_size,
                 chunk_overlap,
             )
-            .await?;
+            .await
+            .map_err(anyhow::Error::from)?;
             Ok(report.chunks_added)
         },
     )

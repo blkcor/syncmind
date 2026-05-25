@@ -120,3 +120,22 @@ impl From<anyhow::Error> for SpineError {
         SpineError::new(SpineErrorCode::Internal, e.to_string())
     }
 }
+
+impl From<syncmind_core::ConfigError> for SpineError {
+    fn from(e: syncmind_core::ConfigError) -> Self {
+        let code = match e {
+            syncmind_core::ConfigError::MissingSpineUrl
+            | syncmind_core::ConfigError::InvalidSpineUrl(_)
+            | syncmind_core::ConfigError::UnsupportedSpineUrlScheme(_) => {
+                SpineErrorCode::InvalidUrl
+            }
+            syncmind_core::ConfigError::TrustCaNotReadable { .. } => {
+                SpineErrorCode::TrustCaNotReadable
+            }
+            syncmind_core::ConfigError::TrustCaInvalidPem { .. } => {
+                SpineErrorCode::TrustCaInvalidPem
+            }
+        };
+        SpineError::new(code, e.to_string())
+    }
+}

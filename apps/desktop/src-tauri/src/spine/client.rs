@@ -175,27 +175,22 @@ impl SpineClient {
         identity: Arc<Identity>,
         jwt: Arc<JwtHolder>,
     ) -> Result<Self, SpineError> {
-        let parsed = Url::parse(base_url)
-            .map_err(|e| SpineError::new(SpineErrorCode::InvalidUrl, e.to_string()))?;
+        let cfg = syncmind_core::SpineConfig {
+            url: Some(base_url.to_string()),
+            trust_ca_path: trust_ca_path.map(Path::to_path_buf),
+            ..syncmind_core::SpineConfig::default()
+        };
+        let parsed = cfg.validate_url().map_err(SpineError::from)?;
 
         let mut builder = ClientBuilder::new()
             .use_rustls_tls()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(60));
 
-        if let Some(pem_path) = trust_ca_path {
-            let pem = std::fs::read(pem_path)
-                .map_err(|e| SpineError::new(SpineErrorCode::TrustCaNotReadable, e.to_string()))?;
-            let certs = parse_pem_certs(&pem)?;
-            if certs.is_empty() {
-                return Err(SpineError::new(
-                    SpineErrorCode::TrustCaInvalidPem,
-                    "no CERTIFICATE blocks found in PEM",
-                ));
-            }
-            for cert in certs {
-                builder = builder.add_root_certificate(cert);
-            }
+        for der in cfg.load_trust_ca().map_err(SpineError::from)? {
+            let cert = Certificate::from_der(der.as_ref())
+                .map_err(|e| SpineError::new(SpineErrorCode::TrustCaInvalidPem, e.to_string()))?;
+            builder = builder.add_root_certificate(cert);
         }
 
         let http = builder
@@ -478,19 +473,6 @@ impl SpineClient {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn parse_pem_certs(pem: &[u8]) -> Result<Vec<Certificate>, SpineError> {
-    let mut reader = std::io::Cursor::new(pem);
-    let mut out = Vec::new();
-    for entry in rustls_pemfile::certs(&mut reader) {
-        let der =
-            entry.map_err(|e| SpineError::new(SpineErrorCode::TrustCaInvalidPem, e.to_string()))?;
-        let cert = Certificate::from_der(&der)
-            .map_err(|e| SpineError::new(SpineErrorCode::TrustCaInvalidPem, e.to_string()))?;
-        out.push(cert);
-    }
-    Ok(out)
-}
-
 fn unreachable_to_spine_err(e: reqwest::Error) -> SpineError {
     SpineError::new(SpineErrorCode::SpineUnreachable, e.to_string())
 }
@@ -554,14 +536,5 @@ mod tests {
         let key = new_idempotency_key();
         let parsed = uuid::Uuid::parse_str(&key).unwrap();
         assert_eq!(parsed.get_version_num(), 4);
-    }
-
-    #[test]
-    fn parse_pem_certs_returns_empty_when_no_cert_blocks() {
-        // rustls-pemfile is permissive: input without CERTIFICATE blocks yields zero items
-        // rather than erroring. SpineClient::new layers the emptiness check on top and
-        // surfaces TRUST_CA_INVALID_PEM there.
-        let certs = parse_pem_certs(b"not a pem").unwrap();
-        assert!(certs.is_empty());
     }
 }
