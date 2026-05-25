@@ -173,7 +173,7 @@
 - [ ] 17.3 Grep audit: no `eprintln!`, `dbg!`, or `tracing::*` call surfaces `sync_key`, `shared_secret`, private key bytes, or `Authorization` header values
 - [ ] 17.4 Grep audit: no Tauri command return type includes secret material
 - [ ] 17.5 Manual smoke test: cold start desktop → settings shows correct config → Devices tab → pair → send → unpair → restart → identity persists
-- [ ] 17.6 Open PR titled `feat(apps:desktop): implement Spine client (PRD 004)` with body linking to PRD 004 and this OpenSpec change
+- [x] 17.6 Open PR titled `feat(apps:desktop): implement Spine client (PRD 004)` with body linking to PRD 004 and this OpenSpec change: https://github.com/blkcor/syncmind/pull/23
 - [ ] 17.7 After PR merge, run `/opsx:archive desktop-spine-client`
 
 ## Implementation snapshot (2026-05-24)
