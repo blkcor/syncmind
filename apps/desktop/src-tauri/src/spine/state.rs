@@ -24,6 +24,7 @@ pub struct SpineRuntime {
     /// `<data-dir>/` from `syncmind_core::paths::local_data_dir`.
     pub data_dir: PathBuf,
     pub identity: Arc<Identity>,
+    identity_error: Option<SpineError>,
     pub jwt: Arc<JwtHolder>,
     /// `None` until the user configures a Spine URL. Replaced when URL or trust-CA change.
     client: RwLock<Option<Arc<SpineClient>>>,
@@ -47,12 +48,42 @@ impl SpineRuntime {
         Self {
             data_dir,
             identity: Arc::new(identity),
+            identity_error: None,
             jwt: Arc::new(JwtHolder::new()),
             client: RwLock::new(None),
             pairing: Mutex::new(None),
             ws_worker: Mutex::new(None),
             on_new_bundle,
             status_sink,
+        }
+    }
+
+    /// Construct a disabled runtime after identity initialization failed. The placeholder
+    /// identity is intentionally blocked from all sync operations.
+    pub fn disabled(
+        data_dir: PathBuf,
+        placeholder_identity: Identity,
+        identity_error: SpineError,
+        on_new_bundle: Arc<dyn Fn() + Send + Sync>,
+        status_sink: Arc<dyn Fn(crate::spine::ws::WsStatus) + Send + Sync>,
+    ) -> Self {
+        Self {
+            data_dir,
+            identity: Arc::new(placeholder_identity),
+            identity_error: Some(identity_error),
+            jwt: Arc::new(JwtHolder::new()),
+            client: RwLock::new(None),
+            pairing: Mutex::new(None),
+            ws_worker: Mutex::new(None),
+            on_new_bundle,
+            status_sink,
+        }
+    }
+
+    pub fn require_identity_ready(&self) -> Result<(), SpineError> {
+        match &self.identity_error {
+            Some(e) => Err(e.clone()),
+            None => Ok(()),
         }
     }
 
@@ -63,6 +94,7 @@ impl SpineRuntime {
         url: Option<&str>,
         trust_ca_path: Option<&std::path::Path>,
     ) -> Result<(), SpineError> {
+        self.require_identity_ready()?;
         match url {
             Some(u) if !u.is_empty() => {
                 let client = SpineClient::new(
@@ -116,6 +148,7 @@ impl SpineRuntime {
 
     /// Borrow the current client, returning `SPINE_NOT_CONFIGURED` if none has been built.
     pub async fn require_client(&self) -> Result<Arc<SpineClient>, SpineError> {
+        self.require_identity_ready()?;
         match self.client.read().await.clone() {
             Some(c) => Ok(c),
             None => Err(SpineError::new(

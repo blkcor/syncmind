@@ -325,14 +325,20 @@ func parseClientUUID(s string) (uuid.UUID, error) {
 // so the caller can return a generic 500.
 func (h *PairingHandler) resolveDeviceConflict(ctx context.Context, store *model.DeviceStore, id uuid.UUID, fingerprint string) (conflict bool, status int, code, msg string) {
 	existing, err := store.GetByID(ctx, id)
-	if err != nil {
-		// pgx returns pgx.ErrNoRows when the device is absent; treat any not-found-shaped
-		// error as a signal that we should create the row. Genuine connection errors will
-		// be surfaced by the subsequent Create call.
-		return false, http.StatusCreated, "", ""
+	if err == nil {
+		if existing.PublicKeyFingerprint != fingerprint {
+			return true, http.StatusConflict, "UUID_CONFLICT", "device_uuid is already bound to a different identity key"
+		}
+		return false, http.StatusOK, "", ""
 	}
-	if existing.PublicKeyFingerprint != fingerprint {
-		return true, http.StatusConflict, "UUID_CONFLICT", "device_uuid is already bound to a different identity key"
+
+	existingByFingerprint, err := store.GetByFingerprint(ctx, fingerprint)
+	if err == nil {
+		return true, http.StatusConflict, "FINGERPRINT_CONFLICT", fmt.Sprintf("identity key is already bound to device_uuid %s", existingByFingerprint.ID)
 	}
-	return false, http.StatusOK, "", ""
+
+	// pgx returns pgx.ErrNoRows when both lookups are absent; treat any not-found-shaped
+	// error as a signal that we should create the row. Genuine connection errors will
+	// be surfaced by the subsequent Create call.
+	return false, http.StatusCreated, "", ""
 }

@@ -397,8 +397,8 @@ pub fn run() {
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "spine identity initialization failed; sync disabled");
-                    // Construct a runtime around a placeholder identity so the field is
-                    // populated; commands will return SPINE_NOT_CONFIGURED until restart.
+                    // Construct a disabled runtime around a placeholder identity so AppState
+                    // can still be managed and `spine_reset_identity` remains available.
                     // We use an in-memory throwaway key — it is never written anywhere.
                     let throwaway = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
                     let placeholder = spine::identity::Identity::from_parts(
@@ -419,9 +419,10 @@ pub fn run() {
                     let on_new_bundle: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
                         spine::commands::spawn_pull_bundles(spine_pull_app.clone());
                     });
-                    Arc::new(spine::state::SpineRuntime::new(
+                    Arc::new(spine::state::SpineRuntime::disabled(
                         data_dir,
                         placeholder,
+                        e,
                         on_new_bundle,
                         status_sink,
                     ))

@@ -192,6 +192,47 @@ func TestPairingInitiateRecoveryWithSameFingerprint(t *testing.T) {
 	}
 }
 
+func TestPairingInitiateFingerprintConflict(t *testing.T) {
+	pool := setupTestDB(t)
+	defer pool.Close()
+
+	handler := NewPairingHandler(pool)
+
+	pubkey := make([]byte, 32)
+	for i := range pubkey {
+		pubkey[i] = byte(i)
+	}
+
+	first, _ := json.Marshal(map[string]string{
+		"device_uuid":      uuid.New().String(),
+		"initiator_pubkey": base64.RawURLEncoding.EncodeToString(pubkey),
+		"device_type":      "desktop",
+	})
+	ctx1 := app.NewContext(0)
+	ctx1.Request.SetBody(first)
+	ctx1.Request.Header.Set("Content-Type", "application/json")
+	handler.Initiate(context.Background(), ctx1)
+	if ctx1.Response.StatusCode() != consts.StatusOK {
+		t.Fatalf("first initiate expected 200, got %d: %s", ctx1.Response.StatusCode(), ctx1.Response.Body())
+	}
+
+	second, _ := json.Marshal(map[string]string{
+		"device_uuid":      uuid.New().String(),
+		"initiator_pubkey": base64.RawURLEncoding.EncodeToString(pubkey),
+		"device_type":      "desktop",
+	})
+	ctx2 := app.NewContext(0)
+	ctx2.Request.SetBody(second)
+	ctx2.Request.Header.Set("Content-Type", "application/json")
+	handler.Initiate(context.Background(), ctx2)
+	if ctx2.Response.StatusCode() != consts.StatusConflict {
+		t.Fatalf("fingerprint conflict expected 409, got %d: %s", ctx2.Response.StatusCode(), ctx2.Response.Body())
+	}
+	if !json.Valid(ctx2.Response.Body()) {
+		t.Fatalf("expected json error body, got %s", ctx2.Response.Body())
+	}
+}
+
 func TestPairingComplete(t *testing.T) {
 	pool := setupTestDB(t)
 	defer pool.Close()
