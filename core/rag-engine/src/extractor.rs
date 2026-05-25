@@ -375,6 +375,73 @@ fn pdf_text_extractor_available(config: &OcrConfig) -> bool {
     command_exists("pdftotext", &config.text_extractor_command())
 }
 
+fn extract_pdf_text_safely(bytes: &[u8]) -> Result<String, ExtractError> {
+    extract_pdf_text_with(bytes, pdf_extract::extract_text_from_mem)
+}
+
+fn extract_pdf_text_with_fallback<F>(
+    path: &Path,
+    bytes: &[u8],
+    ocr: &OcrConfig,
+    extract_fn: F,
+) -> Result<String, ExtractError>
+where
+    F: Fn(&[u8]) -> Result<String, ExtractError>,
+{
+    if ocr.mode == OcrMode::Force {
+        return run_pdf_ocr(path, ocr);
+    }
+
+    match extract_fn(bytes) {
+        Ok(text)
+            if ocr.mode == OcrMode::Disabled
+                || text_quality(&text) >= ocr.pdf_text_quality_threshold =>
+        {
+            Ok(text)
+        }
+        Ok(text) if ocr.mode == OcrMode::Auto => match run_pdf_ocr(path, ocr) {
+            Ok(ocr_text) => Ok(ocr_text),
+            Err(e) if !text.trim().is_empty() => {
+                warn!(path = %path.display(), error = %e, "PDF OCR fallback unavailable; preserving embedded text");
+                Ok(text)
+            }
+            Err(e) => Err(e),
+        },
+        Ok(text) => Ok(text),
+        Err(e) if ocr.mode == OcrMode::Auto => match run_pdf_ocr(path, ocr) {
+            Ok(ocr_text) => Ok(ocr_text),
+            Err(ocr_err) => Err(ExtractError::Pdf(format!(
+                "embedded extraction failed: {e}; OCR fallback failed: {ocr_err}"
+            ))),
+        },
+        Err(e) => Err(e),
+    }
+}
+
+fn extract_pdf_text_with<F>(bytes: &[u8], extract_fn: F) -> Result<String, ExtractError>
+where
+    F: FnOnce(&[u8]) -> Result<String, pdf_extract::OutputError>,
+{
+    match panic::catch_unwind(AssertUnwindSafe(|| extract_fn(bytes))) {
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(err)) => Err(ExtractError::Pdf(format!("{err:?}"))),
+        Err(payload) => Err(ExtractError::Pdf(format!(
+            "third-party extractor panicked: {}",
+            panic_payload_message(payload)
+        ))),
+    }
+}
+
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 fn text_quality(text: &str) -> f64 {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -876,6 +943,75 @@ mod tests {
         let text = extractor.extract(&path).unwrap();
 
         assert!(text.contains("Clean embedded text"));
+    }
+
+    #[test]
+    fn test_pdf_extractor_auto_mode_recovers_from_embedded_text_panic_with_ocr() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("panic.pdf");
+        fs::write(&pdf_path, b"%PDF-1.4\n% fake scanned pdf\n").unwrap();
+
+        let renderer_path = dir.path().join("fake-pdftoppm");
+        fs::write(
+            &renderer_path,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-pdftoppm; exit 0; fi\nprefix=\"$3\"\nprintf 'fake image' > \"${prefix}-1.png\"\n",
+        )
+        .unwrap();
+        make_executable(&renderer_path);
+
+        let tesseract_path = dir.path().join("fake-tesseract");
+        fs::write(
+            &tesseract_path,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-tesseract; exit 0; fi\necho 'ocr text after panic'\n",
+        )
+        .unwrap();
+        make_executable(&tesseract_path);
+
+        let ocr = OcrConfig {
+            mode: OcrMode::Auto,
+            ocr_binary_path: Some(tesseract_path),
+            pdf_renderer_path: Some(renderer_path),
+            ..OcrConfig::default()
+        };
+
+        let extracted =
+            extract_pdf_text_with_fallback(&pdf_path, b"fake pdf bytes", &ocr, |bytes| {
+                extract_pdf_text_with(bytes, |_| -> Result<String, pdf_extract::OutputError> {
+                    panic!("assertion failed: name == \"Identity-H\"");
+                })
+            })
+            .unwrap();
+
+        assert!(extracted.contains("ocr text after panic"));
+    }
+
+    #[test]
+    fn test_pdf_extractor_auto_mode_reports_combined_error_after_panic_and_ocr_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("panic.pdf");
+        fs::write(&pdf_path, b"%PDF-1.4\n% fake scanned pdf\n").unwrap();
+
+        let ocr = OcrConfig {
+            mode: OcrMode::Auto,
+            ocr_binary_path: Some(PathBuf::from("/definitely/missing/tesseract")),
+            pdf_renderer_path: Some(PathBuf::from("/definitely/missing/pdftoppm")),
+            ..OcrConfig::default()
+        };
+
+        let result = extract_pdf_text_with_fallback(&pdf_path, b"fake pdf bytes", &ocr, |bytes| {
+            extract_pdf_text_with(bytes, |_| -> Result<String, pdf_extract::OutputError> {
+                panic!("assertion failed: name == \"Identity-H\"");
+            })
+        });
+
+        match result {
+            Err(ExtractError::Pdf(message)) => {
+                assert!(message.contains("embedded extraction failed"));
+                assert!(message.contains("third-party extractor panicked"));
+                assert!(message.contains("OCR fallback failed"));
+            }
+            other => panic!("expected combined Pdf error, got {other:?}"),
+        }
     }
 
     #[test]

@@ -53,7 +53,7 @@
 - [x] 5.3 Display inline error feedback when validation fails (red border + small error message)
 - [x] 5.4 Support deleting chips via `×` close button or `Backspace` when the input is empty
 - [x] 5.5 Replace the existing RAG Lab `filter_file_type` multi-select with the glob chip input
-- [ ] 5.6 Generate suggestion dropdown entries from currently-indexed file types (deferred — incremental nice-to-have; not blocking the spec requirements)
+- [x] 5.6 Generate suggestion dropdown entries from currently-indexed file types
 
 ## 6. Documentation & Spec Alignment
 

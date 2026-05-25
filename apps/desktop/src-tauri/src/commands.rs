@@ -421,6 +421,14 @@ pub fn list_pinned_chunks(state: State<AppState>) -> Result<Vec<SearchResultDto>
 }
 
 #[tauri::command]
+pub fn list_indexed_file_types(state: State<AppState>) -> Result<Vec<String>, String> {
+    state
+        .store
+        .list_indexed_file_types()
+        .map_err(|e| format!("List indexed file types failed: {}", e))
+}
+
+#[tauri::command]
 pub fn validate_file_filter(patterns: Vec<String>) -> Result<(), String> {
     syncmind_rag_engine::file_filter::parse_file_filter(&patterns)
         .map(|_| ())

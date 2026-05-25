@@ -13,6 +13,7 @@ The desktop shell invokes these pin and filter commands from the Rust backend:
 | `unpin_chunk(chunk_id)` | Removes a chunk from the local pinned list. The operation is idempotent. |
 | `is_chunk_pinned(chunk_id)` | Returns whether a chunk is currently pinned. |
 | `list_pinned_chunks()` | Returns pinned chunks as search-result rows ordered by newest pin first. |
+| `list_indexed_file_types()` | Returns distinct indexed file extensions for the RAG Lab file-filter autocomplete. |
 | `validate_file_filter(patterns)` | Validates RAG Lab file-filter glob patterns without running a search. |
 
 `search_knowledge` accepts `filter_file_type` as glob patterns. Bare extension

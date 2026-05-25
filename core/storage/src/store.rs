@@ -580,6 +580,25 @@ impl VectorStore {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::from)
     }
+
+    /// Return the distinct indexed file types currently present in the store.
+    /// Results are normalized to lowercase, exclude empty/unknown values, and
+    /// are ordered by frequency descending then alphabetically ascending.
+    pub fn list_indexed_file_types(&self) -> Result<Vec<String>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT LOWER(file_type) AS normalized_type, COUNT(*) AS file_count
+             FROM files
+             WHERE TRIM(file_type) <> ''
+               AND LOWER(file_type) <> 'unknown'
+             GROUP BY normalized_type
+             ORDER BY file_count DESC, normalized_type ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
 }
 
 #[cfg(test)]
@@ -1072,5 +1091,77 @@ mod tests {
         let db_path = tmp.path().join("syncmind.db");
         let _store1 = VectorStore::new(&db_path, 4).unwrap();
         let _store2 = VectorStore::new(&db_path, 4).unwrap();
+    }
+
+    #[test]
+    fn list_indexed_file_types_returns_distinct_normalized_extensions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("syncmind.db");
+        let store = VectorStore::new(&db_path, 4).unwrap();
+
+        let fixtures = [
+            ("/tmp/main.RS", "RS"),
+            ("/tmp/lib.rs", "rs"),
+            ("/tmp/readme.md", "md"),
+            ("/tmp/notes.MD", "Md"),
+            ("/tmp/guide.txt", "txt"),
+            ("/tmp/unknown.bin", "unknown"),
+            ("/tmp/blank", ""),
+        ];
+
+        for (idx, (path, file_type)) in fixtures.iter().enumerate() {
+            let meta = FileMeta {
+                absolute_path: PathBuf::from(path),
+                file_type: (*file_type).to_string(),
+                last_modified: idx as i64,
+                last_indexed: idx as i64,
+            };
+            let chunks = vec![Chunk {
+                chunk_index: 0,
+                start_line: 1,
+                end_line: 1,
+                content: format!("fixture-{idx}"),
+            }];
+            let embeddings = vec![mock_embedding(4, idx as f32 + 0.1)];
+            store.upsert_file(&meta, &chunks, &embeddings).unwrap();
+        }
+
+        let file_types = store.list_indexed_file_types().unwrap();
+        assert_eq!(file_types, vec!["md", "rs", "txt"]);
+    }
+
+    #[test]
+    fn list_indexed_file_types_sorts_by_frequency_then_alphabetically() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("syncmind.db");
+        let store = VectorStore::new(&db_path, 4).unwrap();
+
+        let fixtures = [
+            ("/tmp/a.ts", "ts"),
+            ("/tmp/b.ts", "TS"),
+            ("/tmp/c.rs", "rs"),
+            ("/tmp/d.md", "md"),
+            ("/tmp/e.py", "py"),
+        ];
+
+        for (idx, (path, file_type)) in fixtures.iter().enumerate() {
+            let meta = FileMeta {
+                absolute_path: PathBuf::from(path),
+                file_type: (*file_type).to_string(),
+                last_modified: idx as i64,
+                last_indexed: idx as i64,
+            };
+            let chunks = vec![Chunk {
+                chunk_index: 0,
+                start_line: 1,
+                end_line: 1,
+                content: format!("fixture-{idx}"),
+            }];
+            let embeddings = vec![mock_embedding(4, idx as f32 + 0.1)];
+            store.upsert_file(&meta, &chunks, &embeddings).unwrap();
+        }
+
+        let file_types = store.list_indexed_file_types().unwrap();
+        assert_eq!(file_types, vec!["ts", "md", "py", "rs"]);
     }
 }

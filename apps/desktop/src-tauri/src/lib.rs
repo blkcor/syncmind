@@ -226,6 +226,7 @@ pub fn run() {
             unpin_chunk,
             is_chunk_pinned,
             list_pinned_chunks,
+            list_indexed_file_types,
             validate_file_filter,
             // Spine (PRD 004) — desktop sync client.
             spine::commands::spine_get_config,
