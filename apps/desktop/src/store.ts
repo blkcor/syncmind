@@ -16,7 +16,7 @@ export interface AppState {
   config: Config;
   indexingStatus: IndexingStatus;
   ragLab: RagLabState;
-  activeTab: 'search' | 'rag-lab' | 'settings' | 'pinned';
+  activeTab: 'search' | 'rag-lab' | 'settings' | 'pinned' | 'devices';
   copiedToast: boolean;
   lastSearchLatencyMs: number | null;
   lastRawResponse: unknown | null;

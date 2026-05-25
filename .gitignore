@@ -46,6 +46,9 @@ vendor/
 # Codex Harness
 .codex
 
+# Local code indexes
+.codegraph/
+
 # Logs and databases
 *.log
 *.sqlite

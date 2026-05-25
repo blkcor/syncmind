@@ -6,6 +6,7 @@ import SearchTab from './components/SearchTab';
 import RagLabTab from './components/RagLabTab';
 import SettingsTab from './components/SettingsTab';
 import PinnedTab from './components/PinnedTab';
+import DevicesTab from './components/DevicesTab';
 import { refreshPinnedList } from './pins';
 
 export default function App() {
@@ -14,6 +15,7 @@ export default function App() {
     { key: 'pinned' as const, label: 'Pinned' },
     { key: 'rag-lab' as const, label: 'RAG Lab' },
     { key: 'settings' as const, label: 'Settings' },
+    { key: 'devices' as const, label: 'Devices' },
   ];
 
   onMount(() => {
@@ -36,7 +38,7 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
 
     let unlistenNavigate: UnlistenFn | undefined;
-    listen<'search' | 'rag-lab' | 'settings' | 'pinned'>('tray-navigate', (event) => {
+    listen<'search' | 'rag-lab' | 'settings' | 'pinned' | 'devices'>('tray-navigate', (event) => {
       setStore('activeTab', event.payload);
     }).then((unlisten) => {
       unlistenNavigate = unlisten;
@@ -68,6 +70,7 @@ export default function App() {
         {store.activeTab === 'pinned' && <PinnedTab />}
         {store.activeTab === 'rag-lab' && <RagLabTab />}
         {store.activeTab === 'settings' && <SettingsTab />}
+        {store.activeTab === 'devices' && <DevicesTab />}
       </main>
     </div>
   );

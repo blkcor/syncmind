@@ -2,7 +2,7 @@
 
 ## Context
 
-PRD 002 §"Open Questions" decided that the desktop palette should:
+PRD 003 §"Open Questions" decided that the desktop palette should:
 
 1. Let users pin search results, persisted locally on a single device.
 2. Let the RAG Lab `filter_file_type` accept glob patterns (not raw extensions or regex).

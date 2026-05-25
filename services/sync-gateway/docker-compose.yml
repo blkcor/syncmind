@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:17-alpine
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -16,9 +16,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    image: ${REDIS_IMAGE:-redis:7-alpine}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -29,8 +27,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        GO_IMAGE: ${GO_IMAGE:-golang:1.25-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:latest}
     ports:
       - "8080:8080"
+    volumes:
+      - ./spine.yaml:/root/spine.yaml:ro
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/syncmind?sslmode=disable
       REDIS_ADDR: redis:6379

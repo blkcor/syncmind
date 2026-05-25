@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -6,12 +7,97 @@ use tracing::{info, warn};
 use syncmind_file_watcher::FileEvent;
 use syncmind_rag_engine::chunker::{Chunker, CodeChunker, FallbackChunker, MarkdownChunker};
 use syncmind_rag_engine::embedder::Embedder;
+use syncmind_rag_engine::error::{EmbedError, ExtractError};
 use syncmind_rag_engine::extractor::{CompositeExtractor, Extractor};
+use syncmind_storage::StorageError;
+use thiserror::Error;
+
+/// Summary of a single-file indexing run, returned by [`index_file_once`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestionReport {
+    pub file_path: std::path::PathBuf,
+    pub chunks_added: usize,
+    pub bytes: u64,
+    pub duration_ms: u128,
+}
+
+#[derive(Debug, Error)]
+pub enum IndexingError {
+    #[error("failed to extract text from {path}: {source}")]
+    Extract {
+        path: PathBuf,
+        #[source]
+        source: ExtractError,
+    },
+    #[error("failed to embed chunks for {path}: {source}")]
+    Embed {
+        path: PathBuf,
+        #[source]
+        source: EmbedError,
+    },
+    #[error("failed to read file metadata for {path}: {source}")]
+    Metadata {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to convert timestamp for {path}: {source}")]
+    Timestamp {
+        path: PathBuf,
+        #[source]
+        source: std::time::SystemTimeError,
+    },
+    #[error("failed to store indexed chunks for {path}: {source}")]
+    Store {
+        path: PathBuf,
+        #[source]
+        source: StorageError,
+    },
+}
+
+/// Index a single file synchronously and report what was ingested.
+///
+/// Designed for callers (e.g. the desktop Spine client at `apps/desktop/src-tauri/src/spine/inbox.rs`)
+/// that need to inject one file into the local index outside the file-watcher event stream and
+/// receive a structured outcome they can surface to the user. Internally this calls
+/// [`index_file`], so it inherits the same idempotency guarantee: re-running on the same path
+/// replaces any prior chunks for that path via `VectorStore::upsert_file`.
+///
+/// The chunker is chosen by extension via [`chunker_for_path`] using the supplied
+/// `chunk_size` / `chunk_overlap` (typically taken from `Config`).
+pub async fn index_file_once(
+    path: &std::path::Path,
+    extractor: &CompositeExtractor,
+    embedder: &dyn Embedder,
+    store: &syncmind_storage::VectorStore,
+    chunk_size: usize,
+    chunk_overlap: usize,
+) -> Result<IngestionReport, IndexingError> {
+    let started = std::time::Instant::now();
+    let chunker = chunker_for_path(path, chunk_size, chunk_overlap);
+
+    let bytes =
+        std::fs::metadata(path)
+            .map(|m| m.len())
+            .map_err(|source| IndexingError::Metadata {
+                path: path.to_path_buf(),
+                source,
+            })?;
+
+    let chunks_added = index_file(path, extractor, chunker.as_ref(), embedder, store).await?;
+
+    Ok(IngestionReport {
+        file_path: path.to_path_buf(),
+        chunks_added,
+        bytes,
+        duration_ms: started.elapsed().as_millis(),
+    })
+}
 
 /// Callback invoked after each file indexing attempt. The closure receives
 /// the file path and the result. Used by the desktop app to update the
 /// shared `IndexingState` and emit events to the frontend / tray.
-pub type IndexResultCallback = Arc<dyn Fn(&Path, Result<(), &anyhow::Error>) + Send + Sync>;
+pub type IndexResultCallback = Arc<dyn Fn(&Path, Result<(), &IndexingError>) + Send + Sync>;
 
 /// Select the appropriate chunker for a file based on its extension.
 pub fn chunker_for_path(
@@ -24,11 +110,11 @@ pub fn chunker_for_path(
             return Box::new(MarkdownChunker::new(chunk_size, chunk_overlap));
         }
         if [
-            "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "c", "h", "cpp", "cc",
-            "cxx", "hpp", "hh", "hxx", "cs", "rb", "php", "swift", "kt", "kts",
+            "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "c", "h", "cpp", "cc", "cxx",
+            "hpp", "hh", "hxx", "cs", "rb", "php", "swift", "kt", "kts",
         ]
-            .iter()
-            .any(|&e| e.eq_ignore_ascii_case(ext))
+        .iter()
+        .any(|&e| e.eq_ignore_ascii_case(ext))
         {
             return Box::new(CodeChunker::new(chunk_size, chunk_overlap));
         }
@@ -37,30 +123,57 @@ pub fn chunker_for_path(
 }
 
 /// Index a single file through the full extract→chunk→embed→store pipeline.
+/// Returns the number of chunks ingested (0 if the extractor produced empty text).
 pub async fn index_file(
     path: &std::path::Path,
     extractor: &CompositeExtractor,
     chunker: &dyn Chunker,
     embedder: &dyn Embedder,
     store: &syncmind_storage::VectorStore,
-) -> anyhow::Result<()> {
-    let text = extractor.extract(path)?;
+) -> Result<usize, IndexingError> {
+    let text = extractor
+        .extract(path)
+        .map_err(|source| IndexingError::Extract {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let chunks = chunker.chunk(&text, path);
 
     if chunks.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
     let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
-    let embeddings = embedder.embed(&texts).await?;
+    let embeddings = embedder
+        .embed(&texts)
+        .await
+        .map_err(|source| IndexingError::Embed {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
-    let metadata = std::fs::metadata(path)?;
+    let metadata = std::fs::metadata(path).map_err(|source| IndexingError::Metadata {
+        path: path.to_path_buf(),
+        source,
+    })?;
     let last_modified = metadata
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)?
+        .modified()
+        .map_err(|source| IndexingError::Metadata {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|source| IndexingError::Timestamp {
+            path: path.to_path_buf(),
+            source,
+        })?
         .as_secs() as i64;
     let last_indexed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|source| IndexingError::Timestamp {
+            path: path.to_path_buf(),
+            source,
+        })?
         .as_secs() as i64;
 
     let meta = syncmind_storage::FileMeta {
@@ -74,8 +187,14 @@ pub async fn index_file(
         last_indexed,
     };
 
-    store.upsert_file(&meta, &chunks, &embeddings)?;
-    Ok(())
+    let chunk_count = chunks.len();
+    store
+        .upsert_file(&meta, &chunks, &embeddings)
+        .map_err(|source| IndexingError::Store {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(chunk_count)
 }
 
 /// Run the indexing pipeline: receive file change events and route each to
@@ -107,8 +226,10 @@ pub async fn run_indexing_pipeline(
                     )
                     .await;
                     match &result {
-                        Err(e) => warn!(path = %path.display(), error = %e, "failed to re-index file"),
-                        Ok(()) => info!(path = %path.display(), "re-indexed file"),
+                        Err(e) => {
+                            warn!(path = %path.display(), error = %e, "failed to re-index file")
+                        }
+                        Ok(n) => info!(path = %path.display(), chunks = n, "re-indexed file"),
                     }
                     if let Some(cb) = on_result.as_ref() {
                         cb(&path, result.as_ref().map(|_| ()));
@@ -116,8 +237,12 @@ pub async fn run_indexing_pipeline(
                 }
                 FileEvent::Remove(path) => match store.delete_file_by_path(&path) {
                     Ok(true) => info!(path = %path.display(), "removed file from index"),
-                    Ok(false) => info!(path = %path.display(), "remove event for unknown file (no-op)"),
-                    Err(e) => warn!(path = %path.display(), error = %e, "failed to remove file from index"),
+                    Ok(false) => {
+                        info!(path = %path.display(), "remove event for unknown file (no-op)")
+                    }
+                    Err(e) => {
+                        warn!(path = %path.display(), error = %e, "failed to remove file from index")
+                    }
                 },
             }
         }
@@ -131,9 +256,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::fs;
-    use std::path::PathBuf;
     use syncmind_core::OcrMode;
-    use syncmind_rag_engine::error::EmbedError;
     use syncmind_rag_engine::extractor::{CompositeExtractor, OcrConfig};
 
     struct FixedEmbedder {
@@ -148,6 +271,19 @@ mod tests {
 
         fn embedding_dim(&self) -> usize {
             self.dim
+        }
+    }
+
+    struct FailingEmbedder;
+
+    #[async_trait]
+    impl Embedder for FailingEmbedder {
+        async fn embed(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+            Err(EmbedError::OllamaUnavailable("offline fixture".into()))
+        }
+
+        fn embedding_dim(&self) -> usize {
+            4
         }
     }
 
@@ -179,7 +315,10 @@ mod tests {
             pdf.push('\n');
         }
         let xref_offset = pdf.len();
-        pdf.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1));
+        pdf.push_str(&format!(
+            "xref\n0 {}\n0000000000 65535 f \n",
+            objects.len() + 1
+        ));
         for offset in offsets.iter().skip(1) {
             pdf.push_str(&format!("{offset:010} 00000 n \n"));
         }
@@ -194,7 +333,7 @@ mod tests {
     fn fake_tesseract(path: &std::path::Path) {
         fs::write(
             path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'tesseract fake'; exit 0; fi\necho 'ocr image text from local fixture'\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'tesseract fake'; exit 0; fi\nif ! grep -q 'syncmind image ocr fixture' \"$1\"; then echo 'unexpected OCR input' >&2; exit 2; fi\necho 'ocr image text from local fixture'\n",
         )
         .unwrap();
         make_executable(path);
@@ -207,13 +346,7 @@ mod tests {
         store: Arc<syncmind_storage::VectorStore>,
         embedder: Arc<dyn Embedder>,
     ) {
-        let _ = run_indexing_pipeline(
-            syncmind_core::Config::default(),
-            store,
-            embedder,
-            rx,
-            None,
-        );
+        let _ = run_indexing_pipeline(syncmind_core::Config::default(), store, embedder, rx, None);
     }
 
     #[allow(dead_code)]
@@ -237,7 +370,11 @@ mod tests {
             ("hxx", "class Demo { void run() {} };\n", "class Demo"),
             ("cs", "class Demo { void Run() {} }\n", "class Demo"),
             ("rb", "class Demo\n  def run\n  end\nend\n", "class Demo"),
-            ("php", "<?php\nfunction run_demo() { return 1; }\n", "function run_demo"),
+            (
+                "php",
+                "<?php\nfunction run_demo() { return 1; }\n",
+                "function run_demo",
+            ),
             ("swift", "struct Demo { func run() {} }\n", "struct Demo"),
             ("kt", "class Demo { fun run() {} }\n", "class Demo"),
             ("kts", "fun runDemo() = 1\n", "fun runDemo"),
@@ -263,12 +400,8 @@ mod tests {
         let tesseract = temp.path().join("fake-tesseract");
 
         fs::write(&clean_pdf, minimal_text_pdf("clean embedded pdf text")).unwrap();
-        fs::write(&image, b"not a real image; fake tesseract ignores input").unwrap();
-        fs::write(
-            &java,
-            "public class Example {\n  public void run() {}\n}\n",
-        )
-        .unwrap();
+        fs::write(&image, b"syncmind image ocr fixture").unwrap();
+        fs::write(&java, "public class Example {\n  public void run() {}\n}\n").unwrap();
         fs::write(&unsupported, "unsupported_text = \"still falls back\"").unwrap();
         fake_tesseract(&tesseract);
 
@@ -289,7 +422,12 @@ mod tests {
         }
 
         let results = store
-            .search_hybrid(&[0.25; 4], "embedded OR ocr OR Example OR unsupported", 10, None)
+            .search_hybrid(
+                &[0.25; 4],
+                "embedded OR ocr OR Example OR unsupported",
+                10,
+                None,
+            )
             .unwrap();
         for path in [&clean_pdf, &image, &java, &unsupported] {
             assert!(
@@ -305,10 +443,81 @@ mod tests {
         });
         let chunker = chunker_for_path(&image, 400, 40);
         assert!(
-            index_file(&image, &disabled_extractor, chunker.as_ref(), &embedder, &store)
-                .await
-                .is_err(),
+            index_file(
+                &image,
+                &disabled_extractor,
+                chunker.as_ref(),
+                &embedder,
+                &store
+            )
+            .await
+            .is_err(),
             "OCR-disabled image should fail only that file"
         );
+    }
+
+    #[tokio::test]
+    async fn index_file_once_reports_chunks_and_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let note = temp.path().join("draft.md");
+        let db = temp.path().join("index.sqlite");
+
+        fs::write(
+            &note,
+            "# Heading\n\nFirst paragraph with enough words to make a chunk.\n\nSecond paragraph likewise has enough words to chunk.\n",
+        )
+        .unwrap();
+
+        let extractor = CompositeExtractor::with_ocr_config(OcrConfig::default());
+        let embedder = FixedEmbedder { dim: 4 };
+        let store = syncmind_storage::VectorStore::new(&db, embedder.embedding_dim()).unwrap();
+
+        let report = index_file_once(&note, &extractor, &embedder, &store, 64, 8)
+            .await
+            .unwrap();
+        assert_eq!(report.file_path, note);
+        assert!(
+            report.chunks_added >= 1,
+            "expected at least one chunk, got {}",
+            report.chunks_added
+        );
+        assert!(report.bytes > 0, "bytes should reflect file size");
+
+        // First run produced N chunks; second run on the same path must produce the
+        // same number (idempotent via upsert_file's delete-then-insert semantics).
+        let first_count = report.chunks_added;
+        let report2 = index_file_once(&note, &extractor, &embedder, &store, 64, 8)
+            .await
+            .unwrap();
+        assert_eq!(report2.chunks_added, first_count);
+    }
+
+    #[tokio::test]
+    async fn index_file_once_surfaces_embedding_errors_as_structured_variant() {
+        let temp = tempfile::tempdir().unwrap();
+        let note = temp.path().join("draft.md");
+        let db = temp.path().join("index.sqlite");
+
+        fs::write(
+            &note,
+            "# Heading\n\nThis paragraph has enough content to produce a chunk.\n",
+        )
+        .unwrap();
+
+        let extractor = CompositeExtractor::with_ocr_config(OcrConfig::default());
+        let embedder = FailingEmbedder;
+        let store = syncmind_storage::VectorStore::new(&db, embedder.embedding_dim()).unwrap();
+
+        let err = index_file_once(&note, &extractor, &embedder, &store, 64, 8)
+            .await
+            .unwrap_err();
+
+        match err {
+            IndexingError::Embed { path, source } => {
+                assert_eq!(path, note);
+                assert!(source.to_string().contains("offline fixture"));
+            }
+            other => panic!("expected IndexingError::Embed, got {other:?}"),
+        }
     }
 }

@@ -318,6 +318,28 @@ The Spine 是 SyncMind 从"单设备本地引擎"迈向"多端协同知识网络
 - **实际实现:** 配对会话存储的是设备的**持久 Ed25519 身份公钥**。X25519 ECDH 交换及 `sync_key` 派生（`HKDF-SHA256`）完全在客户端本地完成，Spine 服务端不接触任何 X25519 密钥或派生出的对称密钥。
 - **原因:** 这更符合 FR-12 的要求（Spine 不得存储或访问任何私钥或派生的共享对称密钥），同时简化了服务端逻辑。Ed25519 公钥在配对完成后直接写入 `devices` 表作为设备身份标识。
 
+#### 1.1 客户端 Ed25519 ↔ X25519 转换契约 (规范性)
+
+为保证未来其他客户端（移动端、Web 端）能与桌面端互通，配对完成后双方在本地派生 `sync_key` 时**必须**按以下算法执行 Ed25519 → Curve25519 的转换：
+
+- **私钥侧**：使用 `ed25519-dalek::SigningKey::to_scalar_bytes()`（v2 起原生支持）。该方法返回 SHA-512(seed) 截断并 clamp 后的 32 字节 Curve25519 标量。
+- **公钥侧**：使用 `curve25519-dalek::edwards::CompressedEdwardsY::decompress(...).to_montgomery().to_bytes()`，将 Ed25519 公钥（Edwards 形式）转换为 Curve25519 公钥（Montgomery 形式）。
+- **共享秘密**：`shared_secret = x25519(local_x25519_priv, peer_x25519_pub)`，长度 32 字节。
+- **派生**：`sync_key = HKDF-SHA256(ikm = shared_secret, salt = session_id_str.as_bytes(), info = b"syncmind-v1")`，输出 32 字节。
+
+非 Rust 客户端实现应使用等价的转换（如 libsodium `crypto_sign_ed25519_sk_to_curve25519` 与 `crypto_sign_ed25519_pk_to_curve25519`）以保证派生结果一致。详细的桌面端实现参见 **PRD 004 §US-031** 与 **`openspec/changes/desktop-spine-client/specs/device-pairing/spec.md`** 中的规范性场景。
+
+#### 1.2 客户端自定 `device_uuid` (规范性，与 §1.1 同步引入)
+
+`POST /v1/pairing/initiate` 与 `POST /v1/pairing/complete` 均接受请求体字段 `device_uuid` (UUIDv4 字符串)；服务端将其作为 `devices.id` 主键写入，不再由 Postgres `gen_random_uuid()` 生成。客户端因此可以在签发首个 JWT 之前就拥有稳定的 `sub` 值，避免一次额外的握手。
+
+UUID 冲突语义：
+
+- 同 UUID + 同 `public_key_fingerprint` → 视作设备恢复，允许。
+- 同 UUID + 不同 `public_key_fingerprint` → 返回 `409 UUID_CONFLICT`。
+
+参见 PRD 004 §US-029、`openspec/changes/desktop-spine-client/specs/device-pairing/spec.md` 与 `specs/device-auth/spec.md`。
+
 ### 2. Go-Zero 使用范围缩小
 - **PRD 原设计 (US-010 / US-018):** 计划引入 `go-zero` 作为完整服务脚手架，包括 `rest`、`zrpc` 等组件。
 - **实际实现:** 仅使用 `github.com/zeromicro/go-zero/core/conf` 进行 YAML 配置加载。HTTP/WebSocket 服务器直接使用 **Hertz**（`github.com/cloudwego/hertz`），未使用 go-zero 的 REST 封装或 handler 模式。

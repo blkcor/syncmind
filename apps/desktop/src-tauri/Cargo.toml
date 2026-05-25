@@ -7,6 +7,11 @@ edition = "2021"
 name = "syncmind_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = ["keyring-native"]
+keyring-native = ["keyring/apple-native", "keyring/windows-native", "keyring/linux-native"]
+keyring-mock = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -30,5 +35,38 @@ syncmind-rag-engine = { path = "../../../core/rag-engine" }
 syncmind-indexing = { path = "../../../core/syncmind-indexing" }
 syncmind-file-watcher = { path = "../../../core/file-watcher" }
 
+# --- Spine client deps (PRD 004, OpenSpec change `desktop-spine-client`) ---
+# Identity / key storage
+keyring = { version = "3", default-features = false }
+ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
+x25519-dalek = "2"
+curve25519-dalek = "4"
+# Symmetric encryption + key derivation
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+# QR rendering for pairing UI
+qrcode = "0.14"
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Network transports
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
+rustls-pemfile = "2"
+# Auth / identifiers
+jsonwebtoken = "9"
+uuid = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
+url = "2"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+# Misc
+rand = "0.8"
+futures-util = "0.3"
+hex = "0.4"
+zeroize = "1"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = "0.6"

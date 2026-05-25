@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 mod commands;
+mod spine;
 
 use commands::*;
 
@@ -79,6 +80,9 @@ pub struct AppState {
     /// When true, the auto-hide on Focused(false) is suppressed so modal
     /// dialogs (file picker, etc.) don't get dismissed on macOS.
     pub dialog_open: Mutex<bool>,
+    /// Spine sync subsystem (PRD 004). `None` only during a transient startup window if
+    /// identity initialization failed; commands surface SPINE_NOT_CONFIGURED in that case.
+    pub spine: Arc<spine::state::SpineRuntime>,
 }
 
 impl AppState {
@@ -172,8 +176,9 @@ fn unavailable_embedder(
     config: &syncmind_core::Config,
     message: String,
 ) -> Arc<dyn syncmind_rag_engine::embedder::Embedder> {
-    let embedding_dim = syncmind_core::Config::expected_embedding_dim_for_model(&config.ollama_model)
-        .unwrap_or(config.embedding_dim);
+    let embedding_dim =
+        syncmind_core::Config::expected_embedding_dim_for_model(&config.ollama_model)
+            .unwrap_or(config.embedding_dim);
     Arc::new(UnavailableEmbedder {
         message,
         embedding_dim,
@@ -223,6 +228,21 @@ pub fn run() {
             list_pinned_chunks,
             list_indexed_file_types,
             validate_file_filter,
+            // Spine (PRD 004) — desktop sync client.
+            spine::commands::spine_get_config,
+            spine::commands::spine_set_url,
+            spine::commands::spine_set_trust_ca,
+            spine::commands::spine_get_identity,
+            spine::commands::spine_start_pairing,
+            spine::commands::spine_complete_pairing_short_code,
+            spine::commands::spine_pair_status,
+            spine::commands::spine_cancel_pairing,
+            spine::commands::spine_send_note,
+            spine::commands::spine_pull_bundles,
+            spine::commands::spine_unpair,
+            spine::commands::spine_reset_identity,
+            spine::commands::spine_list_inbox,
+            spine::commands::spine_clear_inbox,
         ])
         .setup(|app| {
             // Hide from Dock / App Switcher on macOS.
@@ -276,7 +296,7 @@ pub fn run() {
             let app_handle_for_cb = app.handle().clone();
             let indexing_for_cb = Arc::clone(&indexing_state);
             let on_index_result: syncmind_indexing::IndexResultCallback = Arc::new(
-                move |path: &std::path::Path, result: Result<(), &anyhow::Error>| {
+                move |path: &std::path::Path, result: Result<(), &syncmind_indexing::IndexingError>| {
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
@@ -336,6 +356,81 @@ pub fn run() {
             let init_on_index_result = Arc::clone(&on_index_result);
             let init_app_handle = app.handle().clone();
 
+            // Initialize the Spine subsystem (PRD 004). Identity creation is best-effort:
+            // if it fails (e.g., no keychain available and a write to <data-dir>/keys
+            // refused), we surface SPINE_NOT_CONFIGURED to the user via the Devices tab.
+            let data_dir = syncmind_core::paths::local_data_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let spine_runtime = match spine::identity::ensure_identity(&data_dir, "desktop") {
+                Ok(identity) => {
+                    let spine_status_app = app.handle().clone();
+                    let status_sink: Arc<dyn Fn(spine::ws::WsStatus) + Send + Sync> =
+                        Arc::new(move |status| {
+                            let _ = spine_status_app.emit("spine://status", status.as_str());
+                        });
+                    let spine_pull_app = app.handle().clone();
+                    let on_new_bundle: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                        spine::commands::spawn_pull_bundles(spine_pull_app.clone());
+                    });
+                    let runtime = Arc::new(spine::state::SpineRuntime::new(
+                        data_dir.clone(),
+                        identity,
+                        on_new_bundle,
+                        status_sink,
+                    ));
+                    // Rebuild client from existing config (if URL already set).
+                    let initial_url = config.spine.url.clone();
+                    let initial_ca = config.spine.trust_ca_path.clone();
+                    let initial_paired = config.spine.is_paired();
+                    let runtime_for_init = Arc::clone(&runtime);
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = runtime_for_init
+                            .rebuild_client(initial_url.as_deref(), initial_ca.as_deref())
+                            .await
+                        {
+                            tracing::warn!(error = %e, "initial spine client build failed");
+                            return;
+                        }
+                        if let Err(e) = runtime_for_init.refresh_live_sync(initial_paired).await {
+                            tracing::warn!(error = %e, "initial spine live sync activation failed");
+                        }
+                    });
+                    runtime
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "spine identity initialization failed; sync disabled");
+                    // Construct a disabled runtime around a placeholder identity so AppState
+                    // can still be managed and `spine_reset_identity` remains available.
+                    // We use an in-memory throwaway key — it is never written anywhere.
+                    let throwaway = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+                    let placeholder = spine::identity::Identity::from_parts(
+                        throwaway,
+                        spine::identity::DeviceMetadata {
+                            fingerprint: "0".repeat(64),
+                            device_type: "desktop".to_string(),
+                            device_uuid: uuid::Uuid::new_v4().to_string(),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                        },
+                    );
+                    let spine_status_app = app.handle().clone();
+                    let status_sink: Arc<dyn Fn(spine::ws::WsStatus) + Send + Sync> =
+                        Arc::new(move |status| {
+                            let _ = spine_status_app.emit("spine://status", status.as_str());
+                        });
+                    let spine_pull_app = app.handle().clone();
+                    let on_new_bundle: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                        spine::commands::spawn_pull_bundles(spine_pull_app.clone());
+                    });
+                    Arc::new(spine::state::SpineRuntime::disabled(
+                        data_dir,
+                        placeholder,
+                        e,
+                        on_new_bundle,
+                        status_sink,
+                    ))
+                }
+            };
+
             app.manage(AppState {
                 config: Mutex::new(config),
                 store,
@@ -346,6 +441,7 @@ pub fn run() {
                 indexing: Arc::clone(&indexing_state),
                 on_index_result: Arc::clone(&on_index_result),
                 dialog_open: Mutex::new(false),
+                spine: spine_runtime,
             });
             // Real embedder initialization runs in the background so the
             // `setup` hook returns immediately. When `AutoEmbedder::new`
@@ -421,12 +517,15 @@ pub fn run() {
                 MenuItemBuilder::with_id("indexing_status", "Indexing Status").build(app)?;
             let settings_item =
                 MenuItemBuilder::with_id("settings", "Settings").build(app)?;
+            let devices_item =
+                MenuItemBuilder::with_id("devices", "Sync devices…").build(app)?;
             let quit_item =
                 MenuItemBuilder::with_id("quit", "Quit SyncMind").build(app)?;
             let tray_menu = MenuBuilder::new(app)
                 .item(&open_palette_item)
                 .item(&indexing_status_item)
                 .item(&settings_item)
+                .item(&devices_item)
                 .separator()
                 .item(&quit_item)
                 .build()?;
@@ -452,6 +551,12 @@ pub fn run() {
                         if let Some(window) = app.get_webview_window("main") {
                             show_and_focus(&window);
                             let _ = window.emit("tray-navigate", "settings");
+                        }
+                    }
+                    "devices" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            show_and_focus(&window);
+                            let _ = window.emit("tray-navigate", "devices");
                         }
                     }
                     "quit" => app.exit(0),

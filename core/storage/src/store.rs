@@ -431,6 +431,24 @@ impl VectorStore {
         Ok((file_count, chunk_count))
     }
 
+    /// Delete every indexed file and its associated chunks/vectors.
+    ///
+    /// `vec_chunks` and `fts_chunks` are virtual tables, so clear them
+    /// explicitly instead of relying on foreign-key cascade semantics.
+    pub fn clear_index(&self) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+
+        tx.execute("DELETE FROM vec_chunks", [])?;
+        tx.execute("DELETE FROM fts_chunks", [])?;
+        tx.execute("DELETE FROM chunks", [])?;
+        tx.execute("DELETE FROM pinned_chunks", [])?;
+        tx.execute("DELETE FROM files", [])?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Delete a file and all its associated chunks and vectors from the store.
     ///
     /// Returns `Ok(true)` if a row was deleted, `Ok(false)` if no file with
@@ -732,6 +750,41 @@ mod tests {
             .delete_file_by_path(&PathBuf::from("/tmp/never_indexed.md"))
             .unwrap();
         assert!(!removed);
+    }
+
+    #[test]
+    fn store_clear_index_removes_all_index_artifacts() {
+        let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let store = VectorStore::new(&db_path, 4).unwrap();
+
+        for absolute_path in ["/tmp/first.md", "/tmp/second.md"] {
+            let meta = FileMeta {
+                absolute_path: PathBuf::from(absolute_path),
+                file_type: "markdown".to_string(),
+                last_modified: 1,
+                last_indexed: 1,
+            };
+            let chunks = vec![Chunk {
+                chunk_index: 0,
+                start_line: 1,
+                end_line: 1,
+                content: format!("Indexed content for {absolute_path}"),
+            }];
+            let embeddings = vec![mock_embedding(4, 0.1)];
+            store.upsert_file(&meta, &chunks, &embeddings).unwrap();
+        }
+
+        let (files_before, chunks_before) = store.get_stats().unwrap();
+        assert_eq!(files_before, 2);
+        assert_eq!(chunks_before, 2);
+        assert_eq!(count_vec_chunks(&store), 2);
+
+        store.clear_index().unwrap();
+
+        let (files_after, chunks_after) = store.get_stats().unwrap();
+        assert_eq!(files_after, 0);
+        assert_eq!(chunks_after, 0);
+        assert_eq!(count_vec_chunks(&store), 0);
     }
 
     #[test]

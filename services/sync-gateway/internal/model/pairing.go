@@ -15,6 +15,7 @@ type PairingSession struct {
 	InitiatorPubkey   []byte    `db:"initiator_pubkey"`
 	ResponderPubkey   []byte    `db:"responder_pubkey"`
 	Status            string    `db:"status"`
+	ShortCode         *string   `db:"short_code"`
 	ExpiresAt         time.Time `db:"expires_at"`
 	CreatedAt         time.Time `db:"created_at"`
 }
@@ -32,22 +33,40 @@ func NewPairingStore(pool *pgxpool.Pool) *PairingStore {
 // Create inserts a new pairing session.
 func (s *PairingStore) Create(ctx context.Context, ps *PairingSession) error {
 	query := `
-		INSERT INTO pairing_sessions (id, initiator_device_id, initiator_pubkey, responder_pubkey, status, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO pairing_sessions (id, initiator_device_id, initiator_pubkey, responder_pubkey, status, short_code, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
-	_, err := s.pool.Exec(ctx, query, ps.ID, ps.InitiatorDeviceID, ps.InitiatorPubkey, ps.ResponderPubkey, ps.Status, ps.ExpiresAt, ps.CreatedAt)
+	_, err := s.pool.Exec(ctx, query, ps.ID, ps.InitiatorDeviceID, ps.InitiatorPubkey, ps.ResponderPubkey, ps.Status, ps.ShortCode, ps.ExpiresAt, ps.CreatedAt)
 	return err
 }
 
 // GetByID retrieves a pairing session by ID.
 func (s *PairingStore) GetByID(ctx context.Context, id uuid.UUID) (*PairingSession, error) {
 	query := `
-		SELECT id, initiator_device_id, initiator_pubkey, responder_pubkey, status, expires_at, created_at
+		SELECT id, initiator_device_id, initiator_pubkey, responder_pubkey, status, short_code, expires_at, created_at
 		FROM pairing_sessions WHERE id = $1
 	`
 	row := s.pool.QueryRow(ctx, query, id)
 	var ps PairingSession
-	err := row.Scan(&ps.ID, &ps.InitiatorDeviceID, &ps.InitiatorPubkey, &ps.ResponderPubkey, &ps.Status, &ps.ExpiresAt, &ps.CreatedAt)
+	err := row.Scan(&ps.ID, &ps.InitiatorDeviceID, &ps.InitiatorPubkey, &ps.ResponderPubkey, &ps.Status, &ps.ShortCode, &ps.ExpiresAt, &ps.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &ps, nil
+}
+
+// GetByShortCode retrieves a pending pairing session by its normalized short code.
+func (s *PairingStore) GetByShortCode(ctx context.Context, shortCode string) (*PairingSession, error) {
+	query := `
+		SELECT id, initiator_device_id, initiator_pubkey, responder_pubkey, status, short_code, expires_at, created_at
+		FROM pairing_sessions
+		WHERE short_code = $1
+		ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, created_at DESC
+		LIMIT 1
+	`
+	row := s.pool.QueryRow(ctx, query, shortCode)
+	var ps PairingSession
+	err := row.Scan(&ps.ID, &ps.InitiatorDeviceID, &ps.InitiatorPubkey, &ps.ResponderPubkey, &ps.Status, &ps.ShortCode, &ps.ExpiresAt, &ps.CreatedAt)
 	if err != nil {
 		return nil, err
 	}

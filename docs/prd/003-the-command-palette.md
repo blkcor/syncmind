@@ -18,7 +18,7 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
 
 ## User Stories
 
-### US-020: Tauri 应用脚手架与 SolidJS 前端初始化
+### US-019: Tauri 应用脚手架与 SolidJS 前端初始化
 
 **Description:** 作为开发者，我需要一个完整的 Tauri + SolidJS 工程结构，以便在桌面端消费 Rust 核心能力。
 
@@ -31,7 +31,7 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
 - [ ] 配置 Tauri 能力 (Capability) 文件，仅声明所需的最小权限集（无文件系统写权限暴露给前端）。
 - [ ] `pnpm dev` 能正常拉起 Tauri 开发窗口；`cargo check` / `cargo clippy` 通过后端检查。
 
-### US-021: Rust 核心库集成与 Tauri Command 封装
+### US-020: Rust 核心库集成与 Tauri Command 封装
 
 **Description:** 作为桌面应用，我需要通过 Tauri Command 直接调用 Rust 核心的搜索、配置与索引能力。
 
@@ -45,7 +45,7 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
 - [ ] 所有返回结构体实现 `serde::Serialize`，并生成对应的 TypeScript 类型定义（通过 `specta` 或手动维护在 `packages/types` 中）。
 - [ ] 错误处理统一返回 `{ error: String }`，前端负责展示 Toast 提示。
 
-### US-022: 全局快捷键与悬浮窗口管理
+### US-021: 全局快捷键与悬浮窗口管理
 
 **Description:** 作为用户，我希望通过全局快捷键随时唤醒或隐藏命令面板，且不干扰当前工作流。
 
@@ -62,7 +62,7 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
 - [ ] macOS 平台首发，代码中预留 Windows/Linux 快捷键配置的 TODO 注释。
 - [ ] 窗口显示时，搜索框自动获得焦点且文本全选（便于直接输入新查询）。
 
-### US-023: 命令面板搜索与结果列表
+### US-022: 命令面板搜索与结果列表
 
 **Description:** 作为用户，我需要在命令面板中输入关键词，快速看到语义相关的代码片段或笔记。
 
@@ -79,12 +79,12 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
   - `↑` / `↓` 切换选中项。
   - `Enter` 执行默认操作（复制内容到剪贴板）。
   - `Cmd+Enter` 在系统默认编辑器中打开源文件。
-  - `Cmd+P` 切换当前选中项的 Pin 状态（参见 US-028）。
+  - `Cmd+P` 切换当前选中项的 Pin 状态（参见 US-027）。
 - [ ] 每个结果项右侧显示 Pin 图标：未 pin 为空心，已 pin 为实心；点击图标等效于 `Cmd+P`。
 - [ ] 空状态：无结果时显示 "No matches found. Try a broader query."。
 - [ ] 加载状态：搜索过程中显示不可交互的骨架屏或 Spinner。
 
-### US-024: 预览窗格与快捷操作
+### US-023: 预览窗格与快捷操作
 
 **Description:** 作为用户，我希望在不离开面板的情况下预览完整内容，并快速采取行动。
 
@@ -102,7 +102,7 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
 - [ ] 预览内容超长时支持垂直滚动，且不影响左侧列表滚动。
 - [ ] 快捷键绑定：`Cmd+C` 在预览窗格聚焦时复制内容（前端处理）。
 
-### US-025: RAG 实验室面板
+### US-024: RAG 实验室面板
 
 **Description:** 作为高级用户，我希望能调优检索参数并观察引擎行为，以便优化我的知识库组织方式。
 
@@ -123,7 +123,7 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
 - [ ] 原始 JSON 视图：可折叠展示 `search_knowledge` 的原始返回结果，便于排查问题。
 - [ ] 参数变更实时生效，无需重启应用。
 
-### US-026: 设置界面与索引状态仪表盘
+### US-025: 设置界面与索引状态仪表盘
 
 **Description:** 作为用户，我需要可视化地管理配置和监控索引健康度，而不是手动编辑 TOML 文件。
 
@@ -144,7 +144,7 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
   - 错误日志列表：展示最近 10 条索引错误（文件路径 + 错误信息 + 时间戳）。
   - "Rebuild All" 按钮：触发全量重建索引，需二次确认（防止误触）。
 
-### US-027: 系统托盘驻留与开机自启
+### US-026: 系统托盘驻留与开机自启
 
 **Description:** 作为用户，我希望 SyncMind 像后台守护进程一样常驻，随时响应我的搜索需求。
 
@@ -160,7 +160,7 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
 - [ ] 点击 Dock 图标时，若面板已隐藏则显示面板；若已显示则聚焦。
 - [ ] `Cmd+Q` 或托盘 Quit 彻底退出应用，释放 Rust 核心资源（关闭 SQLite 连接、停止文件监听）。
 
-### US-028: Pinned Chunks 视图与本地持久化
+### US-027: Pinned Chunks 视图与本地持久化
 
 **Description:** 作为用户，我希望能将常用的搜索结果"钉住"，下次唤醒命令面板时无需再次搜索即可快速访问。
 
@@ -175,7 +175,7 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
   - `list_pinned_chunks() -> Vec<SearchResult>`（返回结构与 `search_knowledge` 一致，按 `pinned_at` 降序）。
   - `is_chunk_pinned(chunk_id: i64) -> bool`（用于结果列表渲染 Pin 图标状态）。
 - [ ] 命令面板顶部新增 "Pinned" Tab（或快捷键 `Cmd+Shift+P` 切换）：
-  - 显示所有已 pin 的 chunks，复用 US-023 的结果列表组件。
+  - 显示所有已 pin 的 chunks，复用 US-022 的结果列表组件。
   - 空状态显示 "No pinned items yet. Press Cmd+P on a search result to pin it."。
   - 每项支持 `Cmd+P` 取消 pin、`Enter` 复制、`Cmd+Enter` 打开源文件，与搜索结果操作一致。
 - [ ] 搜索结果列表中，已 pin 的项在视觉上有标记（实心图标 + 轻微背景色高亮）。
@@ -230,7 +230,7 @@ SyncMind Phase 2 的目标是为 Rust 核心引擎穿上一层**桌面交互外�
 
 ## Open Questions
 
-- ~~是否需要为搜索结果提供 "收藏 / Pin" 功能，以便用户固定常用片段？~~ **已决策（本地单设备持久化）→ 落地于 US-028、FR-9，由 OpenSpec change `desktop-pin-and-glob-filter` 实施。**
-- ~~RAG Lab 面板中的 `filter_file_type` 是否需要支持通配符或正则（如 `*.rs`）？~~ **已决策（仅 glob，基于 `globset`）→ 落地于 US-025、FR-10，由 OpenSpec change `desktop-pin-and-glob-filter` 实施。**
+- ~~是否需要为搜索结果提供 "收藏 / Pin" 功能，以便用户固定常用片段？~~ **已决策（本地单设备持久化）→ 落地于 US-027、FR-9，由 OpenSpec change `desktop-pin-and-glob-filter` 实施。**
+- ~~RAG Lab 面板中的 `filter_file_type` 是否需要支持通配符或正则（如 `*.rs`）？~~ **已决策（仅 glob，基于 `globset`）→ 落地于 US-024、FR-10，由 OpenSpec change `desktop-pin-and-glob-filter` 实施。**
 - 当用户通过桌面应用修改 `registered_files` 时，是否同时通知外部 MCP 守护进程（如果正在运行）进行配置重载？是否需要文件锁或 IPC 机制？ **方向已定（需要重载 + 需要锁/IPC），具体协议形态待独立 OpenSpec change 设计。**
 - ~~预览窗格的语法高亮库（`shiki` vs `prismjs`）是否对包体积有显著影响？是否需要懒加载语言定义？~~ **已决策：Shiki + 懒加载语言定义。**

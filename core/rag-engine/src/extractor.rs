@@ -2,11 +2,14 @@ use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 use tracing::warn;
 
 use crate::error::ExtractError;
 use syncmind_core::{Config, OcrMode};
+
+static PDF_EXTRACT_PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
 
 pub trait Extractor: Send + Sync {
     fn extract(&self, path: &Path) -> Result<String, ExtractError>;
@@ -128,7 +131,66 @@ impl Extractor for PdfExtractor {
     fn extract(&self, path: &Path) -> Result<String, ExtractError> {
         let path = validate_path(path)?;
         let bytes = fs::read(&path)?;
-        extract_pdf_text_with_fallback(&path, &bytes, &self.ocr, extract_pdf_text_safely)
+        if self.ocr.mode != OcrMode::Force {
+            match extract_pdf_text_from_mem(&bytes) {
+                Ok(text) if self.ocr.mode == OcrMode::Auto => {
+                    match run_pdf_text_fallback(&path, &self.ocr) {
+                        Ok(poppler_text)
+                            if should_prefer_pdf_text_fallback(&text, &poppler_text) =>
+                        {
+                            return Ok(poppler_text);
+                        }
+                        Err(e) => {
+                            warn!(path = %path.display(), error = %e, "PDF text fallback unavailable");
+                        }
+                        _ => {}
+                    }
+
+                    if text_quality(&text) >= self.ocr.pdf_text_quality_threshold {
+                        return Ok(text);
+                    }
+
+                    match run_pdf_ocr(&path, &self.ocr) {
+                        Ok(ocr_text) => return Ok(ocr_text),
+                        Err(e) if !text.trim().is_empty() => {
+                            warn!(path = %path.display(), error = %e, "PDF OCR fallback unavailable; preserving embedded text");
+                            return Ok(text);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(text)
+                    if self.ocr.mode == OcrMode::Disabled
+                        || text_quality(&text) >= self.ocr.pdf_text_quality_threshold =>
+                {
+                    return Ok(text);
+                }
+                Ok(text) => return Ok(text),
+                Err(e) if self.ocr.mode == OcrMode::Auto => {
+                    match run_pdf_text_fallback(&path, &self.ocr) {
+                        Ok(poppler_text) if !poppler_text.trim().is_empty() => {
+                            return Ok(poppler_text);
+                        }
+                        Err(text_err) => {
+                            warn!(path = %path.display(), error = %text_err, "PDF text fallback unavailable");
+                        }
+                        _ => {}
+                    }
+
+                    match run_pdf_ocr(&path, &self.ocr) {
+                        Ok(ocr_text) => return Ok(ocr_text),
+                        Err(ocr_err) => {
+                            return Err(ExtractError::Pdf(format!(
+                                "embedded extraction failed: {e:?}; OCR fallback failed: {ocr_err}"
+                            )));
+                        }
+                    }
+                }
+                Err(e) => return Err(ExtractError::Pdf(format!("{e:?}"))),
+            }
+        }
+
+        run_pdf_ocr(&path, &self.ocr)
     }
 
     fn can_handle(&self, path: &Path) -> bool {
@@ -136,6 +198,26 @@ impl Extractor for PdfExtractor {
             .and_then(|e| e.to_str())
             .map(|e| e.eq_ignore_ascii_case("pdf"))
             .unwrap_or(false)
+    }
+}
+
+fn extract_pdf_text_from_mem(bytes: &[u8]) -> Result<String, ExtractError> {
+    let _guard = PDF_EXTRACT_PANIC_HOOK_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let previous_hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        pdf_extract::extract_text_from_mem(bytes)
+    }));
+    panic::set_hook(previous_hook);
+
+    match result {
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(e)) => Err(ExtractError::Pdf(format!("{e:?}"))),
+        Err(_) => Err(ExtractError::Pdf(
+            "pdf-extract panicked while parsing this PDF".to_string(),
+        )),
     }
 }
 
@@ -201,16 +283,27 @@ impl From<&Config> for OcrConfig {
 }
 
 impl OcrConfig {
-    fn tesseract_command(&self) -> &Path {
+    fn tesseract_command(&self) -> PathBuf {
         self.ocr_binary_path
-            .as_deref()
-            .unwrap_or_else(|| Path::new("tesseract"))
+            .clone()
+            .unwrap_or_else(|| resolve_command("tesseract"))
     }
 
-    fn renderer_command(&self) -> &Path {
+    fn renderer_command(&self) -> PathBuf {
         self.pdf_renderer_path
-            .as_deref()
-            .unwrap_or_else(|| Path::new("pdftoppm"))
+            .clone()
+            .unwrap_or_else(|| resolve_command("pdftoppm"))
+    }
+
+    fn text_extractor_command(&self) -> PathBuf {
+        if let Some(renderer) = self.pdf_renderer_path.as_ref() {
+            if let Some(candidate) = sibling_poppler_text_command(renderer) {
+                if command_exists("pdftotext", &candidate) {
+                    return candidate;
+                }
+            }
+        }
+        resolve_command("pdftotext")
     }
 }
 
@@ -222,12 +315,64 @@ fn command_available(command: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn pdf_renderer_command_available(command: &Path) -> bool {
+    Command::new(command)
+        .arg("-h")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn pdf_text_command_available(command: &Path) -> bool {
+    Command::new(command)
+        .arg("-v")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn sibling_poppler_text_command(renderer: &Path) -> Option<PathBuf> {
+    let file_name = renderer.file_name()?.to_string_lossy();
+    let text_name = file_name.strip_suffix("pdftoppm")?.to_owned() + "pdftotext";
+    Some(renderer.with_file_name(text_name))
+}
+
+fn resolve_command(name: &str) -> PathBuf {
+    if command_exists(name, Path::new(name)) {
+        return PathBuf::from(name);
+    }
+
+    for prefix in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        let candidate = Path::new(prefix).join(name);
+        if command_exists(name, &candidate) {
+            return candidate;
+        }
+    }
+
+    PathBuf::from(name)
+}
+
+fn command_exists(name: &str, command: &Path) -> bool {
+    if command.is_absolute() && !command.exists() {
+        return false;
+    }
+    match name {
+        "pdftoppm" => pdf_renderer_command_available(command),
+        "pdftotext" => pdf_text_command_available(command),
+        _ => command_available(command),
+    }
+}
+
 pub fn ocr_available(config: &OcrConfig) -> bool {
-    command_available(config.tesseract_command())
+    command_exists("tesseract", &config.tesseract_command())
 }
 
 pub fn pdf_renderer_available(config: &OcrConfig) -> bool {
-    command_available(config.renderer_command())
+    command_exists("pdftoppm", &config.renderer_command())
+}
+
+fn pdf_text_extractor_available(config: &OcrConfig) -> bool {
+    command_exists("pdftotext", &config.text_extractor_command())
 }
 
 fn extract_pdf_text_safely(bytes: &[u8]) -> Result<String, ExtractError> {
@@ -309,23 +454,92 @@ fn text_quality(text: &str) -> f64 {
     useful as f64 / trimmed.chars().count().max(1) as f64
 }
 
+fn cjk_ratio(text: &str) -> f64 {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return 0.0;
+    }
+    let cjk = trimmed.chars().filter(|c| is_cjk(*c)).count();
+    cjk as f64 / trimmed.chars().count().max(1) as f64
+}
+
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+            | 0x2CEB0..=0x2EBEF
+    )
+}
+
+fn should_prefer_pdf_text_fallback(embedded: &str, fallback: &str) -> bool {
+    let fallback = fallback.trim();
+    if fallback.is_empty() {
+        return false;
+    }
+
+    let fallback_quality = text_quality(fallback);
+    if fallback_quality < 0.35 {
+        return false;
+    }
+
+    let embedded_cjk = cjk_ratio(embedded);
+    let fallback_cjk = cjk_ratio(fallback);
+    if fallback_cjk >= 0.15 && embedded_cjk < 0.02 {
+        return true;
+    }
+
+    fallback_quality > text_quality(embedded) + 0.25 && fallback.len() > embedded.trim().len() / 2
+}
+
+fn run_pdf_text_fallback(path: &Path, config: &OcrConfig) -> Result<String, ExtractError> {
+    let pdftotext = config.text_extractor_command();
+    if !pdf_text_extractor_available(config) {
+        return Err(ExtractError::OcrUnavailable(format!(
+            "PDF text extractor not available: {}",
+            pdftotext.display()
+        )));
+    }
+
+    let output = Command::new(&pdftotext)
+        .arg("-layout")
+        .arg(path)
+        .arg("-")
+        .output()
+        .map_err(ExtractError::Io)?;
+    if !output.status.success() {
+        return Err(ExtractError::OcrUnavailable(format!(
+            "PDF text fallback failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 fn run_pdf_ocr(path: &Path, config: &OcrConfig) -> Result<String, ExtractError> {
+    let tesseract = config.tesseract_command();
+    let renderer = config.renderer_command();
     if !ocr_available(config) {
         return Err(ExtractError::OcrUnavailable(format!(
             "OCR binary not available: {}",
-            config.tesseract_command().display()
+            tesseract.display()
         )));
     }
     if !pdf_renderer_available(config) {
         return Err(ExtractError::OcrUnavailable(format!(
             "PDF renderer not available: {}",
-            config.renderer_command().display()
+            renderer.display()
         )));
     }
 
     let temp = tempfile::tempdir().map_err(ExtractError::Io)?;
     let prefix = temp.path().join("page");
-    let render = Command::new(config.renderer_command())
+    let render = Command::new(&renderer)
         .arg("-png")
         .arg(path)
         .arg(&prefix)
@@ -363,13 +577,14 @@ fn run_pdf_ocr(path: &Path, config: &OcrConfig) -> Result<String, ExtractError> 
 }
 
 fn run_image_ocr(path: &Path, config: &OcrConfig) -> Result<String, ExtractError> {
+    let tesseract = config.tesseract_command();
     if !ocr_available(config) {
         return Err(ExtractError::OcrUnavailable(format!(
             "OCR binary not available: {}",
-            config.tesseract_command().display()
+            tesseract.display()
         )));
     }
-    let output = Command::new(config.tesseract_command())
+    let output = Command::new(&tesseract)
         .arg(path)
         .arg("stdout")
         .output()
@@ -450,6 +665,7 @@ impl Extractor for CompositeExtractor {
             .collect();
 
         let total = candidates.len();
+        let mut last_error = None;
         for (idx, extractor) in candidates.into_iter().enumerate() {
             match extractor.extract(path) {
                 Ok(text) => return Ok(text),
@@ -461,8 +677,12 @@ impl Extractor for CompositeExtractor {
                             e
                         );
                     }
+                    last_error = Some(e);
                 }
             }
+        }
+        if let Some(e) = last_error {
+            return Err(e);
         }
         Err(ExtractError::Unsupported(
             path.extension()
@@ -521,6 +741,39 @@ mod tests {
         }
         pdf.push_str(&format!(
             "trailer << /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    fn minimal_non_identity_cid_pdf() -> Vec<u8> {
+        let stream = "BT /F1 24 Tf 72 720 Td <0041> Tj ET";
+        let objects = [
+            "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n".to_string(),
+            "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n".to_string(),
+            "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n".to_string(),
+            "4 0 obj << /Type /Font /Subtype /Type0 /BaseFont /ExampleCID /Encoding /UniGB-UCS2-H /DescendantFonts [6 0 R] >> endobj\n".to_string(),
+            format!(
+                "5 0 obj << /Length {} >> stream\n{}\nendstream endobj\n",
+                stream.len(),
+                stream
+            ),
+            "6 0 obj << /Type /Font /Subtype /CIDFontType2 /BaseFont /ExampleCID /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 5 >> /FontDescriptor 7 0 R /DW 1000 >> endobj\n".to_string(),
+            "7 0 obj << /Type /FontDescriptor /FontName /ExampleCID /Flags 4 /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >> endobj\n".to_string(),
+        ];
+
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::with_capacity(objects.len());
+        for object in &objects {
+            offsets.push(pdf.len());
+            pdf.push_str(object);
+        }
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 8\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer << /Size 8 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
         ));
         pdf.into_bytes()
     }
@@ -620,8 +873,23 @@ mod tests {
     #[test]
     fn test_composite_unsupported_error() {
         let composite = CompositeExtractor::new();
-        let result = composite.extract(Path::new("image.png"));
+        let result = composite.extract(Path::new("notes.unknown"));
         assert!(matches!(result, Err(ExtractError::Unsupported(_))));
+    }
+
+    #[test]
+    fn test_composite_preserves_only_matching_extractor_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.pdf");
+        fs::write(&path, b"not a pdf").unwrap();
+
+        let composite = CompositeExtractor::new();
+        let result = composite.extract(&path);
+
+        assert!(
+            matches!(result, Err(ExtractError::Pdf(_))),
+            "expected Pdf error for matching PDF extractor, got {result:?}"
+        );
     }
 
     #[test]
@@ -640,34 +908,24 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_pdf_text_with_converts_panic_to_pdf_error() {
-        let result = extract_pdf_text_with(
-            b"fake pdf bytes",
-            |_| -> Result<String, pdf_extract::OutputError> {
-                panic!("assertion failed: name == \"Identity-H\"");
-            },
-        );
+    fn test_pdf_extractor_converts_pdf_extract_panic_to_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("non-identity-cid.pdf");
+        fs::write(&path, minimal_non_identity_cid_pdf()).unwrap();
+
+        let extractor = PdfExtractor::new(OcrConfig {
+            mode: OcrMode::Disabled,
+            ..OcrConfig::default()
+        });
+        let result = extractor.extract(&path);
 
         match result {
-            Err(ExtractError::Pdf(message)) => {
-                assert!(message.contains("third-party extractor panicked"));
-                assert!(message.contains("Identity-H"));
-            }
-            other => panic!("expected Pdf error, got {other:?}"),
+            Err(ExtractError::Pdf(message)) => assert!(
+                message.contains("panicked"),
+                "expected captured panic message, got {message:?}"
+            ),
+            other => panic!("expected Pdf error for unsupported CID PDF, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn test_extract_pdf_text_with_converts_library_error_to_pdf_error() {
-        let result = extract_pdf_text_with(b"fake pdf bytes", |_| {
-            pdf_extract::extract_text_from_mem(b"not a pdf")
-        });
-
-        assert!(
-            matches!(result, Err(ExtractError::Pdf(_))),
-            "expected Pdf error, got {:?}",
-            result
-        );
     }
 
     #[test]
@@ -814,12 +1072,12 @@ mod tests {
     fn test_image_ocr_uses_local_binary_when_available() {
         let dir = tempfile::tempdir().unwrap();
         let image_path = dir.path().join("scan.png");
-        fs::write(&image_path, b"fake image bytes").unwrap();
+        fs::write(&image_path, b"syncmind image ocr marker").unwrap();
 
         let tesseract_path = dir.path().join("fake-tesseract");
         fs::write(
             &tesseract_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-tesseract; exit 0; fi\necho 'ocr text from image'\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-tesseract; exit 0; fi\nif ! grep -q 'syncmind image ocr marker' \"$1\"; then echo 'unexpected OCR input' >&2; exit 2; fi\necho 'ocr text from image marker'\n",
         )
         .unwrap();
         make_executable(&tesseract_path);
@@ -831,7 +1089,7 @@ mod tests {
         });
         let text = extractor.extract(&image_path).unwrap();
 
-        assert!(text.contains("ocr text from image"));
+        assert!(text.contains("ocr text from image marker"));
     }
 
     #[test]
@@ -852,6 +1110,66 @@ mod tests {
     }
 
     #[test]
+    fn test_pdf_renderer_available_uses_renderer_help_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let renderer_path = dir.path().join("fake-pdftoppm");
+        fs::write(
+            &renderer_path,
+            "#!/bin/sh\nif [ \"$1\" = \"-h\" ]; then echo fake-pdftoppm; exit 0; fi\nexit 1\n",
+        )
+        .unwrap();
+        make_executable(&renderer_path);
+
+        let config = OcrConfig {
+            pdf_renderer_path: Some(renderer_path),
+            ..OcrConfig::default()
+        };
+
+        assert!(pdf_renderer_available(&config));
+    }
+
+    #[test]
+    fn test_pdf_text_fallback_prefers_cjk_text_over_encoded_gibberish() {
+        let embedded = "eta i) $230231013A1 FRAME hs 2a AT BEE ( SUM) BIR ERE";
+        let fallback = "重庆邮电大学\n普通高校毕业生就业协议书\n用人单位 棋行科技";
+
+        assert!(should_prefer_pdf_text_fallback(embedded, fallback));
+    }
+
+    #[test]
+    fn test_pdf_text_fallback_uses_sibling_poppler_text_extractor() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("doc.pdf");
+        fs::write(&pdf_path, b"%PDF-1.4\n% fake pdf\n").unwrap();
+
+        let renderer_path = dir.path().join("fake-pdftoppm");
+        fs::write(
+            &renderer_path,
+            "#!/bin/sh\nif [ \"$1\" = \"-h\" ]; then echo fake-pdftoppm; exit 0; fi\nexit 1\n",
+        )
+        .unwrap();
+        make_executable(&renderer_path);
+
+        let text_path = dir.path().join("fake-pdftotext");
+        fs::write(
+            &text_path,
+            "#!/bin/sh\nif [ \"$1\" = \"-v\" ]; then echo fake-pdftotext >&2; exit 0; fi\nif [ \"$1\" != \"-layout\" ]; then echo 'missing layout flag' >&2; exit 2; fi\nif ! grep -q 'fake pdf' \"$2\"; then echo 'unexpected PDF input' >&2; exit 3; fi\necho '重庆邮电大学 普通高校毕业生就业协议书'\n",
+        )
+        .unwrap();
+        make_executable(&text_path);
+
+        let extractor = PdfExtractor::new(OcrConfig {
+            mode: OcrMode::Auto,
+            pdf_renderer_path: Some(renderer_path),
+            ocr_binary_path: Some(PathBuf::from("/definitely/missing/tesseract")),
+            ..OcrConfig::default()
+        });
+        let text = extractor.extract(&pdf_path).unwrap();
+
+        assert!(text.contains("重庆邮电大学"));
+    }
+
+    #[test]
     fn test_pdf_ocr_uses_local_renderer_and_ocr_when_available() {
         let dir = tempfile::tempdir().unwrap();
         let pdf_path = dir.path().join("scan.pdf");
@@ -860,7 +1178,7 @@ mod tests {
         let renderer_path = dir.path().join("fake-pdftoppm");
         fs::write(
             &renderer_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-pdftoppm; exit 0; fi\nprefix=\"$3\"\nprintf 'fake image' > \"${prefix}-1.png\"\n",
+            "#!/bin/sh\nif [ \"$1\" = \"-h\" ]; then echo fake-pdftoppm; exit 0; fi\nif [ \"$1\" != \"-png\" ]; then echo 'unexpected renderer probe' >&2; exit 2; fi\nif ! grep -q 'fake scanned pdf' \"$2\"; then echo 'unexpected PDF input' >&2; exit 3; fi\nprefix=\"$3\"\nprintf 'rendered page marker from pdf' > \"${prefix}-1.png\"\n",
         )
         .unwrap();
         make_executable(&renderer_path);
@@ -868,7 +1186,7 @@ mod tests {
         let tesseract_path = dir.path().join("fake-tesseract");
         fs::write(
             &tesseract_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-tesseract; exit 0; fi\necho 'ocr text from rendered pdf'\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-tesseract; exit 0; fi\nif ! grep -q 'rendered page marker from pdf' \"$1\"; then echo 'unexpected rendered page input' >&2; exit 2; fi\necho 'ocr text from rendered pdf marker'\n",
         )
         .unwrap();
         make_executable(&tesseract_path);
@@ -881,7 +1199,7 @@ mod tests {
         });
         let text = extractor.extract(&pdf_path).unwrap();
 
-        assert!(text.contains("ocr text from rendered pdf"));
+        assert!(text.contains("ocr text from rendered pdf marker"));
     }
 
     #[test]

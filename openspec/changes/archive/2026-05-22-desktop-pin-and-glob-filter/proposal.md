@@ -1,6 +1,6 @@
 ## Why
 
-PRD 002 (`docs/prd/002-the-command-palette.md`) closed two open questions whose decisions are not yet reflected in the OpenSpec capabilities:
+PRD 003 (`docs/prd/003-the-command-palette.md`) closed two open questions whose decisions are not yet reflected in the OpenSpec capabilities:
 
 1. **Pin / favorites for search results** — users want to retain frequently used chunks so the next palette invocation does not require re-searching.
 2. **Glob-based `filter_file_type`** — the existing multi-select control only enumerates raw extensions present in the index, which cannot express "all Rust files under `src/`" or "any Markdown anywhere".
