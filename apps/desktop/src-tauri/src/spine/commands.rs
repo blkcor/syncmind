@@ -211,8 +211,15 @@ pub async fn spine_start_pairing(state: State<'_, AppState>) -> Result<PairingHa
         }
     }
 
+    // Snapshot SpineConfig for the QR payload builder so we don't hold the mutex across
+    // the .await below. The snapshot is short-lived and only carries non-secret fields.
+    let spine_config = {
+        let cfg = state.config.lock().expect("config mutex poisoned");
+        cfg.spine.clone()
+    };
+
     let client = runtime.require_client().await.map_err(String::from)?;
-    let (view, session_id) = pairing::initiate(&client, &runtime.identity)
+    let (view, session_id) = pairing::initiate(&client, &runtime.identity, &spine_config)
         .await
         .map_err(String::from)?;
 

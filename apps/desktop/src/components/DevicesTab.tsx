@@ -26,6 +26,7 @@ interface PairingHandleView {
   session_id: string;
   short_code: string;
   qr_png_base64: string;
+  qr_payload_json: string;
   expires_at: string;
 }
 
