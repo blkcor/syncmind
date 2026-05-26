@@ -76,5 +76,5 @@
 - [x] 9.1 `cargo clippy --all-targets -- -D warnings` 在 `apps/desktop/src-tauri` 通过
 - [x] 9.2 `cargo test --workspace` 在 `core/` 全部通过（含 desktop 68 个测试）
 - [x] 9.3 在 `docs/prd/005-mobile-capture.md` §US-052 加注脚链接到本 change
-- [ ] 9.4 开 PR（紧随本提交执行）
-- [ ] 9.5 PR 合并后 `/opsx:archive desktop-spine-pairing-payload`
+- [x] 9.4 开 PR #26 — merged into main as commit `29c864d`
+- [x] 9.5 `/opsx:archive desktop-spine-pairing-payload`（本次动作）
