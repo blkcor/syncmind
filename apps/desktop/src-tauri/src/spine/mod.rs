@@ -51,6 +51,7 @@ pub enum SpineErrorCode {
     AuthInvalid,
     SchemaVersionUnsupported,
     EnvelopeIntegrityFailed,
+    BadRequest,
     Internal,
 }
 
@@ -73,6 +74,7 @@ impl SpineErrorCode {
             SpineErrorCode::AuthInvalid => "AUTH_INVALID",
             SpineErrorCode::SchemaVersionUnsupported => "SCHEMA_VERSION_UNSUPPORTED",
             SpineErrorCode::EnvelopeIntegrityFailed => "ENVELOPE_INTEGRITY_FAILED",
+            SpineErrorCode::BadRequest => "BAD_REQUEST",
             SpineErrorCode::Internal => "INTERNAL_ERROR",
         }
     }

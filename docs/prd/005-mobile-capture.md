@@ -308,6 +308,9 @@ PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
 US-052 至 US-054 涉及桌面端 `apps/desktop/` 与 `core/`，**不属于 mobile 工作树本身**，但是移动端 MVP 能跑起来的前置依赖。建议作为一组 PR 在 `feat/desktop-spine-mobile-support` 分支推进。
 
 ### US-052: Desktop 端 QR pairing payload 扩展
+
+> **Status:** Implemented via OpenSpec change [`desktop-spine-pairing-payload`](../../openspec/changes/desktop-spine-pairing-payload/). See its `tasks.md` for the actual completion checklist.
+
 **Description:** 作为桌面端，我需要在 Devices 面板生成的 QR 中包含 mobile 配对所需的全部信息（CA fingerprint、device_a pubkey、spine_url、TTL token）。
 
 **Acceptance Criteria:**
