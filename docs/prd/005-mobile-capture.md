@@ -335,18 +335,21 @@ US-052 至 US-054 涉及桌面端 `apps/desktop/` 与 `core/`，**不属于 mobi
 - [x] 单元测试覆盖每个 kind 的 dispatch 路径（24 tests）。[✅ desktop-spine-ingestion-dispatch]
 
 ### US-054: Desktop 端 STT / OCR / 搜索 RPC handler
+
+> **Status:** ✅ Implemented via OpenSpec change [`desktop-stt-ocr-search-rpc`](../../openspec/changes/archive/2026-05-27-desktop-stt-ocr-search-rpc/). Merged as commit `03ca05b`.
+
 **Description:** 作为桌面端 Brain，我需要为移动端的音频做 STT、为图像做 OCR、为搜索请求返回结果。
 
 **Acceptance Criteria:**
-- [ ] STT：引入 `whisper-rs`（绑定到 whisper.cpp）；默认模型 `ggml-base.en`（~140MB），首次启动时按需下载到 `<data-dir>/models/whisper/`。下载失败时 STT 静默禁用，audio capture 仍保留原文件并加 `# Transcription unavailable` 占位 markdown。
-- [ ] STT 输出：转写文本 + 时间戳段落（SRT-like 结构）→ 落成 `<data-dir>/sync-inbox/captures/<id>.md`，frontmatter 标 `source: mobile-audio`，正文为转写结果，附加块标 `audio_file: ../audio/<id>.m4a`。
-- [ ] OCR：引入 `ocrs` crate（Rust 原生，无 Python 依赖）；初版仅做英文 + 中文。OCR 失败或文字过少（< 10 字符）时落到 `<data-dir>/sync-inbox/images/<id>.jpg` 旁边的 `.md` 加占位"[image: no text detected]"。
-- [ ] 搜索 RPC handler：
+- [x] STT：引入 `whisper-rs`（绑定到 whisper.cpp）；默认模型 `ggml-base.en`（~140MB），首次启动时按需下载到 `<data-dir>/models/whisper/`。下载失败时 STT 静默禁用，audio capture 仍保留原文件并加 `# Transcription unavailable` 占位 markdown。
+- [x] STT 输出：转写文本 + 时间戳段落（SRT-like 结构）→ 落成 `<data-dir>/sync-inbox/captures/<id>.md`，frontmatter 标 `source: mobile-audio`，正文为转写结果，附加块标 `audio_file: ../audio/<id>.m4a`。
+- [x] OCR：引入 `ocrs` crate（Rust 原生，无 Python 依赖）；初版仅做英文 + 中文。OCR 失败或文字过少（< 10 字符）时落到 `<data-dir>/sync-inbox/images/<id>.jpg` 旁边的 `.md` 加占位"[image: no text detected]"。
+- [x] 搜索 RPC handler：
   - 监听 `kind: "search-request"`。
   - 调用 `core/mcp-server` 现有的 `search_knowledge(query, top_k, filter_file_type)`。
   - 包装结果为 `kind: "search-response"` envelope（保留 `request_id`），加密后推送到对端 inbox。
   - 限速：单设备 30 req/min；超过返回 `kind: "error"` payload。
-- [ ] 所有重计算（STT / OCR）必须**异步**进行，不阻塞主索引流水线；走现有的 `core/syncmind-indexing` 任务队列。
+- [x] 所有重计算（STT / OCR）必须**异步**进行，不阻塞主索引流水线；走现有的 `core/syncmind-indexing` 任务队列。
 
 ## Functional Requirements
 
