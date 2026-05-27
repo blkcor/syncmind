@@ -24,7 +24,9 @@ pub mod dispatch;
 pub mod identity;
 pub mod inbox;
 pub mod pairing;
+pub mod ratelimit;
 pub mod state;
+pub mod stt;
 pub mod ws;
 
 use std::fmt;

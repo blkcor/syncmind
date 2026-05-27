@@ -8,15 +8,20 @@
 //! `desktop-spine-ingestion-dispatch`.
 
 use std::fs;
+use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::spine::bundle::BundleEnvelope;
 use crate::spine::inbox;
+use crate::spine::ratelimit;
+use crate::spine::stt;
 use crate::spine::{SpineError, SpineErrorCode};
 
 /// Outcome of dispatching a single inbound bundle. Each variant carries enough
@@ -37,6 +42,11 @@ pub enum DispatchOutcome {
     /// The bundle was an RPC request/response (search, etc.) and was handled
     /// without producing local files.
     RpcHandled,
+    /// The bundle was a search RPC request that exceeded the per-peer rate
+    /// limit; the caller must encrypt/upload the provided response envelope.
+    RpcRateLimited {
+        response: BundleEnvelope,
+    },
     /// The bundle was intentionally skipped (e.g. deduplicated, expired).
     Ignored,
     /// The kind was recognized but did not match any active handler — logged
@@ -48,6 +58,10 @@ pub enum DispatchOutcome {
 
 /// Maximum decoded (plaintext) bundle payload size. 12 MB.
 pub const MAX_DECODED_BUNDLE_BYTES: usize = 12 * 1024 * 1024;
+
+pub type PostprocessIndexer = Arc<
+    dyn Fn(PathBuf) -> Pin<Box<dyn Future<Output = anyhow::Result<usize>> + Send>> + Send + Sync,
+>;
 
 // ---------------------------------------------------------------------------
 // Payload structs — each maps to the JSON body of a specific bundle kind.
@@ -89,6 +103,18 @@ pub struct SearchResponsePayload {
     pub server_ts: String,
 }
 
+/// Decoded payload of a rate-limit or other RPC error response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchErrorPayload {
+    pub v: u8,
+    pub kind: String,
+    pub request_id: String,
+    pub error_code: String,
+    pub error_message: String,
+    pub retry_after_seconds: u32,
+    pub server_ts: String,
+}
+
 /// Build a `search-response` [`BundleEnvelope`] from a request ID and result hits.
 ///
 /// Sets the envelope kind to `"search-response"`, serialises the response payload
@@ -108,6 +134,37 @@ pub fn build_search_response_envelope(request_id: &str, results: &[SearchHitDto]
         schema_version: crate::spine::bundle::SCHEMA_VERSION_V1,
         kind: "search-response".to_string(),
         filename: format!("search-response-{request_id}.json"),
+        content_utf8: content,
+        source_path: None,
+        captured_at: chrono::Utc::now().to_rfc3339(),
+        sha256: sha,
+    }
+}
+
+/// Build a `search-response` envelope carrying an inner `kind: "error"` payload.
+///
+/// The outer kind intentionally remains `search-response` so the existing
+/// encrypted response routing can deliver it to the requesting peer.
+pub fn build_rate_limited_error_envelope(request_id: &str) -> BundleEnvelope {
+    let payload = SearchErrorPayload {
+        v: 1,
+        kind: "error".to_string(),
+        request_id: request_id.to_string(),
+        error_code: "RATE_LIMITED".to_string(),
+        error_message: format!(
+            "Search rate limit exceeded: {} requests/minute per device. Try again later.",
+            ratelimit::MAX_REQUESTS
+        ),
+        retry_after_seconds: 30,
+        server_ts: chrono::Utc::now().to_rfc3339(),
+    };
+    let content =
+        serde_json::to_string(&payload).expect("SearchErrorPayload is always serializable");
+    let sha = hex::encode(crate::spine::crypto::sha256(content.as_bytes()));
+    BundleEnvelope {
+        schema_version: crate::spine::bundle::SCHEMA_VERSION_V1,
+        kind: "search-response".to_string(),
+        filename: format!("search-error-{request_id}.json"),
         content_utf8: content,
         source_path: None,
         captured_at: chrono::Utc::now().to_rfc3339(),
@@ -182,6 +239,7 @@ struct CaptureImagePayload {
 ///
 /// Returns [`SpineError`] if the envelope fails validation, exceeds the size cap,
 /// or the handler fails.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn dispatch_bundle<I, IF, R, RF>(
     data_dir: &Path,
     envelope: &BundleEnvelope,
@@ -211,7 +269,47 @@ where
         ));
     }
 
-    route_bundle(data_dir, envelope, bundle_id, peer_fingerprint, indexer, rpc).await
+    route_bundle(data_dir, envelope, bundle_id, peer_fingerprint, indexer, rpc, None).await
+}
+
+pub async fn dispatch_bundle_with_postprocess<I, IF, R, RF>(
+    data_dir: &Path,
+    envelope: &BundleEnvelope,
+    bundle_id: &str,
+    peer_fingerprint: &str,
+    indexer: I,
+    postprocess_indexer: PostprocessIndexer,
+    rpc: R,
+) -> Result<DispatchOutcome, SpineError>
+where
+    I: FnOnce(PathBuf) -> IF,
+    IF: std::future::Future<Output = anyhow::Result<usize>>,
+    R: FnOnce(SearchRequestPayload) -> RF,
+    RF: std::future::Future<Output = anyhow::Result<()>>,
+{
+    envelope.validate()?;
+
+    if envelope.content_utf8.len() > MAX_DECODED_BUNDLE_BYTES {
+        return Err(SpineError::new(
+            SpineErrorCode::BundleTooLarge,
+            format!(
+                "bundle content exceeds maximum size ({} > {})",
+                envelope.content_utf8.len(),
+                MAX_DECODED_BUNDLE_BYTES,
+            ),
+        ));
+    }
+
+    route_bundle(
+        data_dir,
+        envelope,
+        bundle_id,
+        peer_fingerprint,
+        indexer,
+        rpc,
+        Some(postprocess_indexer),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +326,7 @@ async fn route_bundle<I, IF, R, RF>(
     peer_fingerprint: &str,
     indexer: I,
     rpc: R,
+    postprocess_indexer: Option<PostprocessIndexer>,
 ) -> Result<DispatchOutcome, SpineError>
 where
     I: FnOnce(PathBuf) -> IF,
@@ -381,6 +480,13 @@ where
                 SpineError::new(SpineErrorCode::Internal, format!("indexer: {e}"))
             })?;
 
+            spawn_audio_postprocess(
+                binary_path.clone(),
+                markdown_path.clone(),
+                data_dir.to_path_buf(),
+                postprocess_indexer,
+            );
+
             Ok(DispatchOutcome::BinaryStored {
                 binary_path,
                 markdown_path,
@@ -448,6 +554,16 @@ where
                 SpineError::new(SpineErrorCode::Internal, format!("indexer: {e}"))
             })?;
 
+            spawn_image_postprocess(
+                binary_path.clone(),
+                markdown_path.clone(),
+                payload.id.clone(),
+                payload.width,
+                payload.height,
+                payload.client_ts.clone(),
+                postprocess_indexer,
+            );
+
             Ok(DispatchOutcome::BinaryStored {
                 binary_path,
                 markdown_path,
@@ -473,6 +589,22 @@ where
                         payload.kind
                     ),
                 ));
+            }
+
+            let limiter = ratelimit::search_rate_limiter();
+            let allowed = {
+                let mut limiter = limiter.lock().await;
+                limiter.check_and_record(peer_fingerprint)
+            };
+            if !allowed {
+                info!(
+                    peer_fingerprint,
+                    request_id = %payload.request_id,
+                    "search-request rate limited"
+                );
+                return Ok(DispatchOutcome::RpcRateLimited {
+                    response: build_rate_limited_error_envelope(&payload.request_id),
+                });
             }
 
             rpc(payload).await.map_err(|e| {
@@ -517,6 +649,102 @@ where
     }
 }
 
+fn spawn_audio_postprocess(
+    audio_path: PathBuf,
+    markdown_path: PathBuf,
+    data_dir: PathBuf,
+    indexer: Option<PostprocessIndexer>,
+) {
+    tokio::spawn(async move {
+        match stt::transcribe_audio(audio_path.clone(), markdown_path.clone(), data_dir).await {
+            Ok(true) => {
+                if let Some(indexer) = indexer {
+                    if let Err(error) = indexer(markdown_path.clone()).await {
+                        warn!(path = %markdown_path.display(), error = %error, "failed to re-index transcribed audio capture");
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(path = %audio_path.display(), error = %error, "audio transcription failed");
+            }
+        }
+    });
+}
+
+fn spawn_image_postprocess(
+    image_path: PathBuf,
+    markdown_path: PathBuf,
+    id: String,
+    width: u32,
+    height: u32,
+    captured_at: String,
+    indexer: Option<PostprocessIndexer>,
+) {
+    tokio::spawn(async move {
+        let image_path_for_ocr = image_path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            syncmind_rag_engine::ocr::ocr_image(&image_path_for_ocr)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(text)) if text.trim().len() >= 10 => {
+                let image_file = image_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| format!("../images/{name}"))
+                    .unwrap_or_else(|| format!("../images/{id}.jpg"));
+                let markdown = format!(
+                    "---\n\
+                     source: mobile-capture\n\
+                     kind: capture-image\n\
+                     id: {id}\n\
+                     ocr_engine: ocrs\n\
+                     ocr_languages: en\n\
+                     width: {width}\n\
+                     height: {height}\n\
+                     captured_at: {captured_at}\n\
+                     ---\n\n\
+                     {body}\n\n\
+                     image_file: {image_file}\n",
+                    body = text.trim()
+                );
+                if let Err(error) = write_text_atomically(&markdown_path, &markdown).await {
+                    warn!(path = %markdown_path.display(), error = %error, "failed to write OCR markdown");
+                    return;
+                }
+                if let Some(indexer) = indexer {
+                    if let Err(error) = indexer(markdown_path.clone()).await {
+                        warn!(path = %markdown_path.display(), error = %error, "failed to re-index OCR capture");
+                    }
+                }
+            }
+            Ok(Ok(_)) => {
+                if let Err(error) = append_to_markdown(&markdown_path, "[image: no text detected]").await
+                {
+                    warn!(path = %markdown_path.display(), error = %error, "failed to append no-text OCR marker");
+                }
+            }
+            Ok(Err(syncmind_rag_engine::ocr::OcrError::Decode(error))) => {
+                warn!(path = %image_path.display(), error = %error, "image decode failed");
+                if let Err(error) =
+                    append_to_markdown(&markdown_path, "[image decode failed - OCR unavailable]")
+                        .await
+                {
+                    warn!(path = %markdown_path.display(), error = %error, "failed to append decode OCR marker");
+                }
+            }
+            Ok(Err(error)) => {
+                warn!(path = %image_path.display(), error = %error, "image OCR unavailable");
+            }
+            Err(error) => {
+                warn!(path = %image_path.display(), error = %error, "image OCR task failed");
+            }
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -537,6 +765,18 @@ fn ensure_subdir(data_dir: &Path, name: &str) -> Result<PathBuf, SpineError> {
 /// Write `content` to `path` atomically (tmp -> fsync -> rename).
 async fn write_text_atomically(path: &Path, content: &str) -> Result<(), SpineError> {
     write_binary_atomically(path, content.as_bytes()).await
+}
+
+async fn append_to_markdown(path: &Path, marker: &str) -> Result<(), SpineError> {
+    let mut content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(marker);
+    content.push('\n');
+    write_text_atomically(path, &content).await
 }
 
 /// Write `data` to `path` atomically (tmp -> fsync -> rename).
@@ -995,6 +1235,21 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "rpc handler must be called exactly once");
     }
 
+    #[test]
+    fn rate_limited_error_envelope_preserves_request_id_and_shape() {
+        let envelope = build_rate_limited_error_envelope("req-rate-limit");
+        assert_eq!(envelope.kind, "search-response");
+        assert!(envelope.validate().is_ok());
+
+        let payload: SearchErrorPayload = serde_json::from_str(&envelope.content_utf8).unwrap();
+        assert_eq!(payload.v, 1);
+        assert_eq!(payload.kind, "error");
+        assert_eq!(payload.request_id, "req-rate-limit");
+        assert_eq!(payload.error_code, "RATE_LIMITED");
+        assert_eq!(payload.retry_after_seconds, 30);
+        assert!(payload.error_message.contains("30 requests/minute"));
+    }
+
     #[tokio::test]
     async fn dispatch_search_request_propagates_handler_error() {
         let dir = TempDir::new().unwrap();
@@ -1055,6 +1310,7 @@ mod tests {
             "peer-fp",
             |_path| async move { Ok::<_, anyhow::Error>(1usize) },
             |_payload| async move { Ok::<_, anyhow::Error>(()) },
+            None,
         )
         .await
         .unwrap();
@@ -1387,6 +1643,7 @@ mod tests {
             "fp",
             |_path| async move { Ok::<_, anyhow::Error>(1usize) },
             |_payload| async move { Ok::<_, anyhow::Error>(()) },
+            None,
         )
         .await
         .unwrap();

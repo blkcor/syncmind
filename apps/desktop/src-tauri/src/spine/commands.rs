@@ -5,6 +5,7 @@
 //! `apps/desktop/src-tauri/src/lib.rs`.
 
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as _B64URL_UNUSED;
@@ -715,37 +716,25 @@ async fn process_inbound_bundle(
             SpineError::new(SpineErrorCode::NotPaired, "no peer fingerprint in config")
         })?;
 
-    // Build the inbox indexer closure: invoke `syncmind_indexing::index_file_once`.
-    let extractor = syncmind_rag_engine::extractor::CompositeExtractor::from_config(&ctx.config);
-    let embedder = Arc::clone(&ctx.embedder);
-    let store = Arc::clone(&ctx.store);
-    let chunk_size = ctx.config.chunk_size;
-    let chunk_overlap = ctx.config.chunk_overlap;
-
+    let indexer = build_dispatch_indexer(ctx);
     // Build the rpc closure for search-request handling.
     // Snapshot all captures upfront — no Mutex guard held across .await.
     let ctx_for_rpc = ctx.clone();
     let client_for_rpc = Arc::clone(&client);
 
-    let outcome = dispatch::dispatch_bundle(
+    let outcome = dispatch::dispatch_bundle_with_postprocess(
         data_dir,
         &envelope,
         &item.bundle_id,
         &peer_fingerprint,
-        // indexer closure
-        move |path| async move {
-            let report = syncmind_indexing::index_file_once(
-                &path,
-                &extractor,
-                embedder.as_ref(),
-                store.as_ref(),
-                chunk_size,
-                chunk_overlap,
-            )
-            .await
-            .map_err(anyhow::Error::from)?;
-            Ok(report.chunks_added)
+        {
+            let indexer = Arc::clone(&indexer);
+            move |path| {
+                let indexer = Arc::clone(&indexer);
+                async move { indexer(path).await }
+            }
         },
+        Arc::clone(&indexer),
         // rpc closure
         move |payload: dispatch::SearchRequestPayload| {
             let ctx = ctx_for_rpc;
@@ -814,6 +803,18 @@ async fn process_inbound_bundle(
                 "handled inbound RPC bundle"
             );
         }
+        dispatch::DispatchOutcome::RpcRateLimited { response } => {
+            let blob = bundle::encrypt(response, &sync_key, &local_pub)
+                .map_err(|e| SpineError::new(SpineErrorCode::Internal, format!("encrypt rate-limit response: {e}")))?;
+            let idempotency_key = client::new_idempotency_key();
+            client
+                .upload_bundle(blob, bundle::CONTENT_TYPE_NOTE, &idempotency_key)
+                .await?;
+            info!(
+                bundle_id = %item.bundle_id,
+                "uploaded rate-limit response for inbound RPC bundle"
+            );
+        }
         dispatch::DispatchOutcome::Ignored => {
             info!(
                 bundle_id = %item.bundle_id,
@@ -832,6 +833,35 @@ async fn process_inbound_bundle(
     // ACK: delete the bundle on the server (all outcomes lead to ACK).
     client.delete_bundle(&item.bundle_id).await?;
     Ok(())
+}
+
+fn build_dispatch_indexer(ctx: &PullContext) -> dispatch::PostprocessIndexer {
+    let extractor = Arc::new(syncmind_rag_engine::extractor::CompositeExtractor::from_config(
+        &ctx.config,
+    ));
+    let embedder = Arc::clone(&ctx.embedder);
+    let store = Arc::clone(&ctx.store);
+    let chunk_size = ctx.config.chunk_size;
+    let chunk_overlap = ctx.config.chunk_overlap;
+
+    Arc::new(move |path: PathBuf| {
+        let extractor = Arc::clone(&extractor);
+        let embedder = Arc::clone(&embedder);
+        let store = Arc::clone(&store);
+        Box::pin(async move {
+            let report = syncmind_indexing::index_file_once(
+                &path,
+                extractor.as_ref(),
+                embedder.as_ref(),
+                store.as_ref(),
+                chunk_size,
+                chunk_overlap,
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+            Ok(report.chunks_added)
+        }) as Pin<Box<dyn std::future::Future<Output = anyhow::Result<usize>> + Send>>
+    })
 }
 
 // ---------------------------------------------------------------------------
