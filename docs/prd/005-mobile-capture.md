@@ -44,16 +44,19 @@ Phase 4 同时引入一个**协议层增量**：把现有 Spine envelope 从单�
 PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
 
 ### US-039: Expo 工程脚手架与 monorepo 接入
+
+> **Status:** ✅ Implemented via OpenSpec change [`mobile-app-scaffold`](../../openspec/changes/archive/2026-05-27-mobile-app-scaffold/). Merged as commit `cb46d0e`, archived in `cd18ace`.
+
 **Description:** 作为开发者，我需要一个干净的 Expo 工程，能复用 monorepo 已有的 TypeScript / ESLint 配置和 `@syncmind/types`。
 
 **Acceptance Criteria:**
-- [ ] 在 `apps/mobile/` 初始化 Expo SDK（默认 Tabs 模板的 typescript 变体），目标平台 iOS + Android。
-- [ ] `package.json` 加入根 pnpm workspace，依赖 `@syncmind/types`、`@syncmind/ui-kit`（按需）。
-- [ ] 复用根 `packages/eslint-config/` 与 `packages/ts-config/`；新增 `apps/mobile/tsconfig.json` extends `@syncmind/ts-config/base.json`。
-- [ ] `pnpm --filter mobile lint` / `pnpm --filter mobile typecheck` 通过。
-- [ ] 配置 EAS Build（`eas.json`）的 `development` / `preview` / `production` profile；不强制 native build 在 CI 跑，但配置必须存在并经过 `eas build:configure` 校验。
-- [ ] README 写明本地启动命令：`pnpm --filter mobile start`（Expo dev server）+ Expo Go 扫码或 dev client。
-- [ ] **不引入** Redux / MobX / Zustand 以外的全局 state 库；MVP 使用 Zustand（与桌面端 `apps/desktop/src/store.ts` 风格一致）。
+- [x] 在 `apps/mobile/` 初始化 Expo SDK 56（默认 Tabs 模板的 typescript 变体），目标平台 iOS + Android。
+- [x] `package.json` 加入根 pnpm workspace，依赖 `@syncmind/types`、`@syncmind/ui-kit`（按需）。
+- [x] 复用根 `packages/eslint-config/` 与 `packages/ts-config/`；新增 `apps/mobile/tsconfig.json` extends `@syncmind/ts-config/base.json`。
+- [x] `pnpm --filter mobile lint` / `pnpm --filter mobile typecheck` 通过。
+- [x] 配置 EAS Build（`eas.json`）的 `development` / `preview` / `production` profile；不强制 native build 在 CI 跑，但配置必须存在并经过 `eas build:configure` 校验。
+- [x] README 写明本地启动命令：`pnpm --filter mobile start`（Expo dev server）+ Expo Go 扫码或 dev client。
+- [x] **不引入** Redux / MobX / Zustand 以外的全局 state 库；MVP 使用 Zustand（与桌面端 `apps/desktop/src/store.ts` 风格一致）。
 
 ### US-040: 移动端设备身份（iOS Keychain / Android Keystore）
 **Description:** 作为系统，我需要在移动端本地生成持久 Ed25519 身份密钥对，存储在操作系统的安全密钥库中，跨 App 重启可读，但**绝不**通过 JS 桥暴露原始私钥字节。
