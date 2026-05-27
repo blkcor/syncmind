@@ -309,16 +309,16 @@ US-052 至 US-054 涉及桌面端 `apps/desktop/` 与 `core/`，**不属于 mobi
 
 ### US-052: Desktop 端 QR pairing payload 扩展
 
-> **Status:** Implemented via OpenSpec change [`desktop-spine-pairing-payload`](../../openspec/changes/desktop-spine-pairing-payload/). See its `tasks.md` for the actual completion checklist.
+> **Status:** ✅ Implemented via OpenSpec change [`desktop-spine-pairing-payload`](../../openspec/changes/archive/2026-05-26-desktop-spine-pairing-payload/). Merged as commit `29c864d`, archived in `91b9d0b`.
 
 **Description:** 作为桌面端，我需要在 Devices 面板生成的 QR 中包含 mobile 配对所需的全部信息（CA fingerprint、device_a pubkey、spine_url、TTL token）。
 
 **Acceptance Criteria:**
-- [ ] 扩展 `apps/desktop/src-tauri/src/spine/pairing.rs` 的 `pairing_start` 命令，返回的 QR payload 改为 JSON object（与 §US-041 schema 一致），而不是当前的纯 token。
-- [ ] 前端 Devices Tab 渲染 QR 时直接 stringify 该 object。
-- [ ] payload TTL：`expires_at = now + 5 min`；超时由 Spine 侧自动清理 pairing_token。
-- [ ] 桌面端二维码下方仍显示 6 位短码用于手动 fallback（已有逻辑）。
-- [ ] 向后兼容：当 mobile 端 schema `v: 1`，桌面端可继续接受老的纯 token（用于桌面↔桌面配对场景）。
+- [x] 扩展 `apps/desktop/src-tauri/src/spine/pairing.rs` 的 `pairing_start` 命令，返回的 QR payload 改为 JSON object（与 §US-041 schema 一致），而不是当前的纯 token。
+- [x] 前端 Devices Tab 渲染 QR 时直接 stringify 该 object。
+- [x] payload TTL：`expires_at = now + 5 min`；超时由 Spine 侧自动清理 pairing_token。
+- [x] 桌面端二维码下方仍显示 6 位短码用于手动 fallback（已有逻辑）。
+- [x] 向后兼容：当 mobile 端 schema `v: 1`，桌面端可继续接受老的纯 token（用于桌面↔桌面配对场景）。
 
 ### US-053: Desktop 端识别新 `capture-*` 和 `search-*` payload kinds
 **Description:** 作为桌面端 ingestion 管道，我需要识别 `payload.kind` 字段并分流到不同处理器。
