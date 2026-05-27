@@ -40,6 +40,9 @@ vendor/
 .env.local
 .env.*.local
 
+# Git worktrees
+.worktrees/
+
 # Claude harness
 .claude/
 

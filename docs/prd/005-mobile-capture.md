@@ -324,15 +324,15 @@ US-052 至 US-054 涉及桌面端 `apps/desktop/` 与 `core/`，**不属于 mobi
 **Description:** 作为桌面端 ingestion 管道，我需要识别 `payload.kind` 字段并分流到不同处理器。
 
 **Acceptance Criteria:**
-- [ ] 修改 `core/storage/src/spine/inbox.rs` 的 ingestion dispatcher：
-  - `kind: "note"` → 现有 RAG 管道（向后兼容 Phase 3）。
-  - `kind: "capture-text"` / `"capture-link"` → 包装成 markdown 文件落到 `<data-dir>/sync-inbox/captures/<id>.md`，复用现有 file-watcher → rag-engine 流水线。
-  - `kind: "capture-audio"` → 落到 `<data-dir>/sync-inbox/audio/<id>.m4a`，触发 §US-054 STT 管道。
-  - `kind: "capture-image"` → 落到 `<data-dir>/sync-inbox/images/<id>.jpg`，触发 §US-054 OCR 管道。
-  - `kind: "search-request"` → 不入索引，直接调用 RPC handler（§US-054）。
-  - `kind: "search-response"` → 不入索引（桌面端是 sender 不是 receiver）；记 warning。
-  - 未知 kind → 丢入 `<data-dir>/sync-inbox/_unknown/`，记 warning，不 crash。
-- [ ] 单元测试覆盖每个 kind 的 dispatch 路径。
+- [x] 修改 `apps/desktop/src-tauri/src/spine/dispatch.rs` 的 ingestion dispatcher（对应 PRD 原路径 `core/storage/src/spine/inbox.rs`，实际实现在 desktop Tauri crate）：
+  - `kind: "note"` → 现有 RAG 管道（向后兼容 Phase 3）。[✅ desktop-spine-ingestion-dispatch]
+  - `kind: "capture-text"` / `"capture-link"` → 包装成 markdown 文件落到 `<data-dir>/sync-inbox/captures/<id>.md`，复用现有 file-watcher → rag-engine 流水线。[✅ desktop-spine-ingestion-dispatch]
+  - `kind: "capture-audio"` → 落到 `<data-dir>/sync-inbox/audio/<id>.m4a`；同时写占位 `.md` 供索引，STT 唤醒待 §US-054。[✅ desktop-spine-ingestion-dispatch]
+  - `kind: "capture-image"` → 落到 `<data-dir>/sync-inbox/images/<id>.jpg`；同时写占位 `.md` 供索引，OCR 唤醒待 §US-054。[✅ desktop-spine-ingestion-dispatch]
+  - `kind: "search-request"` → 不入索引，直接调用 RPC handler（§US-054）。[✅ desktop-spine-ingestion-dispatch]
+  - `kind: "search-response"` → 不入索引（桌面端是 sender 不是 receiver）；记 warning。[✅ desktop-spine-ingestion-dispatch]
+  - 未知 kind → 丢入 `<data-dir>/sync-inbox/_unknown/`，记 warning，不 crash。[✅ desktop-spine-ingestion-dispatch]
+- [x] 单元测试覆盖每个 kind 的 dispatch 路径（24 tests）。[✅ desktop-spine-ingestion-dispatch]
 
 ### US-054: Desktop 端 STT / OCR / 搜索 RPC handler
 **Description:** 作为桌面端 Brain，我需要为移动端的音频做 STT、为图像做 OCR、为搜索请求返回结果。
