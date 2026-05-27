@@ -309,30 +309,30 @@ US-052 至 US-054 涉及桌面端 `apps/desktop/` 与 `core/`，**不属于 mobi
 
 ### US-052: Desktop 端 QR pairing payload 扩展
 
-> **Status:** Implemented via OpenSpec change [`desktop-spine-pairing-payload`](../../openspec/changes/desktop-spine-pairing-payload/). See its `tasks.md` for the actual completion checklist.
+> **Status:** ✅ Implemented via OpenSpec change [`desktop-spine-pairing-payload`](../../openspec/changes/archive/2026-05-26-desktop-spine-pairing-payload/). Merged as commit `29c864d`, archived in `91b9d0b`.
 
 **Description:** 作为桌面端，我需要在 Devices 面板生成的 QR 中包含 mobile 配对所需的全部信息（CA fingerprint、device_a pubkey、spine_url、TTL token）。
 
 **Acceptance Criteria:**
-- [ ] 扩展 `apps/desktop/src-tauri/src/spine/pairing.rs` 的 `pairing_start` 命令，返回的 QR payload 改为 JSON object（与 §US-041 schema 一致），而不是当前的纯 token。
-- [ ] 前端 Devices Tab 渲染 QR 时直接 stringify 该 object。
-- [ ] payload TTL：`expires_at = now + 5 min`；超时由 Spine 侧自动清理 pairing_token。
-- [ ] 桌面端二维码下方仍显示 6 位短码用于手动 fallback（已有逻辑）。
-- [ ] 向后兼容：当 mobile 端 schema `v: 1`，桌面端可继续接受老的纯 token（用于桌面↔桌面配对场景）。
+- [x] 扩展 `apps/desktop/src-tauri/src/spine/pairing.rs` 的 `pairing_start` 命令，返回的 QR payload 改为 JSON object（与 §US-041 schema 一致），而不是当前的纯 token。
+- [x] 前端 Devices Tab 渲染 QR 时直接 stringify 该 object。
+- [x] payload TTL：`expires_at = now + 5 min`；超时由 Spine 侧自动清理 pairing_token。
+- [x] 桌面端二维码下方仍显示 6 位短码用于手动 fallback（已有逻辑）。
+- [x] 向后兼容：当 mobile 端 schema `v: 1`，桌面端可继续接受老的纯 token（用于桌面↔桌面配对场景）。
 
 ### US-053: Desktop 端识别新 `capture-*` 和 `search-*` payload kinds
 **Description:** 作为桌面端 ingestion 管道，我需要识别 `payload.kind` 字段并分流到不同处理器。
 
 **Acceptance Criteria:**
-- [ ] 修改 `core/storage/src/spine/inbox.rs` 的 ingestion dispatcher：
-  - `kind: "note"` → 现有 RAG 管道（向后兼容 Phase 3）。
-  - `kind: "capture-text"` / `"capture-link"` → 包装成 markdown 文件落到 `<data-dir>/sync-inbox/captures/<id>.md`，复用现有 file-watcher → rag-engine 流水线。
-  - `kind: "capture-audio"` → 落到 `<data-dir>/sync-inbox/audio/<id>.m4a`，触发 §US-054 STT 管道。
-  - `kind: "capture-image"` → 落到 `<data-dir>/sync-inbox/images/<id>.jpg`，触发 §US-054 OCR 管道。
-  - `kind: "search-request"` → 不入索引，直接调用 RPC handler（§US-054）。
-  - `kind: "search-response"` → 不入索引（桌面端是 sender 不是 receiver）；记 warning。
-  - 未知 kind → 丢入 `<data-dir>/sync-inbox/_unknown/`，记 warning，不 crash。
-- [ ] 单元测试覆盖每个 kind 的 dispatch 路径。
+- [x] 修改 `apps/desktop/src-tauri/src/spine/dispatch.rs` 的 ingestion dispatcher（对应 PRD 原路径 `core/storage/src/spine/inbox.rs`，实际实现在 desktop Tauri crate）：
+  - `kind: "note"` → 现有 RAG 管道（向后兼容 Phase 3）。[✅ desktop-spine-ingestion-dispatch]
+  - `kind: "capture-text"` / `"capture-link"` → 包装成 markdown 文件落到 `<data-dir>/sync-inbox/captures/<id>.md`，复用现有 file-watcher → rag-engine 流水线。[✅ desktop-spine-ingestion-dispatch]
+  - `kind: "capture-audio"` → 落到 `<data-dir>/sync-inbox/audio/<id>.m4a`；同时写占位 `.md` 供索引，STT 唤醒待 §US-054。[✅ desktop-spine-ingestion-dispatch]
+  - `kind: "capture-image"` → 落到 `<data-dir>/sync-inbox/images/<id>.jpg`；同时写占位 `.md` 供索引，OCR 唤醒待 §US-054。[✅ desktop-spine-ingestion-dispatch]
+  - `kind: "search-request"` → 不入索引，直接调用 RPC handler（§US-054）。[✅ desktop-spine-ingestion-dispatch]
+  - `kind: "search-response"` → 不入索引（桌面端是 sender 不是 receiver）；记 warning。[✅ desktop-spine-ingestion-dispatch]
+  - 未知 kind → 丢入 `<data-dir>/sync-inbox/_unknown/`，记 warning，不 crash。[✅ desktop-spine-ingestion-dispatch]
+- [x] 单元测试覆盖每个 kind 的 dispatch 路径（24 tests）。[✅ desktop-spine-ingestion-dispatch]
 
 ### US-054: Desktop 端 STT / OCR / 搜索 RPC handler
 **Description:** 作为桌面端 Brain，我需要为移动端的音频做 STT、为图像做 OCR、为搜索请求返回结果。

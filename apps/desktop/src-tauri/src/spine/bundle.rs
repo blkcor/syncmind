@@ -36,6 +36,18 @@ pub const SCHEMA_VERSION_V1: u32 = 1;
 /// Kind discriminant inside the envelope. v1 only supports `note`.
 pub const KIND_NOTE: &str = "note";
 
+/// Recognized envelope kinds. Used by [`BundleEnvelope::validate`].
+/// Extended for Phase 4 mobile capture support.
+pub const RECOGNIZED_KINDS: &[&str] = &[
+    "note",
+    "capture-text",
+    "capture-audio",
+    "capture-image",
+    "capture-link",
+    "search-request",
+    "search-response",
+];
+
 /// Wire content-type sent in `X-Syncmind-Content-Type` for v1 note bundles.
 pub const CONTENT_TYPE_NOTE: &str = "application/syncmind.note+json";
 
@@ -76,7 +88,7 @@ impl BundleEnvelope {
     }
 
     /// Verify schema_version, kind, and content-hash invariants. Returns Ok if the envelope
-    /// is a valid v1 note whose `sha256` matches the content.
+    /// has a supported schema_version, a recognized kind, and a matching content hash.
     pub fn validate(&self) -> Result<(), SpineError> {
         if self.schema_version != SCHEMA_VERSION_V1 {
             return Err(SpineError::new(
@@ -84,9 +96,9 @@ impl BundleEnvelope {
                 format!("unsupported schema_version: {}", self.schema_version),
             ));
         }
-        if self.kind != KIND_NOTE {
+        if !RECOGNIZED_KINDS.contains(&self.kind.as_str()) {
             return Err(SpineError::new(
-                SpineErrorCode::SchemaVersionUnsupported,
+                SpineErrorCode::BadRequest,
                 format!("unsupported kind: {}", self.kind),
             ));
         }
@@ -206,6 +218,45 @@ mod tests {
     fn decrypt_rejects_short_blob() {
         let err = decrypt(&[1, 2, 3], &[0u8; 32], &[0u8; 32]).unwrap_err();
         assert_eq!(err.code, "ENVELOPE_INTEGRITY_FAILED");
+    }
+
+    fn make_envelope(kind: &str, content: &str) -> BundleEnvelope {
+        let sha = hex::encode(crypto::sha256(content.as_bytes()));
+        BundleEnvelope {
+            schema_version: SCHEMA_VERSION_V1,
+            kind: kind.to_string(),
+            filename: "test.md".to_string(),
+            content_utf8: content.to_string(),
+            source_path: None,
+            captured_at: chrono::Utc::now().to_rfc3339(),
+            sha256: sha,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_all_recognized_kinds() {
+        for kind in RECOGNIZED_KINDS {
+            let env = make_envelope(kind, "some content");
+            assert!(
+                env.validate().is_ok(),
+                "expected RECOGNIZED_KINDS member {kind:?} to pass validate()"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_unknown_kind() {
+        let env = make_envelope("bogus-format-v99", "x");
+        let err = env.validate().unwrap_err();
+        assert_eq!(err.code, "BAD_REQUEST");
+    }
+
+    #[test]
+    fn validate_still_rejects_v2_schema() {
+        let mut env = make_envelope("note", "x");
+        env.schema_version = 2;
+        let err = env.validate().unwrap_err();
+        assert_eq!(err.code, "SCHEMA_VERSION_UNSUPPORTED");
     }
 
     #[test]

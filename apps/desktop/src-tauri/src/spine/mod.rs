@@ -20,6 +20,7 @@ pub mod bundle;
 pub mod client;
 pub mod commands;
 pub mod crypto;
+pub mod dispatch;
 pub mod identity;
 pub mod inbox;
 pub mod pairing;
