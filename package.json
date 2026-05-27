@@ -13,7 +13,15 @@
     "dev": "pnpm -r dev",
     "dev:desktop": "pnpm --filter @syncmind/desktop tauri dev",
     "lint": "pnpm -r lint",
-    "test": "pnpm -r test"
+    "lint:mobile": "pnpm --filter mobile lint",
+    "start:mobile": "pnpm --filter mobile start",
+    "start:mobile:android": "pnpm --filter mobile android",
+    "start:mobile:ios": "pnpm --filter mobile ios",
+    "start:mobile:web": "pnpm --filter mobile web",
+    "test": "pnpm -r test",
+    "test:mobile": "pnpm --filter mobile test",
+    "typecheck": "pnpm -r typecheck",
+    "typecheck:mobile": "pnpm --filter mobile typecheck"
   },
   "workspaces": [
     "apps/*",

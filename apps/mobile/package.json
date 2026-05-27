@@ -3,12 +3,16 @@
   "main": "expo-router/entry",
   "version": "1.0.0",
   "dependencies": {
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
     "@syncmind/types": "workspace:*",
     "expo": "~56.0.5",
     "expo-constants": "~56.0.16",
+    "expo-crypto": "~56.0.4",
     "expo-font": "~56.0.5",
     "expo-linking": "~56.0.12",
     "expo-router": "~56.2.7",
+    "expo-secure-store": "~56.0.4",
     "expo-splash-screen": "~56.0.10",
     "expo-status-bar": "~56.0.4",
     "expo-symbols": "~56.0.5",
@@ -26,10 +30,13 @@
   "devDependencies": {
     "@syncmind/eslint-config": "workspace:*",
     "@syncmind/tsconfig": "workspace:*",
+    "@types/jest": "^29.5.14",
     "@types/react": "~19.2.2",
     "eslint": "^9.0.0",
     "eslint-plugin-react": "^7.35.0",
     "eslint-plugin-react-hooks": "^4.6.0",
+    "jest": "^29.7.0",
+    "jest-expo": "^56.0.4",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.59.4"
   },
@@ -39,7 +46,14 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "jest"
+  },
+  "jest": {
+    "preset": "jest-expo",
+    "moduleNameMapper": {
+      "^@/(.*)$": "<rootDir>/$1"
+    }
   },
   "private": true,
   "type": "module"
