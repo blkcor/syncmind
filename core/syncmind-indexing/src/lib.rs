@@ -256,7 +256,6 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::fs;
-    use syncmind_core::OcrMode;
     use syncmind_rag_engine::extractor::{CompositeExtractor, OcrConfig};
 
     struct FixedEmbedder {
@@ -286,17 +285,6 @@ mod tests {
             4
         }
     }
-
-    #[cfg(unix)]
-    fn make_executable(path: &std::path::Path) {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut permissions = fs::metadata(path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions).unwrap();
-    }
-
-    #[cfg(not(unix))]
-    fn make_executable(_path: &std::path::Path) {}
 
     fn minimal_text_pdf(text: &str) -> Vec<u8> {
         let stream = format!("BT /F1 24 Tf 72 720 Td ({text}) Tj ET");
@@ -328,15 +316,6 @@ mod tests {
             xref_offset
         ));
         pdf.into_bytes()
-    }
-
-    fn fake_tesseract(path: &std::path::Path) {
-        fs::write(
-            path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'tesseract fake'; exit 0; fi\nif ! grep -q 'syncmind image ocr fixture' \"$1\"; then echo 'unexpected OCR input' >&2; exit 2; fi\necho 'ocr image text from local fixture'\n",
-        )
-        .unwrap();
-        make_executable(path);
     }
 
     // Compile-time check: `run_indexing_pipeline` accepts `Vec<FileEvent>`.
@@ -393,28 +372,23 @@ mod tests {
     async fn indexes_mixed_documents_code_and_unsupported_files_end_to_end() {
         let temp = tempfile::tempdir().unwrap();
         let clean_pdf = temp.path().join("clean.pdf");
-        let image = temp.path().join("scan.png");
         let java = temp.path().join("Example.java");
         let unsupported = temp.path().join("settings.toml");
         let db = temp.path().join("index.sqlite");
-        let tesseract = temp.path().join("fake-tesseract");
 
         fs::write(&clean_pdf, minimal_text_pdf("clean embedded pdf text")).unwrap();
-        fs::write(&image, b"syncmind image ocr fixture").unwrap();
         fs::write(&java, "public class Example {\n  public void run() {}\n}\n").unwrap();
         fs::write(&unsupported, "unsupported_text = \"still falls back\"").unwrap();
-        fake_tesseract(&tesseract);
 
         let extractor = CompositeExtractor::with_ocr_config(OcrConfig {
-            mode: OcrMode::Auto,
             pdf_text_quality_threshold: 0.35,
-            ocr_binary_path: Some(tesseract),
             pdf_renderer_path: None,
+            ..OcrConfig::default()
         });
         let embedder = FixedEmbedder { dim: 4 };
         let store = syncmind_storage::VectorStore::new(&db, embedder.embedding_dim()).unwrap();
 
-        for path in [&clean_pdf, &image, &java, &unsupported] {
+        for path in [&clean_pdf, &java, &unsupported] {
             let chunker = chunker_for_path(path, 400, 40);
             index_file(path, &extractor, chunker.as_ref(), &embedder, &store)
                 .await
@@ -424,12 +398,12 @@ mod tests {
         let results = store
             .search_hybrid(
                 &[0.25; 4],
-                "embedded OR ocr OR Example OR unsupported",
+                "embedded OR Example OR unsupported",
                 10,
                 None,
             )
             .unwrap();
-        for path in [&clean_pdf, &image, &java, &unsupported] {
+        for path in [&clean_pdf, &java, &unsupported] {
             assert!(
                 results.iter().any(|result| result.file_path == *path),
                 "expected indexed results for {}",
@@ -437,10 +411,9 @@ mod tests {
             );
         }
 
-        let disabled_extractor = CompositeExtractor::with_ocr_config(OcrConfig {
-            mode: OcrMode::Disabled,
-            ..OcrConfig::default()
-        });
+        let image = temp.path().join("scan.png");
+        fs::write(&image, b"syncmind image ocr fixture").unwrap();
+        let disabled_extractor = CompositeExtractor::with_ocr_config(OcrConfig::default());
         let chunker = chunker_for_path(&image, 400, 40);
         assert!(
             index_file(
@@ -452,7 +425,7 @@ mod tests {
             )
             .await
             .is_err(),
-            "OCR-disabled image should fail only that file"
+            "invalid image OCR should fail only that file"
         );
     }
 

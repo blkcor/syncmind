@@ -52,6 +52,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
 rustls-pemfile = "2"
+whisper-rs = "0.16.0"
 # Auth / identifiers
 jsonwebtoken = "9"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -63,6 +64,7 @@ rand = "0.8"
 futures-util = "0.3"
 hex = "0.4"
 zeroize = "1"
+hound = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
