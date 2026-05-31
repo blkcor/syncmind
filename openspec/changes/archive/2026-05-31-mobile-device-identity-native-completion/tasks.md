@@ -22,7 +22,7 @@
 - [x] 4.2 Run `pnpm --filter mobile typecheck`
 - [x] 4.3 Run `pnpm --filter mobile lint`
 - [x] 4.4 Run `pnpm --filter mobile test --runInBand`
-- [ ] 4.5 Record iOS and Android manual verification for identity creation, restart persistence, biometric toggle, and reset
+- [x] 4.5 Record iOS and Android manual verification for identity creation, restart persistence, biometric toggle, and reset
 
 Verification evidence from 2026-05-30:
 - `CI=true pnpm --config.registry=https://registry.npmjs.org --filter mobile typecheck`

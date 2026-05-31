@@ -60,19 +60,19 @@ PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
 
 ### US-040: 移动端设备身份（iOS Keychain / Android Keystore）
 
-> **Status:** ⚠️ Code implementation and automated verification completed on 2026-05-30 via [`mobile-device-identity-native-completion`](../../openspec/changes/mobile-device-identity-native-completion/). The original JS + `expo-secure-store` design remains archived in [`2026-05-27-mobile-device-identity`](../../openspec/changes/archive/2026-05-27-mobile-device-identity/) as historical context only. US-040 is still **not accepted** until iOS and Android manual verification records identity creation, restart persistence, biometric toggle, and reset on device or emulator.
+> **Status:** ✅ Implemented and accepted on 2026-05-31 via OpenSpec change [`mobile-device-identity-native-completion`](../../openspec/changes/archive/2026-05-31-mobile-device-identity-native-completion/). Feature commit `63244d8`, archived in `7dca570`. The original JS + `expo-secure-store` design remains archived in [`2026-05-27-mobile-device-identity`](../../openspec/changes/archive/2026-05-27-mobile-device-identity/) as historical context only.
 
 **Description:** 作为系统，我需要在移动端本地生成持久 Ed25519 身份密钥对，存储在操作系统的安全密钥库中，跨 App 重启可读，但**绝不**通过 JS 桥暴露原始私钥字节。
 
 **Acceptance Criteria:**
-- [ ] 通过本地 Expo native module `SyncMindDeviceIdentity` 管理身份密钥；iOS 使用 Keychain，Android 使用 Keystore-backed native storage，JS 不生成、不持有、不序列化原始私钥。
-- [ ] 密钥首次启动时由 native module 生成；JS 侧最多持久化非敏感 `device_identity_meta`（`fingerprint` / `publicKeyHex` / `biometricEnabled`），不得再写入包含私钥的 `device_identity`。
-- [ ] `apps/mobile/src/crypto/identity.ts` 保持公开 facade；`sign(message)` / `derive_x25519(peer_pub)` 只调用 native module，调用方拿不到 raw private key bytes。
-- [ ] 生物识别保护默认关闭；设置面板的"启用生物识别保护"开关必须更新 native secure-store 配置，且 `isAuthenticationRequired()` 在 App 重启后仍反映 native 状态。
-- [ ] 提供 `device_reset()` 操作：清除身份 + 解配对 + 清队列；UI 入口在设置最深处，需二次确认。
-- [ ] 支持从 legacy `device_identity` blob 一次性迁移到 native identity store；迁移成功后删除 legacy blob，迁移失败时不得继续使用 JS-stored 私钥。
-- [ ] **Privacy check 单元测试**：在 `apps/mobile/__tests__/crypto.test.ts` 用 jest 验证 private key material 不会泄露到 SecureStore 写入、日志、Error.message 或 JSON.stringify 输出。
-- [ ] `pnpm --filter mobile typecheck`、`pnpm --filter mobile lint`、`pnpm --filter mobile test --runInBand` 通过，并记录 iOS / Android create、restart persistence、biometric toggle、reset 的手工验证证据后，US-040 才能验收。
+- [x] 通过本地 Expo native module `SyncMindDeviceIdentity` 管理身份密钥；iOS 使用 Keychain，Android 使用 Keystore-backed native storage，JS 不生成、不持有、不序列化原始私钥。
+- [x] 密钥首次启动时由 native module 生成；JS 侧最多持久化非敏感 `device_identity_meta`（`fingerprint` / `publicKeyHex` / `biometricEnabled`），不得再写入包含私钥的 `device_identity`。
+- [x] `apps/mobile/src/crypto/identity.ts` 保持公开 facade；`sign(message)` / `derive_x25519(peer_pub)` 只调用 native module，调用方拿不到 raw private key bytes。
+- [x] 生物识别保护默认关闭；设置面板的"启用生物识别保护"开关必须更新 native secure-store 配置，且 `isAuthenticationRequired()` 在 App 重启后仍反映 native 状态。
+- [x] 提供 `device_reset()` 操作：清除身份 + 解配对 + 清队列；UI 入口在设置最深处，需二次确认。
+- [x] 支持从 legacy `device_identity` blob 一次性迁移到 native identity store；迁移成功后删除 legacy blob，迁移失败时不得继续使用 JS-stored 私钥。
+- [x] **Privacy check 单元测试**：在 `apps/mobile/__tests__/crypto.test.ts` 用 jest 验证 private key material 不会泄露到 SecureStore 写入、日志、Error.message 或 JSON.stringify 输出。
+- [x] `pnpm --filter mobile typecheck`、`pnpm --filter mobile lint`、`pnpm --filter mobile test --runInBand` 通过，并记录 iOS / Android create、restart persistence、biometric toggle、reset 的手工验证证据后，US-040 才能验收。
 
 ### US-041: QR 码配对（扫码端）
 **Description:** 作为移动端用户，我希望扫描桌面端 Devices 面板上的二维码就能完成配对，10 秒内进入"已配对"状态。
