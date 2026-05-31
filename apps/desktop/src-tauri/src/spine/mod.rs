@@ -20,10 +20,13 @@ pub mod bundle;
 pub mod client;
 pub mod commands;
 pub mod crypto;
+pub mod dispatch;
 pub mod identity;
 pub mod inbox;
 pub mod pairing;
+pub mod ratelimit;
 pub mod state;
+pub mod stt;
 pub mod ws;
 
 use std::fmt;
@@ -51,6 +54,7 @@ pub enum SpineErrorCode {
     AuthInvalid,
     SchemaVersionUnsupported,
     EnvelopeIntegrityFailed,
+    BadRequest,
     Internal,
 }
 
@@ -73,6 +77,7 @@ impl SpineErrorCode {
             SpineErrorCode::AuthInvalid => "AUTH_INVALID",
             SpineErrorCode::SchemaVersionUnsupported => "SCHEMA_VERSION_UNSUPPORTED",
             SpineErrorCode::EnvelopeIntegrityFailed => "ENVELOPE_INTEGRITY_FAILED",
+            SpineErrorCode::BadRequest => "BAD_REQUEST",
             SpineErrorCode::Internal => "INTERNAL_ERROR",
         }
     }

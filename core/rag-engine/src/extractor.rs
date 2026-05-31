@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use tracing::warn;
 
 use crate::error::ExtractError;
+use crate::ocr::{self, OcrError};
 use syncmind_core::{Config, OcrMode};
 
 static PDF_EXTRACT_PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
@@ -161,10 +162,7 @@ impl Extractor for PdfExtractor {
                         Err(e) => return Err(e),
                     }
                 }
-                Ok(text)
-                    if self.ocr.mode == OcrMode::Disabled
-                        || text_quality(&text) >= self.ocr.pdf_text_quality_threshold =>
-                {
+                Ok(text) if text_quality(&text) >= self.ocr.pdf_text_quality_threshold => {
                     return Ok(text);
                 }
                 Ok(text) => return Ok(text),
@@ -240,11 +238,6 @@ impl Extractor for ImageOcrExtractor {
     }
 
     fn extract(&self, path: &Path) -> Result<String, ExtractError> {
-        if self.ocr.mode == OcrMode::Disabled {
-            return Err(ExtractError::OcrUnavailable(
-                "OCR is disabled for image extraction".to_string(),
-            ));
-        }
         let path = validate_path(path)?;
         run_image_ocr(&path, &self.ocr)
     }
@@ -258,7 +251,6 @@ impl Extractor for ImageOcrExtractor {
 pub struct OcrConfig {
     pub mode: OcrMode,
     pub pdf_text_quality_threshold: f64,
-    pub ocr_binary_path: Option<PathBuf>,
     pub pdf_renderer_path: Option<PathBuf>,
     /// Tesseract language specification (e.g. "chi_sim+eng" for Chinese Simplified + English).
     /// Passed as `-l` flag to tesseract.
@@ -275,7 +267,6 @@ impl Default for OcrConfig {
         Self {
             mode: OcrMode::Auto,
             pdf_text_quality_threshold: 0.35,
-            ocr_binary_path: None,
             pdf_renderer_path: None,
             ocr_language: "chi_sim+eng".to_string(),
             ocr_psm_mode: 6,
@@ -289,7 +280,6 @@ impl From<&Config> for OcrConfig {
         Self {
             mode: config.ocr_mode,
             pdf_text_quality_threshold: config.pdf_text_quality_threshold,
-            ocr_binary_path: config.ocr_binary_path.as_ref().map(PathBuf::from),
             pdf_renderer_path: config.pdf_renderer_path.as_ref().map(PathBuf::from),
             ocr_language: config.ocr_language.clone(),
             ocr_psm_mode: config.ocr_psm_mode,
@@ -299,12 +289,6 @@ impl From<&Config> for OcrConfig {
 }
 
 impl OcrConfig {
-    fn tesseract_command(&self) -> PathBuf {
-        self.ocr_binary_path
-            .clone()
-            .unwrap_or_else(|| resolve_command("tesseract"))
-    }
-
     fn renderer_command(&self) -> PathBuf {
         self.pdf_renderer_path
             .clone()
@@ -321,14 +305,6 @@ impl OcrConfig {
         }
         resolve_command("pdftotext")
     }
-}
-
-fn command_available(command: &Path) -> bool {
-    Command::new(command)
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
 }
 
 fn pdf_renderer_command_available(command: &Path) -> bool {
@@ -375,12 +351,8 @@ fn command_exists(name: &str, command: &Path) -> bool {
     match name {
         "pdftoppm" => pdf_renderer_command_available(command),
         "pdftotext" => pdf_text_command_available(command),
-        _ => command_available(command),
+        _ => false,
     }
-}
-
-pub fn ocr_available(config: &OcrConfig) -> bool {
-    command_exists("tesseract", &config.tesseract_command())
 }
 
 pub fn pdf_renderer_available(config: &OcrConfig) -> bool {
@@ -411,12 +383,7 @@ where
     }
 
     match extract_fn(bytes) {
-        Ok(text)
-            if ocr.mode == OcrMode::Disabled
-                || text_quality(&text) >= ocr.pdf_text_quality_threshold =>
-        {
-            Ok(text)
-        }
+        Ok(text) if text_quality(&text) >= ocr.pdf_text_quality_threshold => Ok(text),
         Ok(text) if ocr.mode == OcrMode::Auto => match run_pdf_ocr(path, ocr) {
             Ok(ocr_text) => Ok(ocr_text),
             Err(e) if !text.trim().is_empty() => {
@@ -611,14 +578,7 @@ fn run_pdf_text_fallback(path: &Path, config: &OcrConfig) -> Result<String, Extr
 }
 
 fn run_pdf_ocr(path: &Path, config: &OcrConfig) -> Result<String, ExtractError> {
-    let tesseract = config.tesseract_command();
     let renderer = config.renderer_command();
-    if !ocr_available(config) {
-        return Err(ExtractError::OcrUnavailable(format!(
-            "OCR binary not available: {}",
-            tesseract.display()
-        )));
-    }
     if !pdf_renderer_available(config) {
         return Err(ExtractError::OcrUnavailable(format!(
             "PDF renderer not available: {}",
@@ -653,7 +613,9 @@ fn run_pdf_ocr(path: &Path, config: &OcrConfig) -> Result<String, ExtractError> 
 
     let mut text = String::new();
     for image in images {
-        let page_text = run_image_ocr(&image, config)?;
+        let bytes = fs::read(&image).map_err(ExtractError::Io)?;
+        let page_text = ocr::ocr_image_from_bytes(&bytes, image::ImageFormat::Png)
+            .map_err(ocr_error_to_extract_error)?;
         if !text.is_empty() && !page_text.is_empty() {
             text.push('\n');
         }
@@ -668,26 +630,18 @@ fn run_pdf_ocr(path: &Path, config: &OcrConfig) -> Result<String, ExtractError> 
     Ok(clean_ocr_text(&text))
 }
 
-fn run_image_ocr(path: &Path, config: &OcrConfig) -> Result<String, ExtractError> {
-    let tesseract = config.tesseract_command();
-    if !ocr_available(config) {
-        return Err(ExtractError::OcrUnavailable(format!(
-            "OCR binary not available: {}",
-            tesseract.display()
-        )));
+fn run_image_ocr(path: &Path, _config: &OcrConfig) -> Result<String, ExtractError> {
+    ocr::ocr_image(path).map_err(ocr_error_to_extract_error)
+}
+
+fn ocr_error_to_extract_error(error: OcrError) -> ExtractError {
+    match error {
+        OcrError::Decode(message) => ExtractError::OcrUnavailable(format!("decode: {message}")),
+        OcrError::Init(message) => ExtractError::OcrUnavailable(format!("init: {message}")),
+        OcrError::Recognition(message) => {
+            ExtractError::OcrUnavailable(format!("recognition: {message}"))
+        }
     }
-    let output = Command::new(&tesseract)
-        .arg(path)
-        .arg("stdout")
-        .output()
-        .map_err(ExtractError::Io)?;
-    if !output.status.success() {
-        return Err(ExtractError::OcrUnavailable(format!(
-            "OCR command failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn is_image_extension(path: &Path) -> bool {
@@ -833,39 +787,6 @@ mod tests {
         }
         pdf.push_str(&format!(
             "trailer << /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
-        ));
-        pdf.into_bytes()
-    }
-
-    fn minimal_non_identity_cid_pdf() -> Vec<u8> {
-        let stream = "BT /F1 24 Tf 72 720 Td <0041> Tj ET";
-        let objects = [
-            "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n".to_string(),
-            "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n".to_string(),
-            "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n".to_string(),
-            "4 0 obj << /Type /Font /Subtype /Type0 /BaseFont /ExampleCID /Encoding /UniGB-UCS2-H /DescendantFonts [6 0 R] >> endobj\n".to_string(),
-            format!(
-                "5 0 obj << /Length {} >> stream\n{}\nendstream endobj\n",
-                stream.len(),
-                stream
-            ),
-            "6 0 obj << /Type /Font /Subtype /CIDFontType2 /BaseFont /ExampleCID /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 5 >> /FontDescriptor 7 0 R /DW 1000 >> endobj\n".to_string(),
-            "7 0 obj << /Type /FontDescriptor /FontName /ExampleCID /Flags 4 /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >> endobj\n".to_string(),
-        ];
-
-        let mut pdf = String::from("%PDF-1.4\n");
-        let mut offsets = Vec::with_capacity(objects.len());
-        for object in &objects {
-            offsets.push(pdf.len());
-            pdf.push_str(object);
-        }
-        let xref_offset = pdf.len();
-        pdf.push_str("xref\n0 8\n0000000000 65535 f \n");
-        for offset in offsets {
-            pdf.push_str(&format!("{offset:010} 00000 n \n"));
-        }
-        pdf.push_str(&format!(
-            "trailer << /Size 8 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
         ));
         pdf.into_bytes()
     }
@@ -1019,19 +940,17 @@ mod tests {
 
     #[test]
     fn test_pdf_extractor_converts_pdf_extract_panic_to_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("non-identity-cid.pdf");
-        fs::write(&path, minimal_non_identity_cid_pdf()).unwrap();
-
-        let extractor = PdfExtractor::new(OcrConfig {
-            mode: OcrMode::Disabled,
-            ..OcrConfig::default()
-        });
-        let result = extractor.extract(&path);
+        let result = extract_pdf_text_with(
+            b"synthetic pdf bytes",
+            |_| -> Result<String, pdf_extract::OutputError> {
+                panic!("assertion failed: name == \"Identity-H\"");
+            },
+        );
 
         match result {
             Err(ExtractError::Pdf(message)) => assert!(
-                message.contains("panicked"),
+                message.contains("third-party extractor panicked")
+                    && message.contains("Identity-H"),
                 "expected captured panic message, got {message:?}"
             ),
             other => panic!("expected Pdf error for unsupported CID PDF, got {other:?}"),
@@ -1046,7 +965,6 @@ mod tests {
 
         let extractor = PdfExtractor::new(OcrConfig {
             mode: OcrMode::Auto,
-            ocr_binary_path: Some(PathBuf::from("/definitely/missing/tesseract")),
             pdf_renderer_path: Some(PathBuf::from("/definitely/missing/pdftoppm")),
             ..OcrConfig::default()
         });
@@ -1056,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pdf_extractor_auto_mode_recovers_from_embedded_text_panic_with_ocr() {
+    fn test_pdf_extractor_auto_mode_reports_decode_error_after_rendered_page_is_invalid() {
         let dir = tempfile::tempdir().unwrap();
         let pdf_path = dir.path().join("panic.pdf");
         fs::write(&pdf_path, b"%PDF-1.4\n% fake scanned pdf\n").unwrap();
@@ -1064,35 +982,32 @@ mod tests {
         let renderer_path = dir.path().join("fake-pdftoppm");
         fs::write(
             &renderer_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-pdftoppm; exit 0; fi\nprefix=\"$3\"\nprintf 'fake image' > \"${prefix}-1.png\"\n",
+            "#!/bin/sh\nif [ \"$1\" = \"-h\" ]; then echo fake-pdftoppm; exit 0; fi\nprefix=\"$3\"\nprintf 'not a png' > \"${prefix}-1.png\"\n",
         )
         .unwrap();
         make_executable(&renderer_path);
 
-        let tesseract_path = dir.path().join("fake-tesseract");
-        fs::write(
-            &tesseract_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-tesseract; exit 0; fi\necho 'ocr text after panic'\n",
-        )
-        .unwrap();
-        make_executable(&tesseract_path);
-
         let ocr = OcrConfig {
             mode: OcrMode::Auto,
-            ocr_binary_path: Some(tesseract_path),
             pdf_renderer_path: Some(renderer_path),
             ..OcrConfig::default()
         };
 
-        let extracted =
+        let result =
             extract_pdf_text_with_fallback(&pdf_path, b"fake pdf bytes", &ocr, |bytes| {
                 extract_pdf_text_with(bytes, |_| -> Result<String, pdf_extract::OutputError> {
                     panic!("assertion failed: name == \"Identity-H\"");
                 })
-            })
-            .unwrap();
+            });
 
-        assert!(extracted.contains("ocr text after panic"));
+        match result {
+            Err(ExtractError::Pdf(message)) => {
+                assert!(message.contains("embedded extraction failed"));
+                assert!(message.contains("OCR fallback failed"));
+                assert!(message.contains("decode:"));
+            }
+            other => panic!("expected combined Pdf error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1103,7 +1018,6 @@ mod tests {
 
         let ocr = OcrConfig {
             mode: OcrMode::Auto,
-            ocr_binary_path: Some(PathBuf::from("/definitely/missing/tesseract")),
             pdf_renderer_path: Some(PathBuf::from("/definitely/missing/pdftoppm")),
             ..OcrConfig::default()
         };
@@ -1148,69 +1062,42 @@ mod tests {
     }
 
     #[test]
-    fn test_image_ocr_disabled_returns_recoverable_error() {
+    fn test_image_ocr_corrupt_image_returns_recoverable_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scan.png");
         fs::write(&path, b"fake image bytes").unwrap();
 
-        let extractor = ImageOcrExtractor::new(OcrConfig {
-            mode: OcrMode::Disabled,
-            ..OcrConfig::default()
-        });
+        let extractor = ImageOcrExtractor::new(OcrConfig::default());
         let result = extractor.extract(&path);
 
         assert!(matches!(result, Err(ExtractError::OcrUnavailable(_))));
     }
 
     #[test]
-    fn test_image_ocr_missing_dependency_is_recoverable() {
+    fn test_image_ocr_missing_models_is_recoverable() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scan.png");
-        fs::write(&path, b"fake image bytes").unwrap();
+        image::RgbImage::from_pixel(1, 1, image::Rgb([255, 255, 255]))
+            .save(&path)
+            .unwrap();
 
-        let extractor = ImageOcrExtractor::new(OcrConfig {
-            mode: OcrMode::Auto,
-            ocr_binary_path: Some(PathBuf::from("/definitely/missing/tesseract")),
-            ..OcrConfig::default()
-        });
+        let extractor = ImageOcrExtractor::new(OcrConfig::default());
         let result = extractor.extract(&path);
 
-        assert!(matches!(result, Err(ExtractError::OcrUnavailable(_))));
+        match result {
+            Err(ExtractError::OcrUnavailable(message)) => assert!(message.contains("init:")),
+            other => panic!("expected OCR init error, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_image_ocr_uses_local_binary_when_available() {
-        let dir = tempfile::tempdir().unwrap();
-        let image_path = dir.path().join("scan.png");
-        fs::write(&image_path, b"syncmind image ocr marker").unwrap();
-
-        let tesseract_path = dir.path().join("fake-tesseract");
-        fs::write(
-            &tesseract_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-tesseract; exit 0; fi\nif ! grep -q 'syncmind image ocr marker' \"$1\"; then echo 'unexpected OCR input' >&2; exit 2; fi\necho 'ocr text from image marker'\n",
-        )
-        .unwrap();
-        make_executable(&tesseract_path);
-
-        let extractor = ImageOcrExtractor::new(OcrConfig {
-            mode: OcrMode::Auto,
-            ocr_binary_path: Some(tesseract_path),
-            ..OcrConfig::default()
-        });
-        let text = extractor.extract(&image_path).unwrap();
-
-        assert!(text.contains("ocr text from image marker"));
-    }
-
-    #[test]
-    fn test_forced_pdf_ocr_requires_local_dependencies() {
+    fn test_forced_pdf_ocr_requires_local_renderer() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.pdf");
         fs::write(&path, b"%PDF-1.4\n% fake pdf\n").unwrap();
 
         let extractor = PdfExtractor::new(OcrConfig {
             mode: OcrMode::Force,
-            ocr_binary_path: Some(PathBuf::from("/definitely/missing/tesseract")),
             pdf_renderer_path: Some(PathBuf::from("/definitely/missing/pdftoppm")),
             ..OcrConfig::default()
         });
@@ -1271,7 +1158,6 @@ mod tests {
         let extractor = PdfExtractor::new(OcrConfig {
             mode: OcrMode::Auto,
             pdf_renderer_path: Some(renderer_path),
-            ocr_binary_path: Some(PathBuf::from("/definitely/missing/tesseract")),
             ..OcrConfig::default()
         });
         let text = extractor.extract(&pdf_path).unwrap();
@@ -1280,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pdf_ocr_uses_local_renderer_and_ocr_when_available() {
+    fn test_pdf_ocr_uses_local_renderer_and_reports_invalid_rendered_image() {
         let dir = tempfile::tempdir().unwrap();
         let pdf_path = dir.path().join("scan.pdf");
         fs::write(&pdf_path, b"%PDF-1.4\n% fake scanned pdf\n").unwrap();
@@ -1288,28 +1174,22 @@ mod tests {
         let renderer_path = dir.path().join("fake-pdftoppm");
         fs::write(
             &renderer_path,
-            "#!/bin/sh\nif [ \"$1\" = \"-h\" ]; then echo fake-pdftoppm; exit 0; fi\nif [ \"$1\" != \"-png\" ]; then echo 'unexpected renderer probe' >&2; exit 2; fi\nif ! grep -q 'fake scanned pdf' \"$2\"; then echo 'unexpected PDF input' >&2; exit 3; fi\nprefix=\"$3\"\nprintf 'rendered page marker from pdf' > \"${prefix}-1.png\"\n",
+            "#!/bin/sh\nif [ \"$1\" = \"-h\" ]; then echo fake-pdftoppm; exit 0; fi\nif [ \"$1\" != \"-png\" ]; then echo 'unexpected renderer probe' >&2; exit 2; fi\nif ! grep -q 'fake scanned pdf' \"$2\"; then echo 'unexpected PDF input' >&2; exit 3; fi\nprefix=\"$3\"\nprintf 'not a png' > \"${prefix}-1.png\"\n",
         )
         .unwrap();
         make_executable(&renderer_path);
 
-        let tesseract_path = dir.path().join("fake-tesseract");
-        fs::write(
-            &tesseract_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-tesseract; exit 0; fi\nif ! grep -q 'rendered page marker from pdf' \"$1\"; then echo 'unexpected rendered page input' >&2; exit 2; fi\necho 'ocr text from rendered pdf marker'\n",
-        )
-        .unwrap();
-        make_executable(&tesseract_path);
-
         let extractor = PdfExtractor::new(OcrConfig {
             mode: OcrMode::Force,
-            ocr_binary_path: Some(tesseract_path),
             pdf_renderer_path: Some(renderer_path),
             ..OcrConfig::default()
         });
-        let text = extractor.extract(&pdf_path).unwrap();
+        let result = extractor.extract(&pdf_path);
 
-        assert!(text.contains("ocr text from rendered pdf marker"));
+        match result {
+            Err(ExtractError::OcrUnavailable(message)) => assert!(message.contains("decode:")),
+            other => panic!("expected OCR decode error, got {other:?}"),
+        }
     }
 
     #[test]

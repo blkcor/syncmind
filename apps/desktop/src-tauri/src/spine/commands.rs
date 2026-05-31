@@ -5,6 +5,7 @@
 //! `apps/desktop/src-tauri/src/lib.rs`.
 
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as _B64URL_UNUSED;
@@ -14,9 +15,11 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 use tracing::{info, warn};
 
+use crate::commands::SearchResultDto;
 use crate::spine::bundle::{self, BundleEnvelope};
 use crate::spine::client::{self, BundleListItem};
 use crate::spine::crypto;
+use crate::spine::dispatch;
 use crate::spine::identity;
 use crate::spine::inbox;
 use crate::spine::pairing::{self, PairingCompletion, PairingHandleView, PollOutcome};
@@ -179,6 +182,11 @@ pub async fn spine_set_trust_ca(
 }
 
 #[tauri::command]
+pub async fn spine_ws_status(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state.spine.ws_status().await.as_str().to_string())
+}
+
+#[tauri::command]
 pub async fn spine_get_identity(state: State<'_, AppState>) -> Result<IdentityView, String> {
     state.spine.require_identity_ready().map_err(String::from)?;
     let id = &state.spine.identity;
@@ -211,8 +219,15 @@ pub async fn spine_start_pairing(state: State<'_, AppState>) -> Result<PairingHa
         }
     }
 
+    // Snapshot SpineConfig for the QR payload builder so we don't hold the mutex across
+    // the .await below. The snapshot is short-lived and only carries non-secret fields.
+    let spine_config = {
+        let cfg = state.config.lock().expect("config mutex poisoned");
+        cfg.spine.clone()
+    };
+
     let client = runtime.require_client().await.map_err(String::from)?;
-    let (view, session_id) = pairing::initiate(&client, &runtime.identity)
+    let (view, session_id) = pairing::initiate(&client, &runtime.identity, &spine_config)
         .await
         .map_err(String::from)?;
 
@@ -650,12 +665,70 @@ pub fn persist_peer_pubkey_raw(
     Ok(())
 }
 
+/// Search the local knowledge base and return results as [`SearchResultDto`].
+///
+/// Calls the same embed + vector-search path as the `search_knowledge` Tauri command
+/// but uses the resources already available in [`PullContext`] rather than `AppState`.
+async fn search_local_knowledge(
+    query: &str,
+    top_k: u32,
+    filter_file_type: Option<&[String]>,
+    ctx: &PullContext,
+) -> Result<Vec<SearchResultDto>, SpineError> {
+    let embedder = Arc::clone(&ctx.embedder);
+    let store = Arc::clone(&ctx.store);
+
+    let embeddings = embedder.embed(&[query]).await.map_err(|e| {
+        SpineError::new(
+            SpineErrorCode::Internal,
+            format!("embedding failed: {e}"),
+        )
+    })?;
+
+    if embeddings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let patterns = filter_file_type.unwrap_or(&[]).to_vec();
+    let filter = syncmind_rag_engine::file_filter::parse_file_filter(&patterns).map_err(|e| {
+        SpineError::new(
+            SpineErrorCode::Internal,
+            format!("invalid file filter: {e}"),
+        )
+    })?;
+
+    let top_k = top_k as usize;
+
+    let results = match filter {
+        Some(f) => store
+            .search_with_path_filter(&embeddings[0], top_k, 5, |path| f.evaluate(path))
+            .map_err(|e| {
+                SpineError::new(SpineErrorCode::Internal, format!("search failed: {e}"))
+            })?,
+        None => store.search(&embeddings[0], top_k).map_err(|e| {
+            SpineError::new(SpineErrorCode::Internal, format!("search failed: {e}"))
+        })?,
+    };
+
+    Ok(results
+        .into_iter()
+        .map(|r| SearchResultDto {
+            chunk_id: r.chunk_id,
+            file_path: r.file_path.to_string_lossy().into_owned(),
+            start_line: r.start_line,
+            end_line: r.end_line,
+            content: r.content,
+            score: r.score,
+        })
+        .collect())
+}
+
 async fn process_inbound_bundle(
     ctx: &PullContext,
-    client: &crate::spine::client::SpineClient,
+    client: Arc<crate::spine::client::SpineClient>,
     item: &BundleListItem,
-    sync_key: &[u8; 32],
-    local_pub: &[u8; 32],
+    sync_key: [u8; 32],
+    local_pub: [u8; 32],
     data_dir: &std::path::Path,
 ) -> Result<(), SpineError> {
     if item.content_type != bundle::CONTENT_TYPE_NOTE {
@@ -665,23 +738,153 @@ async fn process_inbound_bundle(
         ));
     }
     let downloaded = client.download_bundle(&item.bundle_id).await?;
-    let envelope = bundle::decrypt(&downloaded.payload, sync_key, local_pub)?;
+    let envelope = bundle::decrypt(&downloaded.payload, &sync_key, &local_pub)?;
 
-    // Build the inbox indexer closure: invoke `syncmind_indexing::index_file_once`.
-    let extractor = syncmind_rag_engine::extractor::CompositeExtractor::from_config(&ctx.config);
+    let peer_fingerprint = ctx
+        .config
+        .spine
+        .paired_peer_fingerprint
+        .clone()
+        .ok_or_else(|| {
+            SpineError::new(SpineErrorCode::NotPaired, "no peer fingerprint in config")
+        })?;
+
+    let indexer = build_dispatch_indexer(ctx);
+    // Build the rpc closure for search-request handling.
+    // Snapshot all captures upfront — no Mutex guard held across .await.
+    let ctx_for_rpc = ctx.clone();
+    let client_for_rpc = Arc::clone(&client);
+
+    let outcome = dispatch::dispatch_bundle_with_postprocess(
+        data_dir,
+        &envelope,
+        &item.bundle_id,
+        &peer_fingerprint,
+        {
+            let indexer = Arc::clone(&indexer);
+            move |path| {
+                let indexer = Arc::clone(&indexer);
+                async move { indexer(path).await }
+            }
+        },
+        Arc::clone(&indexer),
+        // rpc closure
+        move |payload: dispatch::SearchRequestPayload| {
+            let ctx = ctx_for_rpc;
+            let client = client_for_rpc;
+            async move {
+                let results = search_local_knowledge(
+                    &payload.query,
+                    payload.top_k,
+                    payload.filter_file_type.as_deref(),
+                    &ctx,
+                )
+                .await?;
+
+                let hits: Vec<dispatch::SearchHitDto> =
+                    results.into_iter().map(|r| dispatch::SearchHitDto {
+                        chunk_id: r.chunk_id,
+                        file_path: r.file_path,
+                        start_line: r.start_line,
+                        end_line: r.end_line,
+                        content: r.content,
+                        score: r.score,
+                    }).collect();
+
+                let response_envelope =
+                    dispatch::build_search_response_envelope(&payload.request_id, &hits);
+
+                let blob = bundle::encrypt(&response_envelope, &sync_key, &local_pub)
+                    .map_err(|e| anyhow::anyhow!("encrypt search response: {e}"))?;
+
+                let idempotency_key = client::new_idempotency_key();
+                client
+                    .upload_bundle(blob, bundle::CONTENT_TYPE_NOTE, &idempotency_key)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("upload search response: {e}"))?;
+
+                Ok(())
+            }
+        },
+    )
+    .await?;
+
+    // Log outcome and always ACK to prevent retry storms.
+    match &outcome {
+        dispatch::DispatchOutcome::TextIndexed { path, chunks_added } => {
+            info!(
+                bundle_id = %item.bundle_id,
+                path = %path.display(),
+                chunks_added = chunks_added,
+                "ingested inbound bundle (text)"
+            );
+        }
+        dispatch::DispatchOutcome::BinaryStored {
+            binary_path,
+            markdown_path,
+        } => {
+            info!(
+                bundle_id = %item.bundle_id,
+                binary = %binary_path.display(),
+                markdown = %markdown_path.display(),
+                "stored inbound bundle (binary)"
+            );
+        }
+        dispatch::DispatchOutcome::RpcHandled => {
+            info!(
+                bundle_id = %item.bundle_id,
+                "handled inbound RPC bundle"
+            );
+        }
+        dispatch::DispatchOutcome::RpcRateLimited { response } => {
+            let blob = bundle::encrypt(response, &sync_key, &local_pub)
+                .map_err(|e| SpineError::new(SpineErrorCode::Internal, format!("encrypt rate-limit response: {e}")))?;
+            let idempotency_key = client::new_idempotency_key();
+            client
+                .upload_bundle(blob, bundle::CONTENT_TYPE_NOTE, &idempotency_key)
+                .await?;
+            info!(
+                bundle_id = %item.bundle_id,
+                "uploaded rate-limit response for inbound RPC bundle"
+            );
+        }
+        dispatch::DispatchOutcome::Ignored => {
+            info!(
+                bundle_id = %item.bundle_id,
+                "ignored inbound bundle"
+            );
+        }
+        dispatch::DispatchOutcome::Unknown { forensic_path } => {
+            info!(
+                bundle_id = %item.bundle_id,
+                forensic = %forensic_path.display(),
+                "unknown bundle kind saved for forensic analysis"
+            );
+        }
+    }
+
+    // ACK: delete the bundle on the server (all outcomes lead to ACK).
+    client.delete_bundle(&item.bundle_id).await?;
+    Ok(())
+}
+
+fn build_dispatch_indexer(ctx: &PullContext) -> dispatch::PostprocessIndexer {
+    let extractor = Arc::new(syncmind_rag_engine::extractor::CompositeExtractor::from_config(
+        &ctx.config,
+    ));
     let embedder = Arc::clone(&ctx.embedder);
     let store = Arc::clone(&ctx.store);
     let chunk_size = ctx.config.chunk_size;
     let chunk_overlap = ctx.config.chunk_overlap;
 
-    let report = inbox::write_envelope_and_index(
-        data_dir,
-        &envelope,
-        &item.bundle_id,
-        move |path| async move {
+    Arc::new(move |path: PathBuf| {
+        let extractor = Arc::clone(&extractor);
+        let embedder = Arc::clone(&embedder);
+        let store = Arc::clone(&store);
+        Box::pin(async move {
             let report = syncmind_indexing::index_file_once(
                 &path,
-                &extractor,
+                extractor.as_ref(),
                 embedder.as_ref(),
                 store.as_ref(),
                 chunk_size,
@@ -690,20 +893,8 @@ async fn process_inbound_bundle(
             .await
             .map_err(anyhow::Error::from)?;
             Ok(report.chunks_added)
-        },
-    )
-    .await?;
-
-    info!(
-        bundle_id = %item.bundle_id,
-        path = %report.final_path.display(),
-        chunks_added = report.chunks_added,
-        "ingested inbound bundle"
-    );
-
-    // ACK only after successful write+index.
-    client.delete_bundle(&item.bundle_id).await?;
-    Ok(())
+        }) as Pin<Box<dyn std::future::Future<Output = anyhow::Result<usize>> + Send>>
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -758,7 +949,16 @@ async fn pull_bundles_with_context(ctx: &PullContext) -> Result<PullResult, Spin
     let mut failed = 0usize;
 
     for item in list {
-        match process_inbound_bundle(ctx, &client, &item, &sync_key, &local_pub, &data_dir).await {
+        match process_inbound_bundle(
+            ctx,
+            Arc::clone(&client),
+            &item,
+            sync_key,
+            local_pub,
+            &data_dir,
+        )
+        .await
+        {
             Ok(()) => processed += 1,
             Err(e) => {
                 warn!(bundle_id = %item.bundle_id, error = %e, "inbound bundle failed");

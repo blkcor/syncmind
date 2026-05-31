@@ -4,11 +4,11 @@
 TBD - created by archiving change the-spine. Update Purpose after archive.
 ## Requirements
 ### Requirement: Device identity key registration
-The system SHALL associate each paired device with a persistent Ed25519 identity public key.
+The system SHALL associate each paired device with a persistent Ed25519 identity public key. Mobile devices generate their identity key locally prior to pairing initiation and submit the public key during the pairing completion handshake.
 
-#### Scenario: Register identity key during pairing
-- **WHEN** a pairing session transitions to `completed`
-- **THEN** each device submits its Ed25519 public key to the Spine
+#### Scenario: Register mobile device identity key during pairing
+- **WHEN** a mobile device completes a pairing session
+- **THEN** the mobile device submits its locally-generated Ed25519 public key to the Spine
 - **AND** the system stores the public key in `devices.public_key` indexed by `public_key_fingerprint` (SHA-256)
 - **AND** the system marks the device as `is_active = TRUE`
 
@@ -64,4 +64,13 @@ The system SHALL support immediate revocation of a device's authentication crede
 - **THEN** the system sets `devices.is_active = FALSE` for the target device
 - **AND** the system invalidates all outstanding JWTs for that device by blacklisting active `jti` values
 - **AND** subsequent requests using that device's JWTs receive HTTP 401 Unauthorized
+
+### Requirement: Mobile generates identity key locally
+The system SHALL generate the Ed25519 identity key pair on the mobile device, not on the Spine or desktop. The private key never leaves the mobile device.
+
+#### Scenario: Identity key generated on mobile, not server
+- **WHEN** a mobile device first launches
+- **THEN** it generates its own Ed25519 key pair using `@noble/curves`
+- **AND** the private key is stored only in `expo-secure-store` (iOS Keychain / Android Keystore)
+- **AND** the Spine never receives or stores the private key
 

@@ -25,7 +25,6 @@ pub enum LogRotation {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OcrMode {
-    Disabled,
     #[default]
     Auto,
     Force,
@@ -198,8 +197,6 @@ pub struct Config {
     #[serde(default = "default_pdf_text_quality_threshold")]
     pub pdf_text_quality_threshold: f64,
     #[serde(default)]
-    pub ocr_binary_path: Option<String>,
-    #[serde(default)]
     pub pdf_renderer_path: Option<String>,
     #[serde(default = "default_ocr_language")]
     pub ocr_language: String,
@@ -261,7 +258,6 @@ impl Default for Config {
             onnx_tokenizer_url: None,
             ocr_mode: OcrMode::default(),
             pdf_text_quality_threshold: default_pdf_text_quality_threshold(),
-            ocr_binary_path: None,
             pdf_renderer_path: None,
             ocr_language: default_ocr_language(),
             ocr_psm_mode: default_ocr_psm_mode(),
@@ -371,7 +367,6 @@ mod tests {
             onnx_tokenizer_url: Some("https://example.test/tokenizer.json".to_string()),
             ocr_mode: OcrMode::Force,
             pdf_text_quality_threshold: 0.5,
-            ocr_binary_path: Some("/usr/local/bin/tesseract".to_string()),
             pdf_renderer_path: Some("/usr/local/bin/pdftoppm".to_string()),
             ocr_language: "chi_sim+eng".to_string(),
             ocr_psm_mode: 6,
