@@ -226,8 +226,18 @@ export default function SearchTab() {
                         </button>
                       </div>
                       <div class="result-preview">
-                        {result.content.slice(0, 120).replace(/\s+/g, ' ')}
+                        {result.content.slice(0, 200).split('\n').slice(0, 3).join('\n').replace(/\t/g, '  ')}
                       </div>
+                      <Show when={(result.tags || []).length > 0}>
+                        <div class="result-tags-row">
+                          <For each={(result.tags || []).slice(0, 4)}>
+                            {(tag) => <span class="result-tag">{tag}</span>}
+                          </For>
+                          <Show when={(result.tags || []).length > 4}>
+                            <span class="result-tag-overflow">+{(result.tags || []).length - 4}</span>
+                          </Show>
+                        </div>
+                      </Show>
                     </div>
                   );
                 }}

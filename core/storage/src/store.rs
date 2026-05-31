@@ -6,6 +6,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use zerocopy::IntoBytes;
 
+const HYBRID_LEXICAL_SCORE: f64 = 0.75;
+
+struct HybridCandidate {
+    result: SearchResult,
+    rrf_score: f64,
+    vector_similarity: Option<f64>,
+    lexical_match: bool,
+}
+
 /// Raw SQLite extension entry point signature expected by `sqlite3_auto_extension`.
 type SqliteInitFn = unsafe extern "C" fn(
     db: *mut rusqlite::ffi::sqlite3,
@@ -32,9 +41,8 @@ fn register_vec_extension() -> Result<(), StorageError> {
         ) -> std::os::raw::c_int;
     }
 
-    let result = unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(sqlite3_vec_init as SqliteInitFn))
-    };
+    let result =
+        unsafe { rusqlite::ffi::sqlite3_auto_extension(Some(sqlite3_vec_init as SqliteInitFn)) };
 
     if result != rusqlite::ffi::SQLITE_OK {
         return Err(StorageError::ExtensionRegistrationFailed);
@@ -81,6 +89,7 @@ impl VectorStore {
             CREATE TABLE IF NOT EXISTS pinned_chunks (
                 chunk_id INTEGER PRIMARY KEY,
                 pinned_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                tags TEXT NOT NULL DEFAULT '[]',
                 FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_pinned_chunks_pinned_at
@@ -102,6 +111,28 @@ impl VectorStore {
         )?;
 
         Ok(())
+    }
+
+    /// Parse the embedding dimension from an existing vec_chunks virtual table.
+    /// Returns `None` if the table does not exist yet.
+    #[allow(dead_code)]
+    fn get_vec_chunks_dimension(conn: &Connection) -> Option<usize> {
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .ok()?;
+        // The CREATE VIRTUAL TABLE statement looks like:
+        //   CREATE VIRTUAL TABLE vec_chunks USING vec0(
+        //       chunk_id INTEGER PRIMARY KEY,
+        //       embedding FLOAT32[384]
+        //   );
+        let start = sql.find("FLOAT32[")?;
+        let content = &sql[start + "FLOAT32[".len()..];
+        let end = content.find(']')?;
+        content[..end].parse().ok()
     }
 
     pub fn upsert_file(
@@ -179,9 +210,31 @@ impl VectorStore {
                 params![chunk_id, embedding.as_bytes()],
             )?;
 
+            // Build FTS content: context-prefixed chunk text + file stem + parent dir
+            // name so keyword queries can match chunks by file name or directory even
+            // when the term doesn't appear verbatim in the chunk body.
+            let fts_content = {
+                let stem = meta
+                    .absolute_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                let parent = meta
+                    .absolute_path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                let indexed_text = if let Some(ref prefix) = chunk.context_prefix {
+                    format!("{} {}", prefix, chunk.content)
+                } else {
+                    chunk.content.clone()
+                };
+                format!("{} {} {}", indexed_text, stem, parent)
+            };
             tx.execute(
                 "INSERT INTO fts_chunks (rowid, content) VALUES (?, ?)",
-                params![chunk_id, &chunk.content],
+                params![chunk_id, &fts_content],
             )?;
         }
 
@@ -229,6 +282,9 @@ impl VectorStore {
                     content: row.get(3)?,
                     file_path: PathBuf::from(row.get::<_, String>(4)?),
                     score: Self::l2_to_similarity(distance),
+                    display_content: String::new(),
+                    tags: Vec::new(),
+                    pinned_at: None,
                 })
             },
         )?;
@@ -244,6 +300,20 @@ impl VectorStore {
         // dot_product = 1 - L2^2/2
         let sim = 1.0 - (distance * distance) / 2.0;
         sim.clamp(0.0, 1.0)
+    }
+
+    fn fts_query(query_text: &str) -> String {
+        let terms: Vec<String> = query_text
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .filter(|term| !term.is_empty())
+            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+            .collect();
+
+        if terms.is_empty() {
+            query_text.to_string()
+        } else {
+            terms.join(" OR ")
+        }
     }
 
     /// Like `search`, but applies a path predicate to the candidate set before
@@ -278,11 +348,21 @@ impl VectorStore {
         top_k: usize,
         threshold: Option<f64>,
     ) -> Result<Vec<SearchResult>, StorageError> {
+        self.search_with_threshold_and_window(query_embedding, top_k, threshold, 2)
+    }
+
+    pub fn search_with_threshold_and_window(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        threshold: Option<f64>,
+        window: usize,
+    ) -> Result<Vec<SearchResult>, StorageError> {
         let mut results = self.search(query_embedding, top_k)?;
         if let Some(th) = threshold {
             results.retain(|r| r.score >= th);
         }
-        Ok(results)
+        self.expand_with_adjacent_chunks(results, window)
     }
 
     pub fn search_hybrid(
@@ -292,6 +372,17 @@ impl VectorStore {
         top_k: usize,
         threshold: Option<f64>,
     ) -> Result<Vec<SearchResult>, StorageError> {
+        self.search_hybrid_with_window(query_embedding, query_text, top_k, threshold, 2)
+    }
+
+    pub fn search_hybrid_with_window(
+        &self,
+        query_embedding: &[f32],
+        query_text: &str,
+        top_k: usize,
+        threshold: Option<f64>,
+        window: usize,
+    ) -> Result<Vec<SearchResult>, StorageError> {
         if query_embedding.len() != self.embedding_dim {
             return Err(StorageError::InvalidDimension {
                 expected: self.embedding_dim,
@@ -299,135 +390,278 @@ impl VectorStore {
             });
         }
 
-        let conn = self.conn.lock().unwrap();
-        let candidate_limit = (top_k * 2).max(10);
         let k_rrf = 60.0;
+        let candidate_limit = (top_k * 2).max(10);
+        let fts_query = Self::fts_query(query_text);
 
-        // --- Vector candidates ---
-        let mut vec_stmt = conn.prepare(
-            "SELECT
-                c.id,
-                c.start_line,
-                c.end_line,
-                c.content,
-                f.absolute_path,
-                vc.distance
-             FROM vec_chunks vc
-             JOIN chunks c ON vc.chunk_id = c.id
-             JOIN files f ON c.file_id = f.id
-             WHERE vc.embedding MATCH ? AND k = ?
-             ORDER BY vc.distance
-             LIMIT ?",
-        )?;
+        // Collect candidates inside a block so the conn lock is released
+        // before expand_with_adjacent_chunks acquires it.
+        let (vec_candidates, fts_candidates) = {
+            let conn = self.conn.lock().unwrap();
 
-        let vec_rows = vec_stmt.query_map(
-            params![
-                query_embedding.as_bytes(),
-                candidate_limit as i64,
-                candidate_limit as i64
-            ],
-            |row| {
-                Ok(SearchResult {
-                    chunk_id: row.get(0)?,
-                    start_line: row.get(1)?,
-                    end_line: row.get(2)?,
-                    content: row.get(3)?,
-                    file_path: PathBuf::from(row.get::<_, String>(4)?),
-                    score: row.get(5)?,
-                })
-            },
-        )?;
+            // --- Vector candidates ---
+            let mut vec_stmt = conn.prepare(
+                "SELECT
+                    c.id,
+                    c.start_line,
+                    c.end_line,
+                    c.content,
+                    f.absolute_path,
+                    vc.distance
+                 FROM vec_chunks vc
+                 JOIN chunks c ON vc.chunk_id = c.id
+                 JOIN files f ON c.file_id = f.id
+                 WHERE vc.embedding MATCH ? AND k = ?
+                 ORDER BY vc.distance
+                 LIMIT ?",
+            )?;
 
-        // --- FTS5 candidates ---
-        let mut fts_stmt = conn.prepare(
-            "SELECT
-                c.id,
-                c.start_line,
-                c.end_line,
-                c.content,
-                f.absolute_path,
-                rank
-             FROM fts_chunks
-             JOIN chunks c ON fts_chunks.rowid = c.id
-             JOIN files f ON c.file_id = f.id
-             WHERE fts_chunks MATCH ?
-             ORDER BY rank
-             LIMIT ?",
-        )?;
+            let vec: Vec<SearchResult> = vec_stmt
+                .query_map(
+                    params![
+                        query_embedding.as_bytes(),
+                        candidate_limit as i64,
+                        candidate_limit as i64
+                    ],
+                    |row| {
+                        Ok(SearchResult {
+                            chunk_id: row.get(0)?,
+                            start_line: row.get(1)?,
+                            end_line: row.get(2)?,
+                            content: row.get(3)?,
+                            file_path: PathBuf::from(row.get::<_, String>(4)?),
+                            score: row.get(5)?,
+                            display_content: String::new(),
+                            tags: Vec::new(),
+                            pinned_at: None,
+                        })
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
 
-        let fts_rows = fts_stmt.query_map(
-            params![query_text, candidate_limit as i64],
-            |row| {
-                Ok(SearchResult {
-                    chunk_id: row.get(0)?,
-                    start_line: row.get(1)?,
-                    end_line: row.get(2)?,
-                    content: row.get(3)?,
-                    file_path: PathBuf::from(row.get::<_, String>(4)?),
-                    score: row.get(5)?,
-                })
-            },
-        )?;
+            // --- FTS5 candidates ---
+            let mut fts_stmt = conn.prepare(
+                "SELECT
+                    c.id,
+                    c.start_line,
+                    c.end_line,
+                    c.content,
+                    f.absolute_path,
+                    rank
+                 FROM fts_chunks
+                 JOIN chunks c ON fts_chunks.rowid = c.id
+                 JOIN files f ON c.file_id = f.id
+                 WHERE fts_chunks MATCH ?
+                 ORDER BY rank
+                 LIMIT ?",
+            )?;
+
+            let fts: Vec<SearchResult> = fts_stmt
+                .query_map(params![&fts_query, candidate_limit as i64], |row| {
+                    Ok(SearchResult {
+                        chunk_id: row.get(0)?,
+                        start_line: row.get(1)?,
+                        end_line: row.get(2)?,
+                        content: row.get(3)?,
+                        file_path: PathBuf::from(row.get::<_, String>(4)?),
+                        score: row.get(5)?,
+                        display_content: String::new(),
+                        tags: Vec::new(),
+                        pinned_at: None,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            (vec, fts)
+        }; // conn lock released here
 
         // --- RRF fusion ---
-        let mut fused: HashMap<i64, (SearchResult, f64)> = HashMap::new();
+        let mut fused: HashMap<i64, HybridCandidate> = HashMap::new();
 
-        for (rank, row) in vec_rows.enumerate() {
-            let result = row?;
-            let score = 1.0 / (k_rrf + rank as f64 + 1.0);
-            fused.entry(result.chunk_id)
-                .and_modify(|(_, s)| *s += score)
-                .or_insert((result, score));
+        for (rank, result) in vec_candidates.into_iter().enumerate() {
+            let rrf_score = 1.0 / (k_rrf + rank as f64 + 1.0);
+            let vector_similarity = Self::l2_to_similarity(result.score);
+            fused
+                .entry(result.chunk_id)
+                .and_modify(|candidate| {
+                    candidate.rrf_score += rrf_score;
+                    candidate.vector_similarity = Some(
+                        candidate
+                            .vector_similarity
+                            .map(|existing| existing.max(vector_similarity))
+                            .unwrap_or(vector_similarity),
+                    );
+                })
+                .or_insert(HybridCandidate {
+                    result,
+                    rrf_score,
+                    vector_similarity: Some(vector_similarity),
+                    lexical_match: false,
+                });
         }
 
-        for (rank, row) in fts_rows.enumerate() {
-            let result = row?;
-            let score = 1.0 / (k_rrf + rank as f64 + 1.0);
-            fused.entry(result.chunk_id)
-                .and_modify(|(_, s)| *s += score)
-                .or_insert((result, score));
+        for (rank, result) in fts_candidates.into_iter().enumerate() {
+            let rrf_score = 1.0 / (k_rrf + rank as f64 + 1.0);
+            fused
+                .entry(result.chunk_id)
+                .and_modify(|candidate| {
+                    candidate.rrf_score += rrf_score;
+                    candidate.lexical_match = true;
+                })
+                .or_insert(HybridCandidate {
+                    result,
+                    rrf_score,
+                    vector_similarity: None,
+                    lexical_match: true,
+                });
         }
 
-        let mut results: Vec<(SearchResult, f64)> = fused.into_values().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Normalize RRF scores to [0, 1] by dividing by the max fused score.
+        let max_fused = fused
+            .values()
+            .map(|candidate| candidate.rrf_score)
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .filter(|&m| m > 0.0);
 
-        // Apply threshold and top_k
-        let mut final_results: Vec<SearchResult> = results
+        // Apply threshold on normalized RRF scores, then take top_k.
+        let mut scored: Vec<HybridCandidate> = fused.into_values().collect();
+        scored.sort_by(|a, b| {
+            b.rrf_score
+                .partial_cmp(&a.rrf_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Normalize and filter in one pass.
+        let final_results: Vec<SearchResult> = scored
             .into_iter()
-            .filter(|(r, _)| {
+            .map(|mut candidate| {
+                let normalized_rrf = if let Some(max) = max_fused {
+                    candidate.rrf_score / max
+                } else {
+                    candidate.rrf_score
+                };
+                let relevance_score = candidate
+                    .vector_similarity
+                    .unwrap_or(0.0)
+                    .max(if candidate.lexical_match {
+                        HYBRID_LEXICAL_SCORE
+                    } else {
+                        0.0
+                    });
+                candidate.result.score = relevance_score;
+                (candidate.result, normalized_rrf)
+            })
+            .filter(|(_, normalized_rrf)| {
                 if let Some(th) = threshold {
-                    Self::l2_to_similarity(r.score) >= th
+                    *normalized_rrf >= th
                 } else {
                     true
                 }
             })
-            .map(|(mut r, rrf_score)| {
-                // Overwrite score with the fused RRF score for downstream consumers
-                r.score = rrf_score;
-                r
-            })
             .take(top_k)
+            .map(|(r, _)| r)
             .collect();
 
-        // Normalize scores to [0, 1] for downstream consistency.
-        // RRF scores are small fractions; we scale by the max so the best result is ~1.0.
-        if let Some(max_score) = final_results.first().map(|r| r.score) {
-            if max_score > 0.0 {
-                for r in &mut final_results {
-                    r.score /= max_score;
+        self.expand_with_adjacent_chunks(final_results, window)
+    }
+
+    /// Expand each result with adjacent chunks from the same file
+    /// (`chunk_index ± window`). Sets `display_content` on each result with
+    /// the merged text in chunk_index order. Deduplicates by chunk_id within
+    /// each result's window.
+    pub fn expand_with_adjacent_chunks(
+        &self,
+        mut results: Vec<SearchResult>,
+        window: usize,
+    ) -> Result<Vec<SearchResult>, StorageError> {
+        if window == 0 || results.is_empty() {
+            for r in &mut results {
+                if r.display_content.is_empty() {
+                    r.display_content = r.content.clone();
                 }
+            }
+            return Ok(results);
+        }
+
+        let window_i64 = window as i64;
+        let conn = self.conn.lock().unwrap();
+
+        // Phase 1: collect (file_id, chunk_index) for each result without holding refs
+        let mut windows_info: Vec<(usize, Option<(i64, i64)>)> = Vec::new();
+
+        for (idx, result) in results.iter().enumerate() {
+            let file_id: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM files WHERE absolute_path = ?",
+                    [result.file_path.to_string_lossy().as_ref()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            let Some(file_id) = file_id else {
+                windows_info.push((idx, None));
+                continue;
+            };
+
+            let chunk_idx: Option<i64> = conn
+                .query_row(
+                    "SELECT chunk_index FROM chunks WHERE id = ?",
+                    [result.chunk_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            match chunk_idx {
+                Some(ck_idx) => windows_info.push((idx, Some((file_id, ck_idx)))),
+                None => windows_info.push((idx, None)),
             }
         }
 
-        Ok(final_results)
+        // Phase 2: fetch adjacent chunks and populate display_content
+        for (result_idx, info) in windows_info {
+            let (file_id, ck_idx) = match info {
+                Some(fi) => fi,
+                None => {
+                    if results[result_idx].display_content.is_empty() {
+                        results[result_idx].display_content =
+                            results[result_idx].content.clone();
+                    }
+                    continue;
+                }
+            };
+
+            let min_idx = (ck_idx - window_i64).max(0);
+            let max_idx = ck_idx + window_i64;
+
+            let mut stmt = conn.prepare(
+                "SELECT id, content FROM chunks
+                 WHERE file_id = ? AND chunk_index BETWEEN ? AND ?
+                 ORDER BY chunk_index ASC",
+            )?;
+            let rows = stmt.query_map(params![file_id, min_idx, max_idx], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+
+            let mut seen = std::collections::HashSet::new();
+            let mut parts: Vec<String> = Vec::new();
+            for row in rows {
+                let (cid, content) = row?;
+                if seen.insert(cid) {
+                    parts.push(content);
+                }
+            }
+            results[result_idx].display_content = parts.join("\n");
+        }
+
+        Ok(results)
     }
 
     pub fn get_stats(&self) -> Result<(usize, usize), StorageError> {
         let conn = self.conn.lock().unwrap();
-        let file_count: usize = conn
-            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
-        let chunk_count: usize = conn
-            .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+        let file_count: usize =
+            conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
+        let chunk_count: usize =
+            conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
         Ok((file_count, chunk_count))
     }
 
@@ -455,7 +689,7 @@ impl VectorStore {
     /// the given absolute path existed. The deletion is transactional and
     /// idempotent.
     ///
-    /// `vec_chunks` is a sqlite-vec virtual table and does not honor the
+    /// `vec_chunks` and `fts_chunks` are virtual tables and do not honor the
     /// foreign-key cascade on `chunks`, so each linked row must be deleted
     /// explicitly before the parent rows are removed.
     pub fn delete_file_by_path(&self, path: &Path) -> Result<bool, StorageError> {
@@ -481,6 +715,7 @@ impl VectorStore {
 
         for chunk_id in chunk_ids {
             tx.execute("DELETE FROM vec_chunks WHERE chunk_id = ?", [chunk_id])?;
+            tx.execute("DELETE FROM fts_chunks WHERE rowid = ?", [chunk_id])?;
         }
         tx.execute("DELETE FROM chunks WHERE file_id = ?", [file_id])?;
         tx.execute("DELETE FROM files WHERE id = ?", [file_id])?;
@@ -491,15 +726,18 @@ impl VectorStore {
 
     /// Pin a chunk so it persists in the user's quick-access list.
     ///
+    /// If `tags` is provided, they are stored as a JSON array string alongside the pin.
     /// Idempotent: pinning an already-pinned chunk succeeds without modifying
-    /// `pinned_at`. Returns `Ok(())` even if the chunk row does not exist; the
-    /// foreign-key cascade will surface as a different error path when the
-    /// chunk is missing, depending on whether `PRAGMA foreign_keys` is on.
-    pub fn pin_chunk(&self, chunk_id: i64) -> Result<(), StorageError> {
+    /// `pinned_at` but DOES overwrite tags with the provided value.
+    pub fn pin_chunk(&self, chunk_id: i64, tags: Option<&[String]>) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
+        let tags_json = tags
+            .map(|t| serde_json::to_string(t).unwrap_or_else(|_| "[]".to_string()))
+            .unwrap_or_else(|| "[]".to_string());
         conn.execute(
-            "INSERT OR IGNORE INTO pinned_chunks (chunk_id) VALUES (?)",
-            [chunk_id],
+            "INSERT INTO pinned_chunks (chunk_id, tags) VALUES (?, ?)
+             ON CONFLICT(chunk_id) DO UPDATE SET tags = excluded.tags",
+            params![chunk_id, tags_json],
         )?;
         Ok(())
     }
@@ -507,10 +745,7 @@ impl VectorStore {
     /// Remove a pin. Idempotent: unpinning a non-pinned chunk succeeds.
     pub fn unpin_chunk(&self, chunk_id: i64) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM pinned_chunks WHERE chunk_id = ?",
-            [chunk_id],
-        )?;
+        conn.execute("DELETE FROM pinned_chunks WHERE chunk_id = ?", [chunk_id])?;
         Ok(())
     }
 
@@ -541,8 +776,10 @@ impl VectorStore {
             placeholders
         );
         let mut stmt = conn.prepare(&sql)?;
-        let params_iter: Vec<&dyn rusqlite::ToSql> =
-            chunk_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let params_iter: Vec<&dyn rusqlite::ToSql> = chunk_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
         let rows = stmt.query_map(params_iter.as_slice(), |row| row.get::<_, i64>(0))?;
         rows.collect::<Result<HashSet<_>, _>>()
             .map_err(StorageError::from)
@@ -550,7 +787,8 @@ impl VectorStore {
 
     /// List every currently-pinned chunk as a `SearchResult`, ordered by
     /// `pinned_at` descending (most recently pinned first). Score is set to a
-    /// synthetic `1.0` since pinned items bypass vector ranking.
+    /// synthetic `1.0` since pinned items bypass vector ranking. Tags are
+    /// populated from the stored JSON array.
     pub fn list_pinned_chunks(&self) -> Result<Vec<SearchResult>, StorageError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -559,7 +797,9 @@ impl VectorStore {
                 c.start_line,
                 c.end_line,
                 c.content,
-                f.absolute_path
+                f.absolute_path,
+                p.tags,
+                p.pinned_at
              FROM pinned_chunks p
              JOIN chunks c ON p.chunk_id = c.id
              JOIN files f ON c.file_id = f.id
@@ -567,6 +807,9 @@ impl VectorStore {
         )?;
 
         let rows = stmt.query_map([], |row| {
+            let tags_json: String = row.get(5)?;
+            let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+            let pinned_at: i64 = row.get(6)?;
             Ok(SearchResult {
                 chunk_id: row.get(0)?,
                 start_line: row.get(1)?,
@@ -574,6 +817,9 @@ impl VectorStore {
                 content: row.get(3)?,
                 file_path: PathBuf::from(row.get::<_, String>(4)?),
                 score: 1.0,
+                display_content: String::new(),
+                tags,
+                pinned_at: Some(pinned_at),
             })
         })?;
 
@@ -581,7 +827,34 @@ impl VectorStore {
             .map_err(StorageError::from)
     }
 
-    /// Return the distinct indexed file types currently present in the store.
+    /// Update the tags on an already-pinned chunk. Returns `Ok(false)` if the
+    /// chunk is not currently pinned.
+    pub fn update_pin_tags(&self, chunk_id: i64, tags: &[String]) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
+        let affected = conn.execute(
+            "UPDATE pinned_chunks SET tags = ? WHERE chunk_id = ?",
+            params![tags_json, chunk_id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Search pinned chunks, optionally filtering by tag. If `tag` is `Some`,
+    /// only chunks whose stored tags array contains that value are returned.
+    /// Results are ordered by `pinned_at` descending.
+    pub fn search_pinned_chunks(
+        &self,
+        tag: Option<&str>,
+    ) -> Result<Vec<SearchResult>, StorageError> {
+        let all = self.list_pinned_chunks()?;
+        match tag {
+            Some(t) if !t.is_empty() => Ok(all
+                .into_iter()
+                .filter(|r| r.tags.iter().any(|tag_val| tag_val == t))
+                .collect()),
+            _ => Ok(all),
+        }
+    }
     /// Results are normalized to lowercase, exclude empty/unknown values, and
     /// are ordered by frequency descending then alphabetically ascending.
     pub fn list_indexed_file_types(&self) -> Result<Vec<String>, StorageError> {
@@ -622,14 +895,13 @@ mod tests {
             last_modified: 1234567890,
             last_indexed: 1234567890,
         };
-        let chunks = vec![
-            Chunk {
-                chunk_index: 0,
-                start_line: 1,
-                end_line: 5,
-                content: "Hello world".to_string(),
-            },
-        ];
+        let chunks = vec![Chunk {
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 5,
+            content: "Hello world".to_string(),
+                context_prefix: None,
+        }];
         let embeddings = vec![mock_embedding(4, 0.1)];
 
         store.upsert_file(&meta, &chunks, &embeddings).unwrap();
@@ -656,18 +928,17 @@ mod tests {
                 start_line: 1,
                 end_line: 5,
                 content: "Hello world".to_string(),
+                context_prefix: None,
             },
             Chunk {
                 chunk_index: 1,
                 start_line: 6,
                 end_line: 10,
                 content: "Goodbye world".to_string(),
+                context_prefix: None,
             },
         ];
-        let embeddings = vec![
-            vec![0.1, 0.2, 0.3, 0.4],
-            vec![0.9, 0.8, 0.7, 0.6],
-        ];
+        let embeddings = vec![vec![0.1, 0.2, 0.3, 0.4], vec![0.9, 0.8, 0.7, 0.6]];
 
         store.upsert_file(&meta, &chunks, &embeddings).unwrap();
 
@@ -693,6 +964,12 @@ mod tests {
             .unwrap()
     }
 
+    fn count_fts_chunks(store: &VectorStore) -> usize {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM fts_chunks", [], |r| r.get(0))
+            .unwrap()
+    }
+
     #[test]
     fn store_delete_file_by_path_clears_all_artifacts() {
         let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
@@ -710,12 +987,14 @@ mod tests {
                 start_line: 1,
                 end_line: 2,
                 content: "First".to_string(),
+                context_prefix: None,
             },
             Chunk {
                 chunk_index: 1,
                 start_line: 3,
                 end_line: 4,
                 content: "Second".to_string(),
+                context_prefix: None,
             },
         ];
         let embeddings = vec![mock_embedding(4, 0.1), mock_embedding(4, 0.2)];
@@ -725,6 +1004,7 @@ mod tests {
         assert_eq!(files_before, 1);
         assert_eq!(chunks_before, 2);
         assert_eq!(count_vec_chunks(&store), 2);
+        assert_eq!(count_fts_chunks(&store), 2);
 
         let removed = store
             .delete_file_by_path(&PathBuf::from("/tmp/delete_me.md"))
@@ -738,6 +1018,11 @@ mod tests {
             count_vec_chunks(&store),
             0,
             "vec_chunks must be cleared (sqlite-vec does not cascade)"
+        );
+        assert_eq!(
+            count_fts_chunks(&store),
+            0,
+            "fts_chunks must be cleared (FTS5 does not cascade)"
         );
     }
 
@@ -769,6 +1054,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
                 content: format!("Indexed content for {absolute_path}"),
+                context_prefix: None,
             }];
             let embeddings = vec![mock_embedding(4, 0.1)];
             store.upsert_file(&meta, &chunks, &embeddings).unwrap();
@@ -803,6 +1089,7 @@ mod tests {
             start_line: 1,
             end_line: 2,
             content: "First".to_string(),
+                context_prefix: None,
         }];
         let embeddings = vec![mock_embedding(4, 0.1)];
 
@@ -831,25 +1118,28 @@ mod tests {
                 start_line: 1,
                 end_line: 2,
                 content: "Hello world".to_string(),
+                context_prefix: None,
             },
             Chunk {
                 chunk_index: 1,
                 start_line: 3,
                 end_line: 4,
                 content: "Goodbye world".to_string(),
+                context_prefix: None,
             },
         ];
         // Very different embeddings: one close to query, one far
-        let embeddings = vec![
-            vec![0.1, 0.2, 0.3, 0.4],
-            vec![0.9, 0.8, 0.7, 0.6],
-        ];
+        let embeddings = vec![vec![0.1, 0.2, 0.3, 0.4], vec![0.9, 0.8, 0.7, 0.6]];
         store.upsert_file(&meta, &chunks, &embeddings).unwrap();
 
         let query = vec![0.11, 0.19, 0.31, 0.39];
         // With a high threshold, only the very close result should remain
         let results = store.search_with_threshold(&query, 5, Some(0.95)).unwrap();
-        assert_eq!(results.len(), 1, "threshold should filter out dissimilar results");
+        assert_eq!(
+            results.len(),
+            1,
+            "threshold should filter out dissimilar results"
+        );
         assert_eq!(results[0].content, "Hello world");
     }
 
@@ -870,18 +1160,17 @@ mod tests {
                 start_line: 1,
                 end_line: 2,
                 content: "Hello world".to_string(),
+                context_prefix: None,
             },
             Chunk {
                 chunk_index: 1,
                 start_line: 3,
                 end_line: 4,
                 content: "Goodbye world".to_string(),
+                context_prefix: None,
             },
         ];
-        let embeddings = vec![
-            vec![0.1, 0.2, 0.3, 0.4],
-            vec![0.9, 0.8, 0.7, 0.6],
-        ];
+        let embeddings = vec![vec![0.1, 0.2, 0.3, 0.4], vec![0.9, 0.8, 0.7, 0.6]];
         store.upsert_file(&meta, &chunks, &embeddings).unwrap();
 
         let query_embedding = vec![0.11, 0.19, 0.31, 0.39];
@@ -895,6 +1184,73 @@ mod tests {
         );
         // The BM25 arm should boost "Hello world" to the top.
         assert_eq!(results[0].content, "Hello world");
+    }
+
+    #[test]
+    fn store_search_hybrid_score_is_not_relative_rank_confidence() {
+        let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let store = VectorStore::new(&db_path, 4).unwrap();
+
+        let meta = FileMeta {
+            absolute_path: PathBuf::from("/tmp/styles.scss"),
+            file_type: "scss".to_string(),
+            last_modified: 1,
+            last_indexed: 1,
+        };
+        let chunks = vec![Chunk {
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 3,
+            content: ".rubberBand { animation-name: rubberBand; }".to_string(),
+            context_prefix: None,
+        }];
+        store
+            .upsert_file(&meta, &chunks, &[vec![0.9, 0.8, 0.7, 0.6]])
+            .unwrap();
+
+        let results = store
+            .search_hybrid(&[0.1, 0.2, 0.3, 0.4], "fabric", 5, None)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].score < 1.0,
+            "top hybrid result should not be displayed as 100% solely because it ranked first"
+        );
+    }
+
+    #[test]
+    fn store_search_hybrid_tokenizes_filename_queries_for_fts() {
+        let db_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let store = VectorStore::new(&db_path, 4).unwrap();
+
+        let meta = FileMeta {
+            absolute_path: PathBuf::from("/tmp/animate.scss"),
+            file_type: "scss".to_string(),
+            last_modified: 1,
+            last_indexed: 1,
+        };
+        let chunks = vec![Chunk {
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 1,
+            content: "@import './variable.scss';".to_string(),
+            context_prefix: None,
+        }];
+        store
+            .upsert_file(&meta, &chunks, &[vec![0.1, 0.2, 0.3, 0.4]])
+            .unwrap();
+
+        let results = store
+            .search_hybrid(&[0.9, 0.8, 0.7, 0.6], "variable.scss", 5, None)
+            .unwrap();
+
+        assert!(
+            results
+                .iter()
+                .any(|result| result.content.contains("variable.scss")),
+            "hybrid FTS search should match dotted filename references"
+        );
     }
 
     // ---- Pin / unpin tests ----
@@ -920,12 +1276,14 @@ mod tests {
                 start_line: 1,
                 end_line: 2,
                 content: "First".to_string(),
+                context_prefix: None,
             },
             Chunk {
                 chunk_index: 1,
                 start_line: 3,
                 end_line: 4,
                 content: "Second".to_string(),
+                context_prefix: None,
             },
         ];
         let embeddings = vec![mock_embedding(4, 0.1), mock_embedding(4, 0.2)];
@@ -933,7 +1291,9 @@ mod tests {
 
         let ids: Vec<i64> = {
             let conn = store.conn.lock().unwrap();
-            let mut stmt = conn.prepare("SELECT id FROM chunks ORDER BY id ASC").unwrap();
+            let mut stmt = conn
+                .prepare("SELECT id FROM chunks ORDER BY id ASC")
+                .unwrap();
             stmt.query_map([], |row| row.get(0))
                 .unwrap()
                 .collect::<Result<Vec<i64>, _>>()
@@ -947,7 +1307,7 @@ mod tests {
     fn pin_chunk_is_idempotent() {
         let (store, ids, _tmp) = seed_two_chunks();
 
-        store.pin_chunk(ids[0]).unwrap();
+        store.pin_chunk(ids[0], None).unwrap();
         // First pinned_at snapshot
         let first_ts: i64 = {
             let conn = store.conn.lock().unwrap();
@@ -959,7 +1319,7 @@ mod tests {
             .unwrap()
         };
         // Second pin: must succeed and leave pinned_at unchanged.
-        store.pin_chunk(ids[0]).unwrap();
+        store.pin_chunk(ids[0], None).unwrap();
         let second_ts: i64 = {
             let conn = store.conn.lock().unwrap();
             conn.query_row(
@@ -985,7 +1345,7 @@ mod tests {
         store.unpin_chunk(ids[0]).unwrap();
         assert!(!store.is_chunk_pinned(ids[0]).unwrap());
 
-        store.pin_chunk(ids[0]).unwrap();
+        store.pin_chunk(ids[0], None).unwrap();
         store.unpin_chunk(ids[0]).unwrap();
         store.unpin_chunk(ids[0]).unwrap(); // double-unpin Ok
         assert!(!store.is_chunk_pinned(ids[0]).unwrap());
@@ -994,11 +1354,9 @@ mod tests {
     #[test]
     fn pinned_set_returns_intersection() {
         let (store, ids, _tmp) = seed_two_chunks();
-        store.pin_chunk(ids[1]).unwrap();
+        store.pin_chunk(ids[1], None).unwrap();
 
-        let result = store
-            .pinned_set(&[ids[0], ids[1], 999_999])
-            .unwrap();
+        let result = store.pinned_set(&[ids[0], ids[1], 999_999]).unwrap();
         assert!(!result.contains(&ids[0]));
         assert!(result.contains(&ids[1]));
         assert!(!result.contains(&999_999));
@@ -1015,12 +1373,12 @@ mod tests {
     #[test]
     fn list_pinned_chunks_orders_by_pinned_at_desc() {
         let (store, ids, _tmp) = seed_two_chunks();
-        store.pin_chunk(ids[0]).unwrap();
+        store.pin_chunk(ids[0], None).unwrap();
         // Sleep ~1.1s to cross a `strftime('%s','now')` second boundary, so
         // the two pinned_at values are strictly different and ordering is
         // unambiguous.
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        store.pin_chunk(ids[1]).unwrap();
+        store.pin_chunk(ids[1], None).unwrap();
 
         let listed = store.list_pinned_chunks().unwrap();
         assert_eq!(listed.len(), 2);
@@ -1036,8 +1394,8 @@ mod tests {
     #[test]
     fn deleting_underlying_file_cascades_pin() {
         let (store, ids, _tmp) = seed_two_chunks();
-        store.pin_chunk(ids[0]).unwrap();
-        store.pin_chunk(ids[1]).unwrap();
+        store.pin_chunk(ids[0], None).unwrap();
+        store.pin_chunk(ids[1], None).unwrap();
         assert_eq!(store.list_pinned_chunks().unwrap().len(), 2);
 
         let removed = store
@@ -1059,7 +1417,7 @@ mod tests {
         // The original chunk row is deleted in the upsert transaction, which
         // must cascade and remove the pin.
         let (store, ids, _tmp) = seed_two_chunks();
-        store.pin_chunk(ids[0]).unwrap();
+        store.pin_chunk(ids[0], None).unwrap();
         assert!(store.is_chunk_pinned(ids[0]).unwrap());
 
         let new_meta = FileMeta {
@@ -1073,6 +1431,7 @@ mod tests {
             start_line: 1,
             end_line: 3,
             content: "Rewritten".to_string(),
+                context_prefix: None,
         }];
         let new_embeddings = vec![mock_embedding(4, 0.3)];
         store
@@ -1121,6 +1480,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
                 content: format!("fixture-{idx}"),
+                context_prefix: None,
             }];
             let embeddings = vec![mock_embedding(4, idx as f32 + 0.1)];
             store.upsert_file(&meta, &chunks, &embeddings).unwrap();
@@ -1156,6 +1516,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
                 content: format!("fixture-{idx}"),
+                context_prefix: None,
             }];
             let embeddings = vec![mock_embedding(4, idx as f32 + 0.1)];
             store.upsert_file(&meta, &chunks, &embeddings).unwrap();
@@ -1163,5 +1524,215 @@ mod tests {
 
         let file_types = store.list_indexed_file_types().unwrap();
         assert_eq!(file_types, vec!["ts", "md", "py", "rs"]);
+    }
+
+    // ---- sentence-window expansion tests ----
+
+    /// Seed a file with N consecutive chunks and return (store, file_path, chunk_ids, _tmp).
+    fn seed_multi_chunk_file(
+        contents: &[&str],
+    ) -> (VectorStore, PathBuf, Vec<i64>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("syncmind.db");
+        let store = VectorStore::new(&db_path, 4).unwrap();
+        let file_path = PathBuf::from("/tmp/sentence_window_test.md");
+
+        let meta = FileMeta {
+            absolute_path: file_path.clone(),
+            file_type: "markdown".to_string(),
+            last_modified: 1,
+            last_indexed: 1,
+        };
+        let chunks: Vec<Chunk> = contents
+            .iter()
+            .enumerate()
+            .map(|(i, content)| Chunk {
+                chunk_index: i,
+                start_line: i * 3 + 1,
+                end_line: i * 3 + 3,
+                content: content.to_string(),
+                context_prefix: None,
+            })
+            .collect();
+        let embeddings = vec![mock_embedding(4, 0.1); chunks.len()];
+        store.upsert_file(&meta, &chunks, &embeddings).unwrap();
+
+        let ids: Vec<i64> = {
+            let conn = store.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT id FROM chunks ORDER BY chunk_index ASC")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<Vec<i64>, _>>()
+                .unwrap()
+        };
+        (store, file_path, ids, tmp)
+    }
+
+    #[test]
+    fn expand_with_adjacent_chunks_merges_neighbors() {
+        let (store, file_path, ids, _tmp) = seed_multi_chunk_file(&[
+            "Chunk zero: introduction paragraph.",
+            "Chunk one: the main argument about sentence windows.",
+            "Chunk two: supporting evidence for the argument.",
+            "Chunk three: counterpoint and discussion.",
+            "Chunk four: conclusion and next steps.",
+        ]);
+
+        // Match the middle chunk (index 2)
+        let result = SearchResult {
+            chunk_id: ids[2],
+            file_path: file_path.clone(),
+            start_line: 7,
+            end_line: 9,
+            content: "Chunk two: supporting evidence for the argument.".into(),
+            score: 0.85,
+            display_content: String::new(),
+            tags: vec![],
+            pinned_at: None,
+        };
+
+        let expanded = store
+            .expand_with_adjacent_chunks(vec![result], 2)
+            .unwrap();
+        let display = &expanded[0].display_content;
+
+        // With window=2, should contain chunks 0-4
+        assert!(
+            display.contains("Chunk zero"),
+            "window should include preceding chunks, got: {display}"
+        );
+        assert!(
+            display.contains("Chunk one"),
+            "window should include immediate predecessor, got: {display}"
+        );
+        assert!(
+            display.contains("Chunk two"),
+            "window must include the matched chunk, got: {display}"
+        );
+        assert!(
+            display.contains("Chunk three"),
+            "window should include immediate successor, got: {display}"
+        );
+        assert!(
+            display.contains("Chunk four"),
+            "window should include following chunks, got: {display}"
+        );
+
+        // Chunks must be in index order.
+        let pos0 = display.find("Chunk zero").unwrap();
+        let pos1 = display.find("Chunk one").unwrap();
+        let pos2 = display.find("Chunk two").unwrap();
+        let pos3 = display.find("Chunk three").unwrap();
+        let pos4 = display.find("Chunk four").unwrap();
+        assert!(pos0 < pos1, "chunks must be in index order");
+        assert!(pos1 < pos2, "chunks must be in index order");
+        assert!(pos2 < pos3, "chunks must be in index order");
+        assert!(pos3 < pos4, "chunks must be in index order");
+
+        // Original content field is unchanged.
+        assert_eq!(expanded[0].content, "Chunk two: supporting evidence for the argument.");
+    }
+
+    #[test]
+    fn expand_with_adjacent_chunks_window_zero_bypasses() {
+        let (store, file_path, ids, _tmp) = seed_multi_chunk_file(&[
+            "Chunk zero: introduction.",
+            "Chunk one: main content.",
+            "Chunk two: conclusion.",
+        ]);
+
+        let result = SearchResult {
+            chunk_id: ids[1],
+            file_path: file_path.clone(),
+            start_line: 4,
+            end_line: 6,
+            content: "Chunk one: main content.".into(),
+            score: 0.9,
+            display_content: String::new(),
+            tags: vec![],
+            pinned_at: None,
+        };
+
+        let expanded = store
+            .expand_with_adjacent_chunks(vec![result], 0)
+            .unwrap();
+
+        // With window=0, display_content equals the matched content only.
+        assert_eq!(expanded[0].display_content, "Chunk one: main content.");
+        assert!(
+            !expanded[0].display_content.contains("Chunk zero"),
+            "window=0 should not fetch predecessors"
+        );
+        assert!(
+            !expanded[0].display_content.contains("Chunk two"),
+            "window=0 should not fetch successors"
+        );
+    }
+
+    #[test]
+    fn expand_with_adjacent_chunks_respects_file_boundaries() {
+        let (store, file_path, ids, _tmp) = seed_multi_chunk_file(&[
+            "Chunk zero: first chunk in the file.",
+            "Chunk one: second chunk.",
+            "Chunk two: third chunk.",
+        ]);
+
+        // Match the first chunk (index 0) — no predecessors to fetch.
+        let result = SearchResult {
+            chunk_id: ids[0],
+            file_path: file_path.clone(),
+            start_line: 1,
+            end_line: 3,
+            content: "Chunk zero: first chunk in the file.".into(),
+            score: 0.8,
+            display_content: String::new(),
+            tags: vec![],
+            pinned_at: None,
+        };
+
+        let expanded = store
+            .expand_with_adjacent_chunks(vec![result], 2)
+            .unwrap();
+        let display = &expanded[0].display_content;
+
+        // Should get chunks 0, 1, 2 — no error for missing chunk -1, -2.
+        assert!(display.contains("Chunk zero"));
+        assert!(display.contains("Chunk one"));
+        assert!(display.contains("Chunk two"));
+
+        // Now match the last chunk (index 2).
+        let result = SearchResult {
+            chunk_id: ids[2],
+            file_path,
+            start_line: 7,
+            end_line: 9,
+            content: "Chunk two: third chunk.".into(),
+            score: 0.8,
+            display_content: String::new(),
+            tags: vec![],
+            pinned_at: None,
+        };
+
+        let expanded = store
+            .expand_with_adjacent_chunks(vec![result], 2)
+            .unwrap();
+        let display = &expanded[0].display_content;
+
+        // Should get chunks 0, 1, 2 — no error for missing chunk 4.
+        assert!(display.contains("Chunk zero"));
+        assert!(display.contains("Chunk one"));
+        assert!(display.contains("Chunk two"));
+    }
+
+    #[test]
+    fn expand_with_adjacent_chunks_empty_input() {
+        let (store, _file_path, _ids, _tmp) = seed_multi_chunk_file(&["Only chunk."]);
+
+        let expanded = store
+            .expand_with_adjacent_chunks(vec![], 2)
+            .unwrap();
+        assert!(expanded.is_empty());
     }
 }

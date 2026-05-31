@@ -38,15 +38,32 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
 
     let unlistenNavigate: UnlistenFn | undefined;
+    let unlistenReindex: UnlistenFn | undefined;
+    let unlistenPairing: UnlistenFn | undefined;
+
     listen<'search' | 'rag-lab' | 'settings' | 'pinned' | 'devices'>('tray-navigate', (event) => {
       setStore('activeTab', event.payload);
     }).then((unlisten) => {
       unlistenNavigate = unlisten;
     });
 
+    listen<{ current: number; total: number; file_path: string }>('reindex://progress', (event) => {
+      setStore('reindexProgress', event.payload);
+    });
+
+    listen('reindex://complete', () => {
+      setStore('reindexProgress', null);
+    });
+
+    listen<{ step: string }>('spine://pairing/step', (event) => {
+      setStore('pairingStep', event.payload.step);
+    });
+
     onCleanup(() => {
       window.removeEventListener('keydown', onKeyDown);
       unlistenNavigate?.();
+      unlistenReindex?.();
+      unlistenPairing?.();
     });
   });
 

@@ -13,12 +13,13 @@ The system SHALL associate each paired device with a persistent Ed25519 identity
 - **AND** the system marks the device as `is_active = TRUE`
 
 ### Requirement: JWT authentication for all endpoints
-The system SHALL reject any request to protected endpoints that does not carry a valid Ed25519-signed JWT.
+The system SHALL reject any request to protected endpoints that does not carry a valid Ed25519-signed JWT. The JWT `sub` claim SHALL be the client-supplied `device_uuid` recorded as `devices.id` during pairing.
 
 #### Scenario: Valid JWT grants access
 - **WHEN** a device sends an HTTP request with an `Authorization: Bearer <jwt>` header
-- **AND** the JWT contains a `sub` claim matching a registered device ID
+- **AND** the JWT contains a `sub` claim matching a registered device ID (the UUID supplied by the client at pairing time)
 - **AND** the JWT contains `iat`, `exp` (≤ 24h from issuance), and `jti` claims
+- **AND** the JWT `iss` claim is `"syncmind-client"` and `aud` is `"syncmind-spine"`
 - **AND** the JWT signature verifies against the device's registered Ed25519 public key
 - **AND** the JWT has not expired and `jti` has not been used before
 - **THEN** the system authenticates the request and sets the request context `device_id`
@@ -38,6 +39,10 @@ The system SHALL reject any request to protected endpoints that does not carry a
 #### Scenario: Replayed JWT
 - **WHEN** a request presents a JWT whose `jti` has already been recorded in the token blacklist (Redis)
 - **THEN** the system returns HTTP 401 Unauthorized with error code `AUTH_REPLAYED`
+
+#### Scenario: sub does not match a registered device
+- **WHEN** a request presents a JWT whose `sub` claim does not match any row in the `devices` table
+- **THEN** the system returns HTTP 401 Unauthorized with error code `AUTH_INVALID`
 
 ### Requirement: WebSocket authentication
 The system SHALL authenticate WebSocket upgrade requests using the same JWT mechanism.

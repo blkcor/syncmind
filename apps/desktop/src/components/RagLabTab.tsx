@@ -10,6 +10,7 @@ export default function RagLabTab() {
   const [suggestionsOpen, setSuggestionsOpen] = createSignal(false);
   const [activeSuggestionIndex, setActiveSuggestionIndex] = createSignal(0);
   const [suppressBlurCommit, setSuppressBlurCommit] = createSignal(false);
+  const [copied, setCopied] = createSignal(false);
 
   const availableSuggestions = createMemo(() => {
     const draft = draftPattern().trim().toLowerCase();
@@ -24,6 +25,8 @@ export default function RagLabTab() {
         return pattern.toLowerCase().startsWith(draft) || ext.startsWith(draft);
       });
   });
+
+  const topKPresets = [1, 3, 5, 10, 15, 20];
 
   function closeSuggestions() {
     setSuggestionsOpen(false);
@@ -114,21 +117,55 @@ export default function RagLabTab() {
     }
   }
 
+  async function copyRawJson() {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(store.lastRawResponse, null, 2));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback: select the text
+      const pre = document.querySelector('.raw-json') as HTMLPreElement | null;
+      if (pre) {
+        const range = document.createRange();
+        range.selectNodeContents(pre);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      }
+    }
+  }
+
   return (
     <div class="tab-content rag-lab-tab">
       <h2>RAG Lab</h2>
 
       <div class="rag-section">
         <h3>Parameters</h3>
-        <label class="field">
+        <label class="field field-block">
           <span>Top K ({store.ragLab.topK})</span>
-          <input
-            type="range"
-            min={1}
-            max={20}
-            value={store.ragLab.topK}
-            onInput={(e) => setStore('ragLab', 'topK', parseInt(e.currentTarget.value, 10))}
-          />
+          <div class="slider-container">
+            <div class="slider-ticks">
+              <For each={topKPresets}>
+                {(val) => (
+                  <button
+                    class="slider-tick"
+                    classList={{ active: store.ragLab.topK === val }}
+                    onClick={() => setStore('ragLab', 'topK', val)}
+                  >
+                    {val}
+                  </button>
+                )}
+              </For>
+            </div>
+            <input
+              type="range"
+              class="styled-slider"
+              min={1}
+              max={20}
+              value={store.ragLab.topK}
+              onInput={(e) => setStore('ragLab', 'topK', parseInt(e.currentTarget.value, 10))}
+            />
+          </div>
         </label>
         <label class="field glob-field">
           <span>File Filters (glob)</span>
@@ -221,8 +258,8 @@ export default function RagLabTab() {
             <span class="telemetry-value">{store.results.length}</span>
           </div>
           <div class="telemetry-item">
-            <span class="telemetry-label">Model</span>
-            <span class="telemetry-value">{store.config.ollama_model}</span>
+            <span class="telemetry-label">Embedder</span>
+            <span class="telemetry-value">{store.indexingStatus.active_embedder || store.config.ollama_model}</span>
           </div>
         </div>
       </div>
@@ -234,7 +271,12 @@ export default function RagLabTab() {
           </button>
         </h3>
         <Show when={showRaw()}>
-          <pre class="raw-json">{JSON.stringify(store.lastRawResponse, null, 2)}</pre>
+          <div class="raw-json-wrapper">
+            <pre class="raw-json">{JSON.stringify(store.lastRawResponse, null, 2)}</pre>
+            <button class="copy-json-btn" onClick={copyRawJson}>
+              {copied() ? 'Copied!' : 'Copy'}
+            </button>
+          </div>
         </Show>
       </div>
     </div>

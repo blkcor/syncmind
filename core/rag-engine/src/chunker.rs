@@ -73,6 +73,7 @@ impl FallbackChunker {
                 start_line: start_line + i,
                 end_line,
                 content,
+                context_prefix: None,
             });
             chunk_idx += 1;
 
@@ -109,7 +110,91 @@ impl Chunker for FallbackChunker {
             return Vec::new();
         }
         let lines: Vec<&str> = text.lines().collect();
-        self.chunk_lines(&lines, 1)
+
+        // Paragraph-aware: split into paragraphs by blank lines first.
+        let mut paragraphs: Vec<(usize, Vec<&str>)> = Vec::new(); // (start_line, lines)
+        let mut cur_start: Option<usize> = None;
+        let mut cur_lines: Vec<&str> = Vec::new();
+
+        for (idx, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                if !cur_lines.is_empty() {
+                    paragraphs.push((cur_start.unwrap(), std::mem::take(&mut cur_lines)));
+                }
+                cur_start = None;
+            } else {
+                if cur_start.is_none() {
+                    cur_start = Some(idx + 1); // 1-indexed
+                }
+                cur_lines.push(*line);
+            }
+        }
+        if !cur_lines.is_empty() {
+            paragraphs.push((cur_start.unwrap(), cur_lines));
+        }
+
+        if paragraphs.is_empty() {
+            return Vec::new();
+        }
+
+        // Chunk paragraphs together up to chunk_size.
+        let mut chunks: Vec<Chunk> = Vec::new();
+        let mut chunk_idx = 0usize;
+        let mut para_idx = 0usize;
+
+        while para_idx < paragraphs.len() {
+            let (p_start, _) = paragraphs[para_idx];
+            let mut accum = String::new();
+            let start = para_idx;
+
+            while para_idx < paragraphs.len() {
+                let para_text = paragraphs[para_idx].1.join("\n");
+                let added = if accum.is_empty() {
+                    para_text.len()
+                } else {
+                    para_text.len() + 2 // "\n\n" separator
+                };
+
+                if !accum.is_empty() && accum.len() + added > self.chunk_size {
+                    break;
+                }
+
+                if !accum.is_empty() {
+                    accum.push_str("\n\n");
+                }
+                accum.push_str(&para_text);
+                para_idx += 1;
+
+                // Single oversized paragraph → fall back to line-based splitting
+                if accum.len() > self.chunk_size && para_idx == start + 1 {
+                    break;
+                }
+            }
+
+            if para_idx == start + 1 && accum.len() > self.chunk_size {
+                // Oversized single paragraph: line-based chunking
+                let (offset, ref para_lines) = paragraphs[start];
+                let line_refs: Vec<&str> = para_lines.to_vec();
+                for mut c in self.chunk_lines(&line_refs, offset) {
+                    c.chunk_index = chunk_idx;
+                    chunk_idx += 1;
+                    chunks.push(c);
+                }
+            } else {
+                let (end_offset, _) = paragraphs[para_idx.saturating_sub(1)];
+                let end_line = end_offset + paragraphs[para_idx.saturating_sub(1)].1.len().saturating_sub(1);
+                chunks.push(Chunk {
+                    chunk_index: chunk_idx,
+                    start_line: p_start,
+                    end_line,
+                    content: accum,
+                    context_prefix: None,
+                });
+                chunk_idx += 1;
+            }
+        }
+
+        chunks
     }
 }
 
@@ -256,8 +341,7 @@ impl CodeChunker {
             "go" => &[
                 "function_declaration",
                 "method_declaration",
-                "type_spec",
-                "struct_type",
+                "type_declaration",
             ],
             "java" => &[
                 "class_declaration",
@@ -369,6 +453,7 @@ impl CodeChunker {
         let types = Self::node_types_for_language(lang);
         let mut nodes: Vec<tree_sitter::Node> = Vec::new();
         Self::collect_nodes(root, types, &mut nodes);
+        nodes = Self::remove_contained_nodes(nodes);
 
         if nodes.is_empty() {
             // No top-level definitions found; fallback will be used by caller.
@@ -387,10 +472,35 @@ impl CodeChunker {
                 start_line,
                 end_line,
                 content,
+                context_prefix: None,
             });
         }
 
         Ok(chunks)
+    }
+
+    fn remove_contained_nodes<'a>(
+        nodes: Vec<tree_sitter::Node<'a>>,
+    ) -> Vec<tree_sitter::Node<'a>> {
+        let mut filtered = Vec::new();
+
+        'node: for (idx, node) in nodes.iter().enumerate() {
+            for (other_idx, other) in nodes.iter().enumerate() {
+                if idx == other_idx {
+                    continue;
+                }
+                if other.start_byte() <= node.start_byte()
+                    && other.end_byte() >= node.end_byte()
+                    && (other.start_byte(), other.end_byte()) != (node.start_byte(), node.end_byte())
+                {
+                    continue 'node;
+                }
+            }
+            filtered.push(*node);
+        }
+
+        filtered.sort_by_key(|node| node.start_byte());
+        filtered
     }
 
     fn collect_nodes<'a>(
@@ -439,9 +549,8 @@ impl CodeChunker {
             return Vec::new();
         }
 
-        let sig_prefix = signature.map(|s| format!("{}\n", s));
-        let prefix_len = sig_prefix.as_ref().map(|s| s.len()).unwrap_or(0);
-        let effective_size = chunk_size.saturating_sub(prefix_len);
+        let context_prefix = signature.map(|s| s.to_string());
+        let effective_size = chunk_size;
 
         // --- split into paragraphs separated by blank lines ---
         let mut paragraphs: Vec<(usize, Vec<&str>)> = Vec::new();
@@ -469,10 +578,8 @@ impl CodeChunker {
         if paragraphs.is_empty() {
             let fb = FallbackChunker::new(chunk_size, chunk_overlap);
             let mut chunks = fb.chunk_lines(&lines, start_line);
-            if let Some(ref prefix) = sig_prefix {
-                for c in &mut chunks {
-                    c.content.insert_str(0, prefix);
-                }
+            for c in &mut chunks {
+                c.context_prefix.clone_from(&context_prefix);
             }
             return chunks;
         }
@@ -519,9 +626,7 @@ impl CodeChunker {
                 let line_refs: Vec<&str> = para_lines.to_vec();
                 let mut sub = fb.chunk_lines(&line_refs, para_start_line);
                 for c in &mut sub {
-                    if let Some(ref prefix) = sig_prefix {
-                        c.content.insert_str(0, prefix);
-                    }
+                    c.context_prefix.clone_from(&context_prefix);
                     c.chunk_index = chunk_idx;
                     chunk_idx += 1;
                 }
@@ -538,17 +643,12 @@ impl CodeChunker {
                 para_start_offset
             };
 
-            let final_content = if let Some(ref prefix) = sig_prefix {
-                format!("{}{}", prefix, accum)
-            } else {
-                accum
-            };
-
             all_chunks.push(Chunk {
                 chunk_index: chunk_idx,
                 start_line: start_line + para_start_offset,
                 end_line: start_line + end_offset,
-                content: final_content,
+                content: accum,
+                context_prefix: context_prefix.clone(),
             });
             chunk_idx += 1;
 
@@ -620,6 +720,346 @@ impl Chunker for CodeChunker {
         }
 
         all_chunks
+    }
+}
+
+// ── CssChunker ───────────────────────────────────────────────────────────────
+
+pub struct CssChunker {
+    chunk_size: usize,
+    chunk_overlap: usize,
+}
+
+impl CssChunker {
+    pub fn new(chunk_size: usize, chunk_overlap: usize) -> Self {
+        Self {
+            chunk_size,
+            chunk_overlap,
+        }
+    }
+
+    /// Extract text before the first `{` as the selector.
+    fn extract_selector(rule: &str) -> String {
+        let mut selector = String::new();
+        for ch in rule.chars() {
+            if ch == '{' {
+                break;
+            }
+            selector.push(ch);
+        }
+        selector.trim().to_string()
+    }
+
+    fn update_brace_depth(line: &str, depth: &mut i32) {
+        for ch in line.chars() {
+            match ch {
+                '{' => *depth += 1,
+                '}' => *depth -= 1,
+                _ => {}
+            }
+        }
+    }
+
+    fn split_rule_units<'a>(lines: &[&'a str]) -> Vec<(usize, Vec<&'a str>)> {
+        let mut units = Vec::new();
+        let mut depth = 0i32;
+        let mut wrapper_started = false;
+        let mut current_start = 0usize;
+        let mut current: Vec<&'a str> = Vec::new();
+        let mut current_has_nested_block = false;
+
+        for (idx, line) in lines.iter().enumerate() {
+            if !wrapper_started {
+                Self::update_brace_depth(line, &mut depth);
+                if depth > 0 {
+                    wrapper_started = true;
+                }
+                continue;
+            }
+
+            let before_depth = depth;
+            let trimmed = line.trim();
+            if before_depth == 1 && trimmed == "}" {
+                Self::update_brace_depth(line, &mut depth);
+                continue;
+            }
+            if current.is_empty() && trimmed.is_empty() {
+                continue;
+            }
+
+            if current.is_empty() {
+                current_start = idx;
+            }
+            current.push(*line);
+
+            Self::update_brace_depth(line, &mut depth);
+            if before_depth >= 1 && depth > 1 {
+                current_has_nested_block = true;
+            }
+
+            let completed_nested_block = current_has_nested_block && depth == 1;
+            let completed_declaration = !current_has_nested_block
+                && depth == 1
+                && trimmed.ends_with(';');
+            if completed_nested_block || completed_declaration {
+                units.push((current_start, std::mem::take(&mut current)));
+                current_has_nested_block = false;
+            }
+        }
+
+        if !current.is_empty() {
+            units.push((current_start, current));
+        }
+
+        units
+    }
+
+    fn chunks_from_rule_units(
+        &self,
+        units: Vec<(usize, Vec<&str>)>,
+        start_line: usize,
+        context: &str,
+        effective_size: usize,
+        chunk_index: &mut usize,
+    ) -> Vec<Chunk> {
+        let mut chunks = Vec::new();
+        let mut accum = String::new();
+        let mut accum_start = 0usize;
+        let mut accum_end = 0usize;
+
+        for (unit_start, unit_lines) in units {
+            let unit_text = unit_lines.join("\n");
+            let unit_end = unit_start + unit_lines.len().saturating_sub(1);
+            let candidate_len = if accum.is_empty() {
+                unit_text.len()
+            } else {
+                accum.len() + 1 + unit_text.len()
+            };
+
+            if !accum.is_empty() && candidate_len > effective_size {
+                chunks.push(Chunk {
+                    chunk_index: *chunk_index,
+                    start_line: start_line + accum_start,
+                    end_line: start_line + accum_end,
+                    content: format!("{}{}", context, accum),
+                    context_prefix: None,
+                });
+                *chunk_index += 1;
+                accum.clear();
+            }
+
+            if accum.is_empty() {
+                accum_start = unit_start;
+            } else {
+                accum.push('\n');
+            }
+            accum.push_str(&unit_text);
+            accum_end = unit_end;
+        }
+
+        if !accum.trim().is_empty() {
+            chunks.push(Chunk {
+                chunk_index: *chunk_index,
+                start_line: start_line + accum_start,
+                end_line: start_line + accum_end,
+                content: format!("{}{}", context, accum),
+                context_prefix: None,
+            });
+            *chunk_index += 1;
+        }
+
+        chunks
+    }
+
+    /// Split a single oversized rule at `;` boundaries, prefixing each
+    /// sub-chunk with a CSS comment containing the selector context.
+    fn sub_chunk_rule(
+        &self,
+        rule_text: &str,
+        start_line: usize,
+        selector: &str,
+        chunk_index: &mut usize,
+    ) -> Vec<Chunk> {
+        let lines: Vec<&str> = rule_text.lines().collect();
+        if lines.is_empty() {
+            return Vec::new();
+        }
+
+        let fb = FallbackChunker::new(self.chunk_size, self.chunk_overlap);
+        let context = format!("/* context: {} */\n", selector);
+        let context_len = context.len();
+        let effective_size = self.chunk_size.saturating_sub(context_len);
+
+        let units = Self::split_rule_units(&lines);
+        if units.len() > 1 {
+            let chunks = self.chunks_from_rule_units(
+                units,
+                start_line,
+                &context,
+                effective_size,
+                chunk_index,
+            );
+            if !chunks.is_empty() {
+                return chunks;
+            }
+        }
+
+        // Build declarations and chunk them respecting effective_size
+        let mut chunks = Vec::new();
+        let mut accum = String::with_capacity(effective_size);
+        let mut accum_start = 0usize;
+
+        for (idx, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            // Skip the opening brace and closing brace lines if they're alone
+            if trimmed == "{" {
+                continue;
+            }
+
+            let candidate_len = if accum.is_empty() {
+                trimmed.len()
+            } else {
+                accum.len() + 1 + trimmed.len()
+            };
+
+            if !accum.is_empty() && candidate_len > effective_size {
+                // Emit chunk
+                chunks.push(Chunk {
+                    chunk_index: *chunk_index,
+                    start_line: start_line + accum_start,
+                    end_line: start_line + idx.saturating_sub(1),
+                    content: format!("{}{}", context, accum),
+                    context_prefix: None,
+                });
+                *chunk_index += 1;
+                accum.clear();
+                accum_start = idx;
+            }
+
+            if !accum.is_empty() {
+                accum.push('\n');
+            }
+            accum.push_str(line);
+        }
+
+        // Flush remainder
+        if !accum.trim().is_empty() && accum.trim() != "}" {
+            chunks.push(Chunk {
+                chunk_index: *chunk_index,
+                start_line: start_line + accum_start,
+                end_line: start_line + lines.len().saturating_sub(1),
+                content: format!("{}{}", context, accum),
+                context_prefix: None,
+            });
+            *chunk_index += 1;
+        }
+
+        // If sub_chunk produced nothing, use the fallback
+        if chunks.is_empty() {
+            let fb_chunks = fb.chunk_lines(&lines, start_line);
+            for mut c in fb_chunks {
+                c.chunk_index = *chunk_index;
+                c.context_prefix = Some(format!("/* context: {} */", selector));
+                *chunk_index += 1;
+                chunks.push(c);
+            }
+        }
+
+        chunks
+    }
+
+    /// Split CSS text by rule boundaries (`}`) with brace-depth tracking for
+    /// nested rules (SCSS/Less). Each top-level rule becomes one or more chunks.
+    pub fn chunk_css(&self, text: &str) -> Vec<Chunk> {
+        if text.trim().is_empty() {
+            return Vec::new();
+        }
+
+        // Split into rules by tracking brace depth
+        let mut rules: Vec<(usize, String)> = Vec::new(); // (start_line, rule_text)
+        let lines: Vec<&str> = text.lines().collect();
+        let mut depth: i32 = 0;
+        let mut rule_start: Option<usize> = None;
+        let mut current_rule = String::new();
+
+        for (idx, line) in lines.iter().enumerate() {
+            if rule_start.is_none() && !line.trim().is_empty() {
+                rule_start = Some(idx + 1); // 1-indexed
+            }
+
+            if let Some(_start) = rule_start {
+                if !current_rule.is_empty() {
+                    current_rule.push('\n');
+                }
+                current_rule.push_str(line);
+
+                // Track brace depth
+                for ch in line.chars() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                // Top-level rule ended
+                                rules.push((rule_start.unwrap(), std::mem::take(&mut current_rule)));
+                                rule_start = None;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Top-level at-rules such as @charset and @import do not open
+                // a block, but they are meaningful standalone stylesheet units.
+                if depth == 0 && line.trim_end().ends_with(';') {
+                    rules.push((rule_start.unwrap(), std::mem::take(&mut current_rule)));
+                    rule_start = None;
+                }
+            }
+        }
+
+        // Any leftover (unclosed rule) is treated as a complete rule
+        if !current_rule.trim().is_empty() {
+            if let Some(start) = rule_start {
+                rules.push((start, current_rule));
+            }
+        }
+
+        let mut chunks = Vec::new();
+        let mut chunk_idx = 0usize;
+
+        for (rule_start_line, rule_text) in rules {
+            let rule_line_count = rule_text.lines().count();
+            let selector = Self::extract_selector(&rule_text);
+
+            if rule_text.len() <= self.chunk_size {
+                chunks.push(Chunk {
+                    chunk_index: chunk_idx,
+                    start_line: rule_start_line,
+                    end_line: rule_start_line + rule_line_count.saturating_sub(1),
+                    content: rule_text,
+                    context_prefix: None,
+                });
+                chunk_idx += 1;
+            } else {
+                // Oversized rule: sub-chunk at declaration boundaries
+                let mut sub = self.sub_chunk_rule(
+                    &rule_text,
+                    rule_start_line,
+                    &selector,
+                    &mut chunk_idx,
+                );
+                chunks.append(&mut sub);
+            }
+        }
+
+        chunks
+    }
+}
+
+impl Chunker for CssChunker {
+    fn chunk(&self, text: &str, _path: &Path) -> Vec<Chunk> {
+        self.chunk_css(text)
     }
 }
 
@@ -808,6 +1248,31 @@ func Bar(x string) string {
             assert_eq!(c.chunk_index, i);
             assert!(c.start_line >= 1);
         }
+    }
+
+    #[test]
+    fn test_code_chunker_go_type_spec_keeps_type_keyword() {
+        let code = r#"
+package main
+
+type rect struct {
+	width, height float64
+}
+
+func main() {}
+"#;
+        let chunker = CodeChunker::new(1_000, 0);
+        let chunks = chunker.chunk(code, Path::new("main.go"));
+
+        let type_chunk = chunks
+            .iter()
+            .find(|chunk| chunk.content.contains("rect struct"))
+            .expect("expected rect type chunk");
+        assert!(
+            type_chunk.content.trim_start().starts_with("type rect struct"),
+            "Go type chunk should include the full type definition, got: {}",
+            type_chunk.content
+        );
     }
 
     #[test]
@@ -1079,16 +1544,24 @@ fun outside(): Int {
             "expected semantic split, got {} chunks",
             chunks.len()
         );
-        // Every sub-chunk of BigFunc should include its signature.
+        // Every sub-chunk of BigFunc should carry the signature in context_prefix.
+        // Content stays pristine: the first sub-chunk naturally includes the
+        // signature line, later sub-chunks do NOT have it prepended.
+        let mut saw_signature_in_content = false;
         for c in &chunks {
-            if c.content.contains("BigFunc") || c.content.contains("section") {
-                assert!(
-                    c.content.contains("func BigFunc()"),
-                    "sub-chunk should preserve signature: {}",
-                    c.content
+            if c.content.contains("section") {
+                assert_eq!(
+                    c.context_prefix.as_deref(),
+                    Some("func BigFunc() {"),
+                    "sub-chunk should preserve signature in context_prefix"
                 );
+                if c.content.contains("func BigFunc()") {
+                    saw_signature_in_content = true;
+                }
             }
         }
+        // At least the first sub-chunk naturally contains the signature line.
+        assert!(saw_signature_in_content);
     }
 
     #[test]
@@ -1104,6 +1577,148 @@ fun outside(): Int {
         for c in &chunks {
             assert!(c.start_line >= 1, "start_line should be >= 1");
             assert!(c.end_line >= c.start_line, "end_line >= start_line");
+        }
+    }
+
+    // ── CssChunker tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_css_chunker_rule_boundaries() {
+        let css = ".card { color: red; }\n.button { background: blue; }\n.link { text-decoration: none; }";
+        let chunker = CssChunker::new(500, 10);
+        let chunks = chunker.chunk(css, Path::new("test.css"));
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks[0].content.contains(".card"));
+        assert!(chunks[1].content.contains(".button"));
+        assert!(chunks[2].content.contains(".link"));
+    }
+
+    #[test]
+    fn test_css_chunker_empty_input() {
+        let chunker = CssChunker::new(500, 10);
+        let chunks = chunker.chunk("   \n  ", Path::new("empty.css"));
+        assert_eq!(chunks.len(), 0);
+    }
+
+    #[test]
+    fn test_css_chunker_scss_nested_rule() {
+        let scss = ".card {\n  color: red;\n  &:hover {\n    color: blue;\n  }\n}\n";
+        let chunker = CssChunker::new(500, 10);
+        let chunks = chunker.chunk(scss, Path::new("test.scss"));
+        // Nested rule should stay inside the parent rule, so we get 1 chunk.
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].content.contains("&:hover"));
+        assert!(chunks[0].content.contains(".card"));
+    }
+
+    #[test]
+    fn test_css_chunker_oversized_rule_sub_chunking() {
+        let mut css = String::from(".big-rule {\n");
+        for i in 0..50 {
+            css.push_str(&format!("  property{}: value{};\n", i, i));
+        }
+        css.push_str("}\n");
+        let chunker = CssChunker::new(100, 10);
+        let chunks = chunker.chunk(&css, Path::new("big.css"));
+        assert!(
+            chunks.len() >= 2,
+            "oversized rule should be sub-chunked, got {} chunks",
+            chunks.len()
+        );
+        // Each sub-chunk should contain the selector context.
+        for c in &chunks {
+            assert!(
+                c.content.contains(".big-rule"),
+                "sub-chunk should have selector context: {}",
+                c.content
+            );
+        }
+    }
+
+    #[test]
+    fn test_css_chunker_preserves_top_level_imports() {
+        let css = "@charset \"UTF-8\";\n\n@import './variable.scss';\n\n.card { color: red; }\n";
+        let chunker = CssChunker::new(500, 10);
+        let chunks = chunker.chunk(css, Path::new("animate.scss"));
+
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.content.contains("@import './variable.scss';")),
+            "top-level @import should be preserved as searchable stylesheet content"
+        );
+    }
+
+    #[test]
+    fn test_css_chunker_keyframes_sub_chunks_keep_blocks_complete() {
+        let css = r#"@keyframes bounce {
+    from,
+    20%,
+    53%,
+    80%,
+    to {
+        -webkit-animation-timing-function: cubic-bezier(0.215, 0.61, 0.355, 1);
+        animation-timing-function: cubic-bezier(0.215, 0.61, 0.355, 1);
+        -webkit-transform: translate3d(0, 0, 0);
+        transform: translate3d(0, 0, 0);
+    }
+
+    40%,
+    43% {
+        -webkit-animation-timing-function: cubic-bezier(0.755, 0.05, 0.855, 0.06);
+        animation-timing-function: cubic-bezier(0.755, 0.05, 0.855, 0.06);
+        -webkit-transform: translate3d(0, -30px, 0);
+        transform: translate3d(0, -30px, 0);
+    }
+}"#;
+        let chunker = CssChunker::new(220, 10);
+        let chunks = chunker.chunk(css, Path::new("animate.scss"));
+
+        assert!(
+            chunks.len() >= 2,
+            "oversized keyframes should split into complete step chunks"
+        );
+        assert!(
+            chunks[0].content.contains("from,")
+                && chunks[0].content.contains("to {")
+                && chunks[0].content.contains("transform: translate3d(0, 0, 0);")
+                && chunks[0].content.contains("}"),
+            "first keyframe step should remain complete: {}",
+            chunks[0].content
+        );
+        for chunk in chunks {
+            let balance: i32 = chunk
+                .content
+                .chars()
+                .map(|ch| match ch {
+                    '{' => 1,
+                    '}' => -1,
+                    _ => 0,
+                })
+                .sum();
+            assert_eq!(balance, 0, "CSS sub-chunk braces should balance: {}", chunk.content);
+        }
+    }
+
+    #[test]
+    fn test_css_chunker_line_numbers() {
+        let css = "/* comment */\n.card { color: red; }\n.button { background: blue; }";
+        let chunker = CssChunker::new(500, 10);
+        let chunks = chunker.chunk(css, Path::new("test.css"));
+        assert!(!chunks.is_empty());
+        for c in &chunks {
+            assert!(c.start_line >= 1, "start_line should be >= 1");
+            assert!(c.end_line >= c.start_line, "end_line >= start_line");
+        }
+    }
+
+    #[test]
+    fn test_css_chunker_sequential_indices() {
+        let css = ".a { x: 1; }\n.b { y: 2; }\n.c { z: 3; }";
+        let chunker = CssChunker::new(500, 10);
+        let chunks = chunker.chunk(css, Path::new("test.css"));
+        for (i, c) in chunks.iter().enumerate() {
+            assert_eq!(c.chunk_index, i);
         }
     }
 }

@@ -107,9 +107,8 @@ async fn test_tools_call_search_knowledge_empty() {
 
     let content = result["content"].as_array().unwrap();
     assert_eq!(content.len(), 1);
-    let text = &content[0]["text"];
-    let results: Vec<syncmind_storage::SearchResult> = serde_json::from_str(text.as_str().unwrap()).unwrap();
-    assert!(results.is_empty());
+    let text = content[0]["text"].as_str().unwrap();
+    assert!(text.is_empty());
 }
 
 #[tokio::test]
@@ -129,6 +128,7 @@ async fn test_tools_call_search_knowledge_with_results() {
         content: "fn main() {}".to_string(),
         start_line: 1,
         end_line: 1,
+        context_prefix: None,
     }];
     let embeddings = vec![vec![0.0; 384]];
     store.upsert_file(&meta, &chunks, &embeddings).unwrap();
@@ -157,9 +157,8 @@ async fn test_tools_call_search_knowledge_with_results() {
 
     let content = result["content"].as_array().unwrap();
     let text = content[0]["text"].as_str().unwrap();
-    let results: Vec<syncmind_storage::SearchResult> = serde_json::from_str(text).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].content, "fn main() {}");
+    assert!(text.contains("fn main() {}"), "expected result text to contain content, got: {text}");
+    assert!(text.contains("/tmp/test.rs"), "expected result text to contain file path, got: {text}");
 }
 
 #[tokio::test]

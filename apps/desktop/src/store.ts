@@ -25,6 +25,10 @@ export interface AppState {
   pinnedIds: Set<number>;
   // Cached list view for the Pinned tab; refreshed on tab open and after toggles.
   pinnedList: SearchResult[];
+  // Reindex progress: null when idle, populated during rebuild.
+  reindexProgress: { current: number; total: number; file_path: string } | null;
+  // Pairing step progress: null when idle.
+  pairingStep: string | null;
 }
 
 const defaultConfig: Config = {
@@ -36,6 +40,10 @@ const defaultConfig: Config = {
   embedding_dim: 1024,
   chunk_size: 512,
   chunk_overlap: 64,
+  active_embedder: 'unknown',
+  active_model: 'bge-m3',
+  hybrid_search_enabled: true,
+  reranker_enabled: false,
 };
 
 const defaultIndexingStatus: IndexingStatus = {
@@ -43,6 +51,8 @@ const defaultIndexingStatus: IndexingStatus = {
   chunk_count: 0,
   last_updated: null,
   recent_errors: [],
+  active_embedder: 'unknown',
+  active_model: 'bge-m3',
 };
 
 export const [store, setStore] = createStore<AppState>({
@@ -62,4 +72,6 @@ export const [store, setStore] = createStore<AppState>({
   lastRawResponse: null,
   pinnedIds: new Set<number>(),
   pinnedList: [],
+  reindexProgress: null,
+  pairingStep: null,
 });

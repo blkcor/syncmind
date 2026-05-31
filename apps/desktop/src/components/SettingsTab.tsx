@@ -9,6 +9,7 @@ export default function SettingsTab() {
   const [rebuildError, setRebuildError] = createSignal('');
   const [autoLaunch, setAutoLaunch] = createSignal(false);
   const [modelCustom, setModelCustom] = createSignal(false);
+  const [saved, setSaved] = createSignal(false);
   let pollTimer: number | null = null;
 
   async function loadConfig() {
@@ -66,10 +67,14 @@ export default function SettingsTab() {
       ollama_model: store.config.ollama_model,
       embedding_dim: store.config.embedding_dim,
       registered_files: store.config.registered_files,
+      hybrid_search_enabled: store.config.hybrid_search_enabled,
+      reranker_enabled: store.config.reranker_enabled,
     };
     try {
       const updated = await invoke<typeof store.config>('update_config', { patch });
       setStore('config', updated);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
     } catch (e) {
       console.error('Failed to update config', e);
     }
@@ -125,9 +130,47 @@ export default function SettingsTab() {
     }
   }
 
+  const actualEmbedder = () => store.config.active_embedder || 'unknown';
+  const actualModel = () => store.config.active_model || store.config.ollama_model;
+  const isOnnx = () => actualEmbedder() === 'onnx';
+  const isOllama = () => actualEmbedder() === 'ollama';
+
   return (
     <div class="tab-content settings-tab">
       <h2>Settings</h2>
+
+      <div class="settings-section">
+        <h3>Embedder Status</h3>
+        <div class="embedder-status-card">
+          <div class="embedder-status-badge">
+            <span
+              class="embedder-dot"
+              classList={{
+                'dot-ollama': isOllama(),
+                'dot-onnx': isOnnx(),
+                'dot-unknown': !isOllama() && !isOnnx(),
+              }}
+            />
+            <span class="embedder-type">
+              <Show when={isOllama()} fallback={<Show when={isOnnx()} fallback="Unavailable">ONNX (fallback)</Show>}>
+                Ollama
+              </Show>
+            </span>
+          </div>
+          <span class="embedder-model">{actualModel()}</span>
+        </div>
+        <Show when={isOnnx()}>
+          <p class="embedder-note">
+            Ollama is not reachable. Using built-in ONNX model ({actualModel()}) as fallback.
+            The model and URL fields below will take effect once Ollama becomes available.
+          </p>
+        </Show>
+        <Show when={!isOllama() && !isOnnx()}>
+          <p class="embedder-note embedder-note-warn">
+            No embedder available. Configure Ollama below or switch to bge-small for ONNX fallback.
+          </p>
+        </Show>
+      </div>
 
       <div class="settings-section">
         <h3>Configuration</h3>
@@ -137,6 +180,7 @@ export default function SettingsTab() {
             type="text"
             value={store.config.ollama_url}
             onInput={(e) => setStore('config', 'ollama_url', e.currentTarget.value)}
+            classList={{ 'field-dimmed': isOnnx() }}
           />
         </label>
         <Show when={urlError()}>
@@ -161,6 +205,7 @@ export default function SettingsTab() {
             }
           >
             <select
+              class="styled-select"
               value={store.config.ollama_model}
               onChange={(e) => {
                 const val = e.currentTarget.value;
@@ -177,7 +222,7 @@ export default function SettingsTab() {
               }}
             >
               <option value="bge-m3">bge-m3</option>
-              <option value="bge-small">bge-small</option>
+              <option value="bge-small">bge-small (ONNX fallback)</option>
               <option value="custom">Custom...</option>
             </select>
           </Show>
@@ -186,8 +231,26 @@ export default function SettingsTab() {
         <div class="field read-only-field">
           <span>Transport</span>
           <span class="read-only-value">{store.config.mcp_transport}</span>
-          <span class="field-note">Managed by CLI daemon</span>
+          <span class="field-note">MCP server runs in the standalone CLI daemon, not in the desktop app</span>
         </div>
+
+        <h3>Search</h3>
+        <label class="field checkbox-field">
+          <input
+            type="checkbox"
+            checked={store.config.hybrid_search_enabled}
+            onChange={() => setStore('config', 'hybrid_search_enabled', !store.config.hybrid_search_enabled)}
+          />
+          <span>Hybrid search (vector + keyword)</span>
+        </label>
+        <label class="field checkbox-field">
+          <input
+            type="checkbox"
+            checked={store.config.reranker_enabled}
+            onChange={() => setStore('config', 'reranker_enabled', !store.config.reranker_enabled)}
+          />
+          <span>Cross-encoder reranker</span>
+        </label>
 
         <button class="action-btn save-btn" onClick={saveConfig}>
           Save
@@ -247,6 +310,25 @@ export default function SettingsTab() {
           </div>
         </Show>
 
+        <Show when={store.reindexProgress}>
+          <div class="reindex-progress">
+            <div class="reindex-progress-bar">
+              <div
+                class="reindex-progress-fill"
+                style={{
+                  width: `${store.reindexProgress!.total > 0 ? (store.reindexProgress!.current / store.reindexProgress!.total) * 100 : 0}%`,
+                }}
+              />
+            </div>
+            <span class="reindex-progress-text">
+              {store.reindexProgress!.current} / {store.reindexProgress!.total}
+            </span>
+            <span class="reindex-progress-file" title={store.reindexProgress!.file_path}>
+              {store.reindexProgress!.file_path}
+            </span>
+          </div>
+        </Show>
+
         <button class="action-btn danger-btn" onClick={rebuildAll}>
           Rebuild All
         </button>
@@ -266,6 +348,10 @@ export default function SettingsTab() {
           <span>Launch at login</span>
         </label>
       </div>
+
+      <Show when={saved()}>
+        <div class="toast">Settings saved</div>
+      </Show>
     </div>
   );
 }

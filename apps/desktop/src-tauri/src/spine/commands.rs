@@ -11,7 +11,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as _B64URL_UNUSED;
 use base64::Engine as _;
 use ed25519_dalek::VerifyingKey as _VerifyingKeyUnused;
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tracing::{info, warn};
 
 use crate::spine::bundle::{self, BundleEnvelope};
@@ -339,6 +339,7 @@ pub async fn spine_cancel_pairing(state: State<'_, AppState>) -> Result<(), Stri
 #[tauri::command]
 pub async fn spine_complete_pairing_short_code(
     short_code: String,
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CompletePairingResult, String> {
     let runtime = Arc::clone(&state.spine);
@@ -356,11 +357,38 @@ pub async fn spine_complete_pairing_short_code(
 
     runtime.cancel_pairing().await;
     let client = runtime.require_client().await.map_err(String::from)?;
-    let completion =
-        pairing::complete_with_short_code(&client, &runtime.identity, &short_code).await?;
+
+    // Build the progress callback that emits frontend events.
+    let ah = app_handle.clone();
+    let on_progress: Option<pairing::PairingProgressCallback> = Some(Arc::new(move |step| {
+        let _ = ah.emit("spine://pairing/step", serde_json::json!({ "step": step }));
+    }));
+
+    let completion = pairing::complete_with_short_code(
+        &client,
+        &runtime.identity,
+        &short_code,
+        on_progress,
+    )
+    .await?;
+
+    {
+        let _ = app_handle.emit(
+            "spine://pairing/step",
+            serde_json::json!({ "step": "updating_config" }),
+        );
+    }
+
     persist_pairing_completion(&state, &completion)
         .await
         .map_err(|e| e.to_string())?;
+
+    {
+        let _ = app_handle.emit(
+            "spine://pairing/step",
+            serde_json::json!({ "step": "completed" }),
+        );
+    }
 
     let cfg = state.config.lock().expect("config mutex poisoned").clone();
     Ok(CompletePairingResult {

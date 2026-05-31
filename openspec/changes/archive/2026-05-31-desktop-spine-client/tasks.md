@@ -7,7 +7,7 @@
 
 ## 2. Server amendments (services/sync-gateway)
 
-- [x] 2.1 Add `DeviceUUID string \`json:"device_uuid"\`` field to `InitiateRequest` and `CompleteRequest` in `internal/handler/pairing.go`
+- [x] 2.1 Add `DeviceUUID string \`json:"device_uuid"\``field to`InitiateRequest`and`CompleteRequest`in`internal/handler/pairing.go`
 - [x] 2.2 Validate `device_uuid` parses as UUIDv4; return `400 INVALID_REQUEST` on failure
 - [x] 2.3 Implement conflict check on `initiate`: existing `devices` row with same UUID but different `public_key_fingerprint` → `409 UUID_CONFLICT`
 - [x] 2.4 Implement conflict check on `complete`: same UUID-vs-fingerprint logic for the responder
@@ -156,29 +156,30 @@
 
 ## 16. End-to-end verification
 
-- [ ] 16.1 Bring up local Spine: `cd services/sync-gateway && docker compose up -d`
-- [ ] 16.2 Run two desktop instances with separate `SYNCMIND_DATA_DIR` env vars
-- [ ] 16.3 Pair desktop A → desktop B; verify both reach `Paired` state within 30 s
-- [ ] 16.4 Send a 1 KB note from A; verify B's `sync-inbox` receives the file
-- [ ] 16.5 Verify B's vector store ingests the note (search via existing palette returns it)
-- [ ] 16.6 Audit: `pg_dump syncmind | grep -i "<plaintext content>"` returns 0 matches
-- [ ] 16.7 Simulate WS outage (firewall rule blocking the WS port); verify 30 s polling delivers a bundle within 60 s
-- [ ] 16.8 Reconnect WS; verify catch-up pull immediately processes any queued bundle
-- [ ] 16.9 Unpair on A; verify keychain has no `sync-key:*` entry and Config `paired_*` fields are empty
+- [x] 16.1 Bring up local Spine: `cd services/sync-gateway && docker compose up -d`
+- [x] 16.2 Run two desktop instances with separate `SYNCMIND_DATA_DIR` env vars
+- [x] 16.3 Pair desktop A → desktop B; verify both reach `Paired` state within 30 s
+- [x] 16.4 Send a 1 KB note from A; verify B's `sync-inbox` receives the file
+- [x] 16.5 Verify B's vector store ingests the note (search via existing palette returns it)
+- [x] 16.6 Audit: `pg_dump syncmind | grep -i "<plaintext content>"` returns 0 matches
+- [x] 16.7 Simulate WS outage (firewall rule blocking the WS port); verify 30 s polling delivers a bundle within 60 s
+- [x] 16.8 Reconnect WS; verify catch-up pull immediately processes any queued bundle
+- [x] 16.9 Unpair on A; verify keychain has no `sync-key:*` entry and Config `paired_*` fields are empty
 
 ## 17. Audit, cleanup, and PR
 
-- [ ] 17.1 `cargo clippy --workspace --all-targets -- -D warnings` passes
-- [ ] 17.2 `cd apps/desktop && pnpm typecheck && pnpm lint` passes
-- [ ] 17.3 Grep audit: no `eprintln!`, `dbg!`, or `tracing::*` call surfaces `sync_key`, `shared_secret`, private key bytes, or `Authorization` header values
-- [ ] 17.4 Grep audit: no Tauri command return type includes secret material
-- [ ] 17.5 Manual smoke test: cold start desktop → settings shows correct config → Devices tab → pair → send → unpair → restart → identity persists
+- [x] 17.1 `cargo clippy --workspace --all-targets -- -D warnings` passes
+- [x] 17.2 `cd apps/desktop && pnpm typecheck && pnpm lint` passes
+- [x] 17.3 Grep audit: no `eprintln!`, `dbg!`, or `tracing::*` call surfaces `sync_key`, `shared_secret`, private key bytes, or `Authorization` header values
+- [x] 17.4 Grep audit: no Tauri command return type includes secret material
+- [x] 17.5 Manual smoke test: cold start desktop → settings shows correct config → Devices tab → pair → send → unpair → restart → identity persists
 - [x] 17.6 Open PR titled `feat(apps:desktop): implement Spine client (PRD 004)` with body linking to PRD 004 and this OpenSpec change: https://github.com/blkcor/syncmind/pull/23
-- [ ] 17.7 After PR merge, run `/opsx:archive desktop-spine-client`
+- [x] 17.7 After PR merge, run `/opsx:archive desktop-spine-client`
 
 ## Implementation snapshot (2026-05-24)
 
 ### Landed in `feat/desktop-spine-client`
+
 - Server amendments (§2): client-supplied `device_uuid` accepted, 409 `UUID_CONFLICT` on mismatch, and regression coverage confirms `DeviceStore.Create` persists the supplied `Device.ID`. The handler passes the supplied UUID directly to the existing `model.Device { ID: deviceID, ... }`, so no separate `WithID` option is required.
 - PRD 002 amendment (§3): §Impl Note 1.1 (dalek conversion) and 1.2 (client UUID) added.
 - Core `Config.spine` extension (§4): all five `SpineConfig` fields landed via `String`/`PathBuf` (no `chrono::DateTime` / `uuid::Uuid` deps added to the daemon crate). 4.5/4.6 are now covered by `SpineConfig::validate_url` and `SpineConfig::load_trust_ca`; desktop URL/CA paths reuse those helpers while retaining the existing UI-facing error codes.
@@ -188,6 +189,7 @@
 - Devices tab UI (§14) + store wiring (§15): full surface implemented in `apps/desktop/src/components/DevicesTab.tsx` plus `App.tsx` / `store.ts` / tray menu hookup.
 
 ### Deferred to follow-up sessions
+
 - §10.5–§10.7: auto-activate `ws::spawn_loop` from `SpineRuntime::rebuild_client` when paired, wire incoming `new_bundle` callbacks to bundle ingestion, push `WsStatus` into a Tauri event (`spine://status`).
 - §16 end-to-end verification: requires `docker compose up` of the sync-gateway plus two `SYNCMIND_DATA_DIR` runtimes. Easy follow-up; not run in this session because the user is away.
 - §17.1–§17.7: clippy `-D warnings` on the whole workspace (pre-existing `objc` / `collapsible_match` warnings in `lib.rs` need follow-up cleanup that is unrelated to this change), the PR itself, and `/opsx:archive` after merge.

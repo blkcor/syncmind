@@ -5,6 +5,8 @@ export interface SearchResult {
   end_line: number;
   content: string;
   score: number;
+  tags: string[];
+  pinned_at: number | null;
 }
 
 export interface Config {
@@ -16,6 +18,10 @@ export interface Config {
   embedding_dim: number;
   chunk_size: number;
   chunk_overlap: number;
+  active_embedder: string;
+  active_model: string;
+  hybrid_search_enabled: boolean;
+  reranker_enabled: boolean;
 }
 
 export interface IndexingStatus {
@@ -23,6 +29,8 @@ export interface IndexingStatus {
   chunk_count: number;
   last_updated: string | null;
   recent_errors: IndexingError[];
+  active_embedder: string;
+  active_model: string;
 }
 
 export interface IndexingError {
@@ -36,6 +44,8 @@ export interface ConfigPatch {
   ollama_model?: string;
   embedding_dim?: number;
   registered_files?: string[];
+  hybrid_search_enabled?: boolean;
+  reranker_enabled?: boolean;
 }
 
 // A glob pattern accepted by `validate_file_filter` and

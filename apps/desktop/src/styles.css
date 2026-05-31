@@ -218,7 +218,8 @@ body {
 
 .preview-content {
   flex: 1;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 12px;
   font-size: 13px;
   line-height: 1.6;
@@ -227,6 +228,15 @@ body {
 .preview-content pre {
   margin: 0;
   border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: break-word;
+}
+
+.preview-content code {
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: break-word;
 }
 
 .empty-state {
@@ -1121,4 +1131,439 @@ h2 {
   .devices-meta-label {
     min-width: 100%;
   }
+}
+
+/* ---- Embedder Status Card ---- */
+.embedder-status-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+
+.embedder-status-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.embedder-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.embedder-dot.dot-ollama {
+  background: #4caf50;
+  box-shadow: 0 0 6px rgba(76, 175, 80, 0.5);
+}
+
+.embedder-dot.dot-onnx {
+  background: #d4a017;
+  box-shadow: 0 0 6px rgba(212, 160, 23, 0.5);
+}
+
+.embedder-dot.dot-unknown {
+  background: #e88;
+  box-shadow: 0 0 6px rgba(238, 136, 136, 0.5);
+}
+
+.embedder-type {
+  font-size: 13px;
+  color: #e0e0e0;
+  font-weight: 500;
+}
+
+.embedder-model {
+  font-size: 12px;
+  color: #888;
+  font-family: 'SF Mono', Monaco, Inconsolata, 'Fira Code', monospace;
+}
+
+.embedder-note {
+  font-size: 12px;
+  color: #a88;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+.embedder-note-warn {
+  color: #e88;
+}
+
+.field-dimmed {
+  opacity: 0.5;
+}
+
+/* ---- Styled Select ---- */
+.styled-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: #1a1a1a url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E") no-repeat right 10px center;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 6px 28px 6px 10px;
+  color: #e0e0e0;
+  font-size: 13px;
+  min-width: 200px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.styled-select:hover {
+  border-color: #444;
+}
+
+.styled-select:focus {
+  border-color: #555;
+}
+
+.styled-select option {
+  background: #1a1a1a;
+  color: #e0e0e0;
+}
+
+/* ---- Styled Range Slider ---- */
+.slider-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.slider-ticks {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.slider-tick {
+  background: transparent;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  color: #888;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: 'SF Mono', Monaco, Inconsolata, 'Fira Code', monospace;
+  padding: 2px 6px;
+  transition: all 0.15s;
+  min-width: 24px;
+  text-align: center;
+}
+
+.slider-tick:hover {
+  border-color: #555;
+  color: #ccc;
+}
+
+.slider-tick.active {
+  background: #333;
+  border-color: #e0e0e0;
+  color: #e0e0e0;
+}
+
+.styled-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  background: #2a2a2a;
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+}
+
+.styled-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #e0e0e0;
+  border: 2px solid #444;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.styled-slider::-webkit-slider-thumb:hover {
+  background: #fff;
+  border-color: #666;
+}
+
+.styled-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #e0e0e0;
+  border: 2px solid #444;
+  cursor: pointer;
+}
+
+.field-block {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* ---- Raw JSON Copy ---- */
+.raw-json-wrapper {
+  position: relative;
+}
+
+.copy-json-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: #222;
+  border: 1px solid #333;
+  color: #ccc;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.copy-json-btn:hover {
+  background: #2a2a2a;
+  border-color: #444;
+}
+
+/* ---- Reindex Progress ---- */
+.reindex-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+}
+
+.reindex-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: #2a2a2a;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.reindex-progress-fill {
+  height: 100%;
+  background: #e0e0e0;
+  border-radius: 3px;
+  transition: width 0.2s ease;
+}
+
+.reindex-progress-text {
+  font-size: 12px;
+  color: #888;
+  font-family: 'SF Mono', Monaco, Inconsolata, 'Fira Code', monospace;
+}
+
+.reindex-progress-file {
+  font-size: 11px;
+  color: #666;
+  font-family: 'SF Mono', Monaco, Inconsolata, 'Fira Code', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- Pin Tags ---- */
+.pin-tag-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-shrink: 0;
+}
+
+.pin-tag-filter-label {
+  font-size: 12px;
+  color: #888;
+  flex-shrink: 0;
+}
+
+.pin-tag-filter-chips {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.pin-filter-chip {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  color: #888;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 8px;
+  transition: all 0.15s;
+}
+
+.pin-filter-chip:hover {
+  border-color: #444;
+  color: #ccc;
+}
+
+.pin-filter-chip.active {
+  background: #2a2a2a;
+  border-color: #e0e0e0;
+  color: #e0e0e0;
+}
+
+.pin-tags-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.pin-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: #1e2a1e;
+  border: 1px solid #2a3a2a;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  color: #8b8;
+}
+
+.pin-tag-text {
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pin-tag-remove {
+  background: transparent;
+  border: none;
+  color: #6a6;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 1px;
+}
+
+.pin-tag-remove:hover {
+  color: #e88;
+}
+
+.pin-add-tag-btn {
+  background: transparent;
+  border: 1px dashed #333;
+  border-radius: 4px;
+  color: #666;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 1px 6px;
+  transition: all 0.15s;
+}
+
+.pin-add-tag-btn:hover {
+  border-color: #555;
+  color: #aaa;
+}
+
+.pin-tag-input-shell {
+  display: inline-flex;
+}
+
+.pin-tag-input {
+  background: #111;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: #e0e0e0;
+  font-size: 11px;
+  width: 100px;
+  outline: none;
+}
+
+.pin-tag-input:focus {
+  border-color: #555;
+}
+
+.pin-tag-input::placeholder {
+  color: #555;
+}
+
+/* ---- Pairing Step Progress ---- */
+.pairing-progress-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+}
+
+.pairing-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #888;
+}
+
+.pairing-step.active {
+  color: #e0e0e0;
+}
+
+.pairing-step.done {
+  color: #4caf50;
+}
+
+.pairing-step-icon {
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+/* ---- Result tags (search results) ---- */
+.result-tags-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.result-tag {
+  background: #1a1a2e;
+  border: 1px solid #2a2a3e;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  color: #88a;
+  font-family: 'SF Mono', Monaco, Inconsolata, 'Fira Code', monospace;
+}
+
+.result-tag-overflow {
+  font-size: 10px;
+  color: #666;
+}
+
+/* Better multiline preview in result list */
+.result-item .result-preview {
+  font-size: 12px;
+  color: #aaa;
+  white-space: pre-wrap;
+  line-height: 1.5;
+  max-height: 4.5em;
+  overflow: hidden;
+  font-family: 'SF Mono', Monaco, Inconsolata, 'Fira Code', monospace;
 }

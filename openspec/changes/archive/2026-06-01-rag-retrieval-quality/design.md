@@ -12,7 +12,7 @@ SyncMind's RAG pipeline (extract → chunk → embed → store → search) has t
 
 **Non-Goals:**
 - No database schema migration
-- No new MCP tool or protocol change
+- No new MCP tool. The existing `search_knowledge` response uses expanded display content.
 - No ONNX reranker download automation (out of scope — manual setup continues)
 - No adaptive chunk sizing (stays at config `chunk_size`)
 
@@ -77,7 +77,7 @@ let embed_text = if let Some(ref prefix) = chunk.context_prefix {
 };
 ```
 
-The storage layer stores the ORIGINAL `chunk.content` (without prefix) for display. The FTS index gets the prefixed version so keyword search also benefits from the context.
+The storage layer stores the ORIGINAL `chunk.content` (without prefix) for display. The FTS index gets the prefixed version so keyword search also benefits from the context. This changes the existing semantic-chunking behavior from "signature in content" to "signature in indexing text only".
 
 #### 3. FallbackChunker Enhancement
 
@@ -97,6 +97,8 @@ fn expand_with_adjacent_chunks(
 
 For each result, queries `chunks` table WHERE `file_id = ? AND chunk_index BETWEEN ? AND ?`, fetches chunks, concatenates their content into `display_content`. Deduplicates by chunk_id.
 
+Deduplication is per returned result's display window. If two top-K hits overlap, they remain separate search results with their original `chunk_id`, score, pin state, and metadata; each result's `display_content` contains each adjacent chunk at most once.
+
 #### 5. Hybrid Search Threshold Fix
 
 **Before (bug):**
@@ -113,16 +115,29 @@ For each result, queries `chunks` table WHERE `file_id = ? AND chunk_index BETWE
 ```rust
 // Filter AFTER RRF fusion and normalization, on the final score
 // ...RRF fusion happens first...
-// ...normalize scores...
+let max_fused = results
+    .iter()
+    .map(|(_, rrf_score)| *rrf_score)
+    .fold(0.0, f64::max);
+
 let mut final_results: Vec<SearchResult> = results
     .into_iter()
-    .filter(|(_, rrf_score)| {
+    .map(|(mut r, rrf_score)| {
+        let normalized = if max_fused > 0.0 {
+            rrf_score / max_fused
+        } else {
+            rrf_score
+        };
+        r.score = normalized;
+        (r, normalized)
+    })
+    .filter(|(_, normalized)| {
         if let Some(th) = threshold {
-            *rrf_score >= th  // rrf_score is already normalized to [0,1]
+            *normalized >= th
         } else { true }
     })
-    .map(...)
     .take(top_k)
+    .map(|(r, _)| r)
     .collect();
 ```
 

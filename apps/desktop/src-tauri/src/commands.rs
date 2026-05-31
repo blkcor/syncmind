@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
+use tauri::Emitter;
 
 use crate::AppState;
 
@@ -12,6 +13,10 @@ pub struct SearchResultDto {
     pub end_line: i64,
     pub content: String,
     pub score: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +29,12 @@ pub struct ConfigDto {
     pub embedding_dim: usize,
     pub chunk_size: usize,
     pub chunk_overlap: usize,
+    /// Actual embedder backend in use (ollama / onnx / unavailable).
+    pub active_embedder: String,
+    /// Actual model name the active embedder is using.
+    pub active_model: String,
+    pub hybrid_search_enabled: bool,
+    pub reranker_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +43,10 @@ pub struct IndexingStatusDto {
     pub chunk_count: usize,
     pub last_updated: Option<String>,
     pub recent_errors: Vec<IndexingErrorDto>,
+    /// Actual embedder backend in use (ollama / onnx / unavailable).
+    pub active_embedder: String,
+    /// Actual model name the active embedder is using.
+    pub active_model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +62,8 @@ pub struct ConfigPatchDto {
     pub ollama_model: Option<String>,
     pub embedding_dim: Option<usize>,
     pub registered_files: Option<Vec<String>>,
+    pub hybrid_search_enabled: Option<bool>,
+    pub reranker_enabled: Option<bool>,
 }
 
 #[tauri::command]
@@ -73,31 +90,53 @@ pub async fn search_knowledge(
     let filter = syncmind_rag_engine::file_filter::parse_file_filter(&patterns)
         .map_err(|e| format!("Invalid file filter: {}", e))?;
 
-    let results = match filter {
-        Some(f) => store
-            .search_with_path_filter(&embeddings[0], top_k, 5, |path| f.evaluate(path))
-            .map_err(|e| format!("Search failed: {}", e))?,
-        None => store
-            .search(&embeddings[0], top_k)
-            .map_err(|e| format!("Search failed: {}", e))?,
+    let use_hybrid = {
+        let config = state.config.lock().unwrap();
+        config.hybrid_search_enabled
     };
+
+    // When hybrid search is active we always use FTS5 + vector fusion and
+    // apply any file-type filter as a post-processing pass.  Pure vector mode
+    // still uses the dedicated path-filter query for efficiency.
+    let mut results = if use_hybrid {
+        store
+            .search_hybrid(&embeddings[0], &query, top_k, None)
+            .map_err(|e| format!("Search failed: {}", e))?
+    } else if let Some(ref f) = filter {
+        store
+            .search_with_path_filter(&embeddings[0], top_k, 5, |path| f.evaluate(path))
+            .map_err(|e| format!("Search failed: {}", e))?
+    } else {
+        store
+            .search(&embeddings[0], top_k)
+            .map_err(|e| format!("Search failed: {}", e))?
+    };
+
+    // Post-filter hybrid results when a file-type glob is also active.
+    if use_hybrid {
+        if let Some(ref f) = filter {
+            results.retain(|r| f.evaluate(&r.file_path));
+        }
+    }
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Ok(results
         .into_iter()
-        .map(|r| SearchResultDto {
-            chunk_id: r.chunk_id,
-            file_path: r.file_path.to_string_lossy().into_owned(),
-            start_line: r.start_line,
-            end_line: r.end_line,
-            content: r.content,
-            score: r.score,
-        })
+        .map(search_result_to_dto)
         .collect())
 }
 
 #[tauri::command]
 pub fn get_config(state: State<AppState>) -> ConfigDto {
     let config = state.config.lock().unwrap();
+    let info = state
+        .embedder_info
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     ConfigDto {
         ollama_url: config.ollama_url.clone(),
         ollama_model: config.ollama_model.clone(),
@@ -114,10 +153,18 @@ pub fn get_config(state: State<AppState>) -> ConfigDto {
         embedding_dim: config.embedding_dim,
         chunk_size: config.chunk_size,
         chunk_overlap: config.chunk_overlap,
+        active_embedder: info.active_embedder.clone(),
+        active_model: info.active_model.clone(),
+        hybrid_search_enabled: config.hybrid_search_enabled,
+        reranker_enabled: config.reranker_enabled,
     }
 }
 
-fn config_to_dto(config: &syncmind_core::Config) -> ConfigDto {
+fn config_to_dto(
+    config: &syncmind_core::Config,
+    active_embedder: &str,
+    active_model: &str,
+) -> ConfigDto {
     ConfigDto {
         ollama_url: config.ollama_url.clone(),
         ollama_model: config.ollama_model.clone(),
@@ -134,6 +181,10 @@ fn config_to_dto(config: &syncmind_core::Config) -> ConfigDto {
         embedding_dim: config.embedding_dim,
         chunk_size: config.chunk_size,
         chunk_overlap: config.chunk_overlap,
+        active_embedder: active_embedder.to_string(),
+        active_model: active_model.to_string(),
+        hybrid_search_enabled: config.hybrid_search_enabled,
+        reranker_enabled: config.reranker_enabled,
     }
 }
 
@@ -150,6 +201,12 @@ pub fn apply_config_patch(config: &mut syncmind_core::Config, patch: ConfigPatch
     config.normalize_embedding_dim();
     if let Some(files) = patch.registered_files {
         config.registered_files = files.into_iter().map(std::path::PathBuf::from).collect();
+    }
+    if let Some(v) = patch.hybrid_search_enabled {
+        config.hybrid_search_enabled = v;
+    }
+    if let Some(v) = patch.reranker_enabled {
+        config.reranker_enabled = v;
     }
 }
 
@@ -179,7 +236,11 @@ pub async fn update_config(
         .await
         .map_err(|e| format!("Embedder refresh failed: {}", e))?;
 
-    Ok(config_to_dto(&updated))
+    let info = state
+        .embedder_info
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    Ok(config_to_dto(&updated, &info.active_embedder, &info.active_model))
 }
 
 #[tauri::command]
@@ -194,6 +255,11 @@ pub fn get_indexing_status(state: State<AppState>) -> Result<IndexingStatusDto, 
         .lock()
         .map_err(|e| format!("indexing state lock poisoned: {}", e))?;
 
+    let info = state
+        .embedder_info
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+
     Ok(IndexingStatusDto {
         file_count,
         chunk_count,
@@ -207,6 +273,8 @@ pub fn get_indexing_status(state: State<AppState>) -> Result<IndexingStatusDto, 
                 timestamp: iso8601_utc(e.timestamp),
             })
             .collect(),
+        active_embedder: info.active_embedder.clone(),
+        active_model: info.active_model.clone(),
     })
 }
 
@@ -235,6 +303,7 @@ fn iso8601_utc(ts: i64) -> String {
 #[tauri::command]
 pub async fn trigger_reindex(
     file_path: Option<String>,
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let config = state.config.lock().unwrap().clone();
@@ -264,7 +333,18 @@ pub async fn trigger_reindex(
             .clear_index()
             .map_err(|e| format!("Failed to clear existing index: {}", e))?;
 
-        for path in &config.registered_files {
+        let total = config.registered_files.len();
+        for (i, path) in config.registered_files.iter().enumerate() {
+            let current = i + 1;
+            let _ = app_handle.emit(
+                "reindex://progress",
+                serde_json::json!({
+                    "current": current,
+                    "total": total,
+                    "file_path": path.to_string_lossy(),
+                }),
+            );
+
             let chunker =
                 syncmind_indexing::chunker_for_path(path, config.chunk_size, config.chunk_overlap);
             let result = syncmind_indexing::index_file(
@@ -280,6 +360,7 @@ pub async fn trigger_reindex(
             }
             on_result(path, result.as_ref().map(|_| ()));
         }
+        let _ = app_handle.emit("reindex://complete", serde_json::json!({}));
     }
 
     Ok(())
@@ -384,14 +465,20 @@ fn search_result_to_dto(r: syncmind_storage::SearchResult) -> SearchResultDto {
         end_line: r.end_line,
         content: r.content,
         score: r.score,
+        tags: r.tags,
+        pinned_at: r.pinned_at,
     }
 }
 
 #[tauri::command]
-pub fn pin_chunk(chunk_id: i64, state: State<AppState>) -> Result<(), String> {
+pub fn pin_chunk(
+    chunk_id: i64,
+    tags: Option<Vec<String>>,
+    state: State<AppState>,
+) -> Result<(), String> {
     state
         .store
-        .pin_chunk(chunk_id)
+        .pin_chunk(chunk_id, tags.as_deref())
         .map_err(|e| format!("Pin failed: {}", e))
 }
 
@@ -417,6 +504,31 @@ pub fn list_pinned_chunks(state: State<AppState>) -> Result<Vec<SearchResultDto>
         .store
         .list_pinned_chunks()
         .map_err(|e| format!("List pinned chunks failed: {}", e))?;
+    Ok(rows.into_iter().map(search_result_to_dto).collect())
+}
+
+#[tauri::command]
+pub fn update_pin_tags(
+    chunk_id: i64,
+    tags: Vec<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    state
+        .store
+        .update_pin_tags(chunk_id, &tags)
+        .map_err(|e| format!("Update pin tags failed: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn search_pinned_chunks(
+    tag: Option<String>,
+    state: State<AppState>,
+) -> Result<Vec<SearchResultDto>, String> {
+    let rows = state
+        .store
+        .search_pinned_chunks(tag.as_deref())
+        .map_err(|e| format!("Search pinned chunks failed: {}", e))?;
     Ok(rows.into_iter().map(search_result_to_dto).collect())
 }
 

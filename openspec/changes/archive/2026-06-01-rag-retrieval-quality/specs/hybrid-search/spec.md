@@ -1,35 +1,8 @@
-# hybrid-search Specification
+# hybrid-search
 
-## Purpose
-Combined lexical (BM25 via SQLite FTS5) and dense (sqlite-vec) retrieval with Reciprocal Rank Fusion, plus a configurable relevance threshold. Exact symbol matches surface alongside semantic matches; irrelevant queries return an empty result instead of padding `top_k` with noise.
+Hybrid retrieval applies relevance thresholds after score normalization and uses a non-empty default threshold.
 
-## Requirements
-
-### Requirement: Full-text search index via SQLite FTS5
-The storage layer SHALL maintain an FTS5 virtual table that indexes chunk content for lexical (keyword) search.
-
-#### Scenario: FTS5 table creation on init
-- **WHEN** `VectorStore::new` is called
-- **THEN** it SHALL execute `CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(content, content_rowid=chunk_id)`
-- **AND** it SHALL upsert rows into `fts_chunks` whenever chunks are upserted into the `chunks` table
-
-#### Scenario: FTS5 cleanup on file deletion
-- **WHEN** a file is deleted from the index
-- **THEN** all associated rows in `fts_chunks` SHALL be removed
-
-### Requirement: Hybrid retrieval combining BM25 and vector similarity
-`VectorStore::search` SHALL support a hybrid mode that fetches candidates from both FTS5 (BM25) and sqlite-vec (vector), then fuses the rankings.
-
-#### Scenario: Hybrid search with RRF fusion
-- **WHEN** `search` is invoked with `hybrid = true`
-- **THEN** it SHALL execute an FTS5 query with the raw query text to retrieve the top `k * 2` BM25 candidates
-- **AND** it SHALL execute a vector similarity search with the query embedding to retrieve the top `k * 2` vector candidates
-- **AND** it SHALL compute Reciprocal Rank Fusion (RRF) scores: `score = Σ 1 / (k + rank)` with `k = 60`
-- **AND** it SHALL return the top `k` results ordered by fused RRF score descending
-
-#### Scenario: Pure vector search backward compatibility
-- **WHEN** `search` is invoked with `hybrid = false` (default)
-- **THEN** it SHALL behave exactly as before, performing only vector similarity search
+## MODIFIED Requirements
 
 ### Requirement: Configurable relevance threshold
 
@@ -70,16 +43,3 @@ Callers MAY bypass threshold filtering by explicitly passing `threshold = 0.0`. 
 - **WHEN** `search_knowledge` is called with a numeric threshold outside `0.0..=1.0`
 - **THEN** the MCP handler SHALL reject the request as invalid parameters
 - **AND** it SHALL NOT silently fall back to the config threshold
-
-### Requirement: MCP tool parameter exposure
-The `search_knowledge` MCP tool SHALL expose new optional parameters for hybrid search and threshold control.
-
-#### Scenario: Hybrid toggle via MCP
-- **WHEN** `search_knowledge` is called with `"hybrid": true`
-- **THEN** the backend SHALL execute hybrid search
-- **AND** when omitted, `hybrid` SHALL default to the value in `config.toml`
-
-#### Scenario: Threshold override via MCP
-- **WHEN** `search_knowledge` is called with `"threshold": 0.75`
-- **THEN** results below that threshold SHALL be discarded
-- **AND** when omitted, the global config threshold SHALL apply

@@ -7,6 +7,11 @@ use syncmind_core::config::Config;
 pub trait Embedder: Send + Sync {
     async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError>;
     fn embedding_dim(&self) -> usize;
+    /// A human-readable label describing the active embedder backend, e.g.
+    /// `"ollama"`, `"onnx"`, or `"unavailable"`.
+    fn embedder_type(&self) -> &'static str {
+        "unknown"
+    }
 }
 
 // ─── Ollama Embedder ──────────────────────────────────────────────────────────
@@ -123,6 +128,10 @@ impl Embedder for OllamaEmbedder {
 
     fn embedding_dim(&self) -> usize {
         self.embedding_dim
+    }
+
+    fn embedder_type(&self) -> &'static str {
+        "ollama"
     }
 }
 
@@ -378,6 +387,10 @@ impl Embedder for OnnxEmbedder {
     fn embedding_dim(&self) -> usize {
         self.embedding_dim
     }
+
+    fn embedder_type(&self) -> &'static str {
+        "onnx"
+    }
 }
 
 fn run_onnx_inference(
@@ -605,6 +618,10 @@ impl Embedder for AutoEmbedder {
     fn embedding_dim(&self) -> usize {
         self.inner.embedding_dim()
     }
+
+    fn embedder_type(&self) -> &'static str {
+        self.inner.embedder_type()
+    }
 }
 
 // ─── Swappable Embedder ──────────────────────────────────────────────────────
@@ -664,6 +681,18 @@ impl Embedder for SwappableEmbedder {
 
     fn embedding_dim(&self) -> usize {
         self.embedding_dim
+    }
+
+    fn embedder_type(&self) -> &'static str {
+        // Clone the Arc out of the lock to avoid holding the read guard.
+        let backend = {
+            let guard = self
+                .inner
+                .read()
+                .unwrap_or_else(|poison| poison.into_inner());
+            std::sync::Arc::clone(&*guard)
+        };
+        backend.embedder_type()
     }
 }
 
