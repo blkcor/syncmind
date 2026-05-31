@@ -91,6 +91,7 @@ export default function SettingsScreen() {
         await setAuthenticationRequirement(enabled);
         setBiometricEnabled(enabled);
       } catch {
+        setBiometricEnabled(!enabled);
         Alert.alert(
           "Error",
           "Failed to update biometric protection. Try again.",

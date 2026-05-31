@@ -1,6 +1,7 @@
 import * as SecureStore from "expo-secure-store";
 import { clearOutbox } from "../outbox/service";
 import { revokeCurrentDevice } from "../spine/client";
+import { clearPairingState } from "../spine/session";
 import { useAppStore } from "../store";
 import NativeDeviceIdentity, {
   type DeviceIdentityMeta,
@@ -209,6 +210,7 @@ export async function clearIdentity(): Promise<void> {
  */
 export async function device_reset(): Promise<void> {
   await revokeCurrentDevice();
+  await clearPairingState();
   await clearOutbox();
   useAppStore.getState().setUnpaired();
   await clearIdentity();

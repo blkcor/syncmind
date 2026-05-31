@@ -34,6 +34,9 @@ pub struct SpineRuntime {
     ws_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     on_new_bundle: Arc<dyn Fn() + Send + Sync>,
     status_sink: Arc<dyn Fn(crate::spine::ws::WsStatus) + Send + Sync>,
+    /// Cached latest WebSocket status so the frontend can query it on mount
+    /// instead of relying only on fire-and-forget Tauri events.
+    ws_status: Arc<RwLock<crate::spine::ws::WsStatus>>,
 }
 
 impl SpineRuntime {
@@ -44,6 +47,7 @@ impl SpineRuntime {
         identity: Identity,
         on_new_bundle: Arc<dyn Fn() + Send + Sync>,
         status_sink: Arc<dyn Fn(crate::spine::ws::WsStatus) + Send + Sync>,
+        ws_status: Arc<RwLock<crate::spine::ws::WsStatus>>,
     ) -> Self {
         Self {
             data_dir,
@@ -55,6 +59,7 @@ impl SpineRuntime {
             ws_worker: Mutex::new(None),
             on_new_bundle,
             status_sink,
+            ws_status,
         }
     }
 
@@ -66,6 +71,7 @@ impl SpineRuntime {
         identity_error: SpineError,
         on_new_bundle: Arc<dyn Fn() + Send + Sync>,
         status_sink: Arc<dyn Fn(crate::spine::ws::WsStatus) + Send + Sync>,
+        ws_status: Arc<RwLock<crate::spine::ws::WsStatus>>,
     ) -> Self {
         Self {
             data_dir,
@@ -77,6 +83,7 @@ impl SpineRuntime {
             ws_worker: Mutex::new(None),
             on_new_bundle,
             status_sink,
+            ws_status,
         }
     }
 
@@ -144,6 +151,11 @@ impl SpineRuntime {
         }
 
         Ok(())
+    }
+
+    /// Return a copy of the latest cached WebSocket status.
+    pub async fn ws_status(&self) -> crate::spine::ws::WsStatus {
+        *self.ws_status.read().await
     }
 
     /// Borrow the current client, returning `SPINE_NOT_CONFIGURED` if none has been built.
