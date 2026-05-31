@@ -20,13 +20,13 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Tab One',
+          title: 'Capture',
           tabBarIcon: ({ color }) => (
             <SymbolView
               name={{
-                ios: 'chevron.left.forwardslash.chevron.right',
-                android: 'code',
-                web: 'code',
+                ios: 'square.and.pencil',
+                android: 'edit',
+                web: 'edit',
               }}
               tintColor={color}
               size={28}
@@ -51,7 +51,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="two"
         options={{
-          title: 'Tab Two',
+          title: 'Graph',
           tabBarIcon: ({ color }) => (
             <SymbolView
               name={{

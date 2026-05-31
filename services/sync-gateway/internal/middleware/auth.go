@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"crypto/ed25519"
 	"net/http"
 	"strings"
 	"time"
@@ -59,10 +60,16 @@ func AuthMiddleware(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client) app
 			if !device.IsActive {
 				return nil, jwt.ErrTokenInvalidClaims
 			}
-			return device.PublicKey, nil
+			return ed25519.PublicKey(device.PublicKey), nil
 		}, jwt.WithIssuer(cfg.JWTIssuer), jwt.WithAudience(cfg.JWTAudience))
 
 		if err != nil || !token.Valid {
+			logger.L().Warn("jwt validation failed",
+				zap.Error(err),
+				zap.Bool("token_valid", token != nil && token.Valid),
+				zap.String("expected_iss", cfg.JWTIssuer),
+				zap.String("expected_aud", cfg.JWTAudience),
+			)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, map[string]any{
 				"code":    "AUTH_INVALID",
 				"message": "invalid or expired token",

@@ -63,8 +63,7 @@ private final class DeviceIdentityStore {
   }
 
   func getIdentityMeta() -> [String: Any]? {
-    guard hasSeed(),
-      let fingerprint = defaults.string(forKey: fingerprintKey),
+    guard let fingerprint = defaults.string(forKey: fingerprintKey),
       let publicKeyHex = defaults.string(forKey: publicKeyKey)
     else {
       return nil
@@ -194,6 +193,7 @@ private final class DeviceIdentityStore {
     var query = baseQuery()
     query[kSecReturnData as String] = false
     query[kSecMatchLimit as String] = kSecMatchLimitOne
+    query[kSecUseAuthenticationUISkip as String] = true
 
     let status = SecItemCopyMatching(query as CFDictionary, nil)
     return status == errSecSuccess || status == errSecInteractionNotAllowed

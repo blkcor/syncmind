@@ -1,10 +1,12 @@
 import { useFonts } from 'expo-font';
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/components/useColorScheme';
+import { restorePairingState } from '@/src/spine/session';
+import { useAppStore } from '@/src/store';
 
 export {
   // Catch any errors thrown by the Layout component.
@@ -20,6 +22,7 @@ export const unstable_settings = {
 SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
+  const [pairingRestored, setPairingRestored] = useState(false);
   const [loaded, error] = useFonts({
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
@@ -36,7 +39,40 @@ export default function RootLayout() {
     }
   }, [loaded]);
 
-  if (!loaded) {
+  useEffect(() => {
+    if (!loaded) {
+      return;
+    }
+
+    let cancelled = false;
+    restorePairingState()
+      .then((state) => {
+        if (cancelled) {
+          return;
+        }
+        if (state) {
+          useAppStore.getState().setPaired(state.pairedPeerFingerprint, false);
+        } else {
+          useAppStore.getState().setUnpaired();
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          useAppStore.getState().setUnpaired();
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setPairingRestored(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loaded]);
+
+  if (!loaded || !pairingRestored) {
     return null;
   }
 

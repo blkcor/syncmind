@@ -182,6 +182,11 @@ pub async fn spine_set_trust_ca(
 }
 
 #[tauri::command]
+pub async fn spine_ws_status(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state.spine.ws_status().await.as_str().to_string())
+}
+
+#[tauri::command]
 pub async fn spine_get_identity(state: State<'_, AppState>) -> Result<IdentityView, String> {
     state.spine.require_identity_ready().map_err(String::from)?;
     let id = &state.spine.identity;

@@ -33,6 +33,8 @@ import NativeDeviceIdentity from "../src/crypto/native-device-identity";
 import {
   clearCurrentSpineSession,
   getCurrentSpineSession,
+  persistPairingState,
+  restorePairingState,
   setCurrentSpineSession,
 } from "../src/spine/session";
 import {
@@ -344,6 +346,24 @@ describe("device_reset", () => {
     await expect(getOutboxItems()).resolves.toEqual([]);
     expect(useAppStore.getState().isPaired).toBe(false);
     expect(useAppStore.getState().peerDeviceFingerprint).toBeNull();
+  });
+
+  it("clears persisted pairing state during a full device reset", async () => {
+    await ensureIdentity();
+    await persistPairingState({
+      selfDeviceUuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      syncKey: new Uint8Array(32).fill(3),
+      pairedPeerFingerprint: `${FINGERPRINT_PREFIX}${"cd".repeat(32)}`,
+      pairedPeerDeviceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      pairedPeerDeviceType: "desktop",
+      pairedAt: "2026-05-31T00:00:00.000Z",
+      spineUrl: "https://spine.syncmind.local",
+      caFingerprint: null,
+    });
+
+    await device_reset();
+
+    await expect(restorePairingState()).resolves.toBeNull();
   });
 });
 

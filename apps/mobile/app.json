@@ -9,9 +9,10 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anonymous.mobile"
+      "bundleIdentifier": "com.blkcor.syncmind"
     },
     "android": {
+      "package": "com.blkcor.syncmind",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -27,6 +28,14 @@
     },
     "plugins": [
       "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "SyncMind uses the camera to scan desktop pairing QR codes.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
       [
         "expo-splash-screen",
         {

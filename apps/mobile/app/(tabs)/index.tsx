@@ -1,31 +1,151 @@
-import { StyleSheet } from 'react-native';
+import { useState } from 'react';
+import {
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View,
+} from 'react-native';
 
-import EditScreenInfo from '@/components/EditScreenInfo';
-import { Text, View } from '@/components/Themed';
+import { PairingScanner } from '@/src/pairing/scanner';
+import { useAppStore } from '@/src/store';
 
-export default function TabOneScreen() {
+export default function CaptureScreen() {
+  const isPaired = useAppStore((state) => state.isPaired);
+  const showFirstCaptureGuide = useAppStore((state) => state.showFirstCaptureGuide);
+  const dismissFirstCaptureGuide = useAppStore(
+    (state) => state.dismissFirstCaptureGuide,
+  );
+  const [note, setNote] = useState('');
+
+  if (!isPaired) {
+    return <PairingScanner />;
+  }
+
+  const handleSend = () => {
+    const trimmed = note.trim();
+    if (!trimmed) return;
+    // TODO: wire to spine_send_note
+    setNote('');
+    Keyboard.dismiss();
+  };
+
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Tab One</Text>
-      <View style={styles.separator} lightColor="#eee" darkColor="rgba(255,255,255,0.1)" />
-      <EditScreenInfo path="app/(tabs)/index.tsx" />
-    </View>
+    <KeyboardAvoidingView
+      style={styles.flex}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={90}
+    >
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <View style={styles.container}>
+          {showFirstCaptureGuide ? (
+            <View style={styles.guide}>
+              <Text style={styles.guideText}>
+                Send your first note! Type anything and hit Send - your desktop will
+                index it.
+              </Text>
+              <TouchableOpacity style={styles.guideButton} onPress={dismissFirstCaptureGuide}>
+                <Text style={styles.guideButtonText}>Got it</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
+
+          <ScrollView
+            style={styles.inputScroll}
+            contentContainerStyle={styles.inputScrollContent}
+            keyboardShouldPersistTaps="handled"
+          >
+            <TextInput
+              multiline
+              placeholder="Capture a note"
+              style={styles.input}
+              textAlignVertical="top"
+              value={note}
+              onChangeText={setNote}
+              returnKeyType="default"
+              blurOnSubmit={false}
+            />
+          </ScrollView>
+
+          <TouchableOpacity
+            style={[styles.sendButton, !note.trim() && styles.sendButtonDisabled]}
+            onPress={handleSend}
+            disabled={!note.trim()}
+          >
+            <Text style={styles.sendButtonText}>Send</Text>
+          </TouchableOpacity>
+        </View>
+      </TouchableWithoutFeedback>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
+  flex: {
+    flex: 1,
+  },
   container: {
     flex: 1,
+    padding: 20,
+    gap: 16,
+    backgroundColor: '#fff',
+  },
+  guide: {
+    borderWidth: 1,
+    borderColor: '#d6d9de',
+    borderRadius: 8,
+    padding: 16,
+    gap: 12,
+    backgroundColor: '#f7f8fa',
+  },
+  guideText: {
+    fontSize: 15,
+    lineHeight: 21,
+    color: '#222',
+  },
+  guideButton: {
+    alignSelf: 'flex-start',
+    borderRadius: 6,
+    backgroundColor: '#1f6feb',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  guideButtonText: {
+    color: '#fff',
+    fontWeight: '600',
+  },
+  inputScroll: {
+    flex: 1,
+  },
+  inputScrollContent: {
+    flexGrow: 1,
+  },
+  input: {
+    flex: 1,
+    minHeight: 120,
+    borderWidth: 1,
+    borderColor: '#ccd1d8',
+    borderRadius: 8,
+    padding: 14,
+    fontSize: 16,
+  },
+  sendButton: {
     alignItems: 'center',
-    justifyContent: 'center',
+    borderRadius: 6,
+    backgroundColor: '#1f6feb',
+    paddingVertical: 12,
   },
-  title: {
-    fontSize: 20,
-    fontWeight: 'bold',
+  sendButtonDisabled: {
+    opacity: 0.4,
   },
-  separator: {
-    marginVertical: 30,
-    height: 1,
-    width: '80%',
+  sendButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });

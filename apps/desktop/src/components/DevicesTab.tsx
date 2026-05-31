@@ -109,16 +109,18 @@ export default function DevicesTab() {
 
   async function refresh() {
     try {
-      const [cfg, id, ps, inb] = await Promise.all([
+      const [cfg, id, ps, inb, ws] = await Promise.all([
         invoke<SpineConfigView>('spine_get_config'),
         invoke<IdentityView>('spine_get_identity'),
         invoke<PairingStateView>('spine_pair_status'),
         invoke<InboxEntry[]>('spine_list_inbox').catch(() => [] as InboxEntry[]),
+        invoke<string>('spine_ws_status'),
       ]);
       setConfig(cfg);
       setIdentity(id);
       setPairState(ps);
       setInbox(inb);
+      if (ws) setConnectionStatus(ws);
       if (urlDraft() === '' && cfg.url) setUrlDraft(cfg.url);
     } catch (e) {
       console.error('devices refresh failed', e);

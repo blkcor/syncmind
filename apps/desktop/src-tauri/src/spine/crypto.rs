@@ -142,10 +142,10 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
 /// JWT issuer claim baked into every desktop-minted token.
-pub const JWT_ISSUER: &str = "syncmind-client";
+pub const JWT_ISSUER: &str = "syncmind-spine";
 
 /// JWT audience claim baked into every desktop-minted token.
-pub const JWT_AUDIENCE: &str = "syncmind-spine";
+pub const JWT_AUDIENCE: &str = "syncmind-device";
 
 /// JWT lifetime: tokens are valid for 1 hour. The spine client refreshes them 5 minutes
 /// before expiry; on a 401 it refreshes immediately and retries once.

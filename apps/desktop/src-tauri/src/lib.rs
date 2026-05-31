@@ -9,7 +9,7 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{include_image, Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::ShortcutState;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info};
 
 mod commands;
@@ -229,6 +229,7 @@ pub fn run() {
             list_indexed_file_types,
             validate_file_filter,
             // Spine (PRD 004) — desktop sync client.
+            spine::commands::spine_ws_status,
             spine::commands::spine_get_config,
             spine::commands::spine_set_url,
             spine::commands::spine_set_trust_ca,
@@ -361,11 +362,17 @@ pub fn run() {
             // refused), we surface SPINE_NOT_CONFIGURED to the user via the Devices tab.
             let data_dir = syncmind_core::paths::local_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let ws_status: Arc<RwLock<spine::ws::WsStatus>> =
+                Arc::new(RwLock::new(spine::ws::WsStatus::Disabled));
             let spine_runtime = match spine::identity::ensure_identity(&data_dir, "desktop") {
                 Ok(identity) => {
                     let spine_status_app = app.handle().clone();
+                    let ws_status_sink: Arc<RwLock<spine::ws::WsStatus>> = Arc::clone(&ws_status);
                     let status_sink: Arc<dyn Fn(spine::ws::WsStatus) + Send + Sync> =
                         Arc::new(move |status| {
+                            if let Ok(mut guard) = ws_status_sink.try_write() {
+                                *guard = status;
+                            }
                             let _ = spine_status_app.emit("spine://status", status.as_str());
                         });
                     let spine_pull_app = app.handle().clone();
@@ -377,6 +384,7 @@ pub fn run() {
                         identity,
                         on_new_bundle,
                         status_sink,
+                        Arc::clone(&ws_status),
                     ));
                     // Rebuild client from existing config (if URL already set).
                     let initial_url = config.spine.url.clone();
@@ -413,8 +421,12 @@ pub fn run() {
                         },
                     );
                     let spine_status_app = app.handle().clone();
+                    let ws_status_sink: Arc<RwLock<spine::ws::WsStatus>> = Arc::clone(&ws_status);
                     let status_sink: Arc<dyn Fn(spine::ws::WsStatus) + Send + Sync> =
                         Arc::new(move |status| {
+                            if let Ok(mut guard) = ws_status_sink.try_write() {
+                                *guard = status;
+                            }
                             let _ = spine_status_app.emit("spine://status", status.as_str());
                         });
                     let spine_pull_app = app.handle().clone();
@@ -427,6 +439,7 @@ pub fn run() {
                         e,
                         on_new_bundle,
                         status_sink,
+                        Arc::clone(&ws_status),
                     ))
                 }
             };

@@ -43,6 +43,7 @@ const PAIRING_PAYLOAD_KIND: &str = "syncmind-pairing";
 pub struct MobilePairingPayload {
     pub v: u8,
     pub kind: String,
+    pub session_id: String,
     pub spine_url: String,
     pub ca_fingerprint: Option<String>,
     pub pairing_token: String,
@@ -59,6 +60,7 @@ impl std::fmt::Debug for MobilePairingPayload {
         f.debug_struct("MobilePairingPayload")
             .field("v", &self.v)
             .field("kind", &self.kind)
+            .field("session_id", &self.session_id)
             .field("spine_url", &self.spine_url)
             .field("ca_fingerprint", &self.ca_fingerprint)
             .field("pairing_token", &token)
@@ -185,6 +187,8 @@ pub async fn initiate(
 ///
 /// Field sources:
 ///
+/// - `session_id` — Spine `pairing_initiate` response UUID. Mobile uses this as the
+///   only `/v1/pairing/complete` locator; `pairing_token` remains opaque legacy material.
 /// - `spine_url` — `config.url` (required; absence returns `SPINE_NOT_CONFIGURED`).
 /// - `ca_fingerprint` — `sha256:<hex>` over the first PEM CERTIFICATE block at
 ///   `config.trust_ca_path` if set and readable; otherwise `None`.
@@ -226,6 +230,7 @@ fn build_mobile_pairing_payload(
     Ok(MobilePairingPayload {
         v: 1,
         kind: PAIRING_PAYLOAD_KIND.to_string(),
+        session_id: resp.session_id.clone(),
         spine_url,
         ca_fingerprint,
         pairing_token,
@@ -433,6 +438,7 @@ fn parse_legacy_uri(input: &str) -> Result<MobilePairingPayload, SpineError> {
     Ok(MobilePairingPayload {
         v: 1,
         kind: PAIRING_PAYLOAD_KIND.to_string(),
+        session_id: session_id.to_string(),
         spine_url: String::new(),
         ca_fingerprint: None,
         pairing_token: pairing_token.clone(),
@@ -624,6 +630,7 @@ mod tests {
         MobilePairingPayload {
             v: 1,
             kind: PAIRING_PAYLOAD_KIND.to_string(),
+            session_id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa".to_string(),
             spine_url: "https://spine.example.com:8443".to_string(),
             ca_fingerprint: None,
             pairing_token: "abc123def456".to_string(),
@@ -641,12 +648,45 @@ mod tests {
         let back: MobilePairingPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(back.v, p.v);
         assert_eq!(back.kind, p.kind);
+        assert_eq!(back.session_id, p.session_id);
         assert_eq!(back.spine_url, p.spine_url);
         assert_eq!(back.ca_fingerprint, p.ca_fingerprint);
         assert_eq!(back.pairing_token, p.pairing_token);
         assert_eq!(back.expires_at, p.expires_at);
         assert_eq!(back.device_a_pubkey, p.device_a_pubkey);
         assert_eq!(back.device_a_fingerprint, p.device_a_fingerprint);
+    }
+
+    #[test]
+    fn mobile_pairing_payload_carries_initiate_session_id() {
+        let identity = Identity::from_parts(
+            ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]),
+            identity::DeviceMetadata {
+                fingerprint: "sha256:test".to_string(),
+                device_type: "desktop".to_string(),
+                device_uuid: "11111111-1111-4111-8111-111111111111".to_string(),
+                created_at: Utc::now().to_rfc3339(),
+            },
+        );
+        let config = syncmind_core::SpineConfig {
+            url: Some("https://spine.example.com:8443".to_string()),
+            ..Default::default()
+        };
+        let response = crate::spine::client::InitiateResponse {
+            session_id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa".to_string(),
+            qr_payload: "spine://pair/aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa?pk=BBBB".to_string(),
+            short_code: "123-456".to_string(),
+            expires_at: "2026-05-31T00:00:00Z".to_string(),
+        };
+
+        let payload = build_mobile_pairing_payload(&config, &identity, &response).unwrap();
+        let json = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(payload.session_id, response.session_id);
+        assert_eq!(
+            json["session_id"].as_str(),
+            Some(response.session_id.as_str())
+        );
     }
 
     #[test]
