@@ -87,6 +87,29 @@ impl VectorStore {
                 ON pinned_chunks(pinned_at DESC);",
         )?;
 
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(content);",
+            [],
+        )?;
+
+        self.reconcile_vec_chunks_schema(&conn)?;
+
+        Ok(())
+    }
+
+    fn reconcile_vec_chunks_schema(&self, conn: &Connection) -> Result<(), StorageError> {
+        let existing_sql = Self::existing_vec_chunks_sql(conn)?;
+        let existing_dim = existing_sql.as_deref().and_then(Self::parse_float32_dim);
+        if existing_sql.is_some() && existing_dim == Some(self.embedding_dim) {
+            return Ok(());
+        }
+
+        let tx = conn.unchecked_transaction()?;
+        if existing_sql.is_some() {
+            Self::clear_index_artifacts(&tx)?;
+            tx.execute("DROP TABLE vec_chunks", [])?;
+        }
+
         let vec_table_sql = format!(
             "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
                 chunk_id INTEGER PRIMARY KEY,
@@ -94,13 +117,37 @@ impl VectorStore {
             );",
             self.embedding_dim
         );
-        conn.execute(&vec_table_sql, [])?;
+        tx.execute(&vec_table_sql, [])?;
+        tx.commit()?;
+        Ok(())
+    }
 
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(content);",
+    fn existing_vec_chunks_sql(conn: &Connection) -> Result<Option<String>, StorageError> {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'vec_chunks'",
             [],
-        )?;
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StorageError::from)
+    }
 
+    fn parse_float32_dim(sql: &str) -> Option<usize> {
+        let upper = sql.to_ascii_uppercase();
+        let marker = "FLOAT32[";
+        let start = upper.find(marker)? + marker.len();
+        let end = upper[start..].find(']')? + start;
+        upper[start..end].trim().parse().ok()
+    }
+
+    fn clear_index_artifacts(conn: &Connection) -> Result<(), StorageError> {
+        conn.execute_batch(
+            "DELETE FROM vec_chunks;
+             DELETE FROM fts_chunks;
+             DELETE FROM chunks;
+             DELETE FROM pinned_chunks;
+             DELETE FROM files;",
+        )?;
         Ok(())
     }
 
@@ -439,11 +486,7 @@ impl VectorStore {
         let conn = self.conn.lock().unwrap();
         let tx = conn.unchecked_transaction()?;
 
-        tx.execute("DELETE FROM vec_chunks", [])?;
-        tx.execute("DELETE FROM fts_chunks", [])?;
-        tx.execute("DELETE FROM chunks", [])?;
-        tx.execute("DELETE FROM pinned_chunks", [])?;
-        tx.execute("DELETE FROM files", [])?;
+        Self::clear_index_artifacts(&tx)?;
 
         tx.commit()?;
         Ok(())
@@ -1091,6 +1134,84 @@ mod tests {
         let db_path = tmp.path().join("syncmind.db");
         let _store1 = VectorStore::new(&db_path, 4).unwrap();
         let _store2 = VectorStore::new(&db_path, 4).unwrap();
+    }
+
+    #[test]
+    fn schema_init_preserves_rows_when_embedding_dim_is_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("syncmind.db");
+
+        {
+            let store = VectorStore::new(&db_path, 4).unwrap();
+            let meta = FileMeta {
+                absolute_path: PathBuf::from("/tmp/unchanged.md"),
+                file_type: "markdown".to_string(),
+                last_modified: 1,
+                last_indexed: 1,
+            };
+            let chunks = vec![Chunk {
+                chunk_index: 0,
+                start_line: 1,
+                end_line: 1,
+                content: "Still indexed".to_string(),
+            }];
+            let embeddings = vec![mock_embedding(4, 0.1)];
+            store.upsert_file(&meta, &chunks, &embeddings).unwrap();
+            assert_eq!(store.get_stats().unwrap(), (1, 1));
+            assert_eq!(count_vec_chunks(&store), 1);
+        }
+
+        let reopened = VectorStore::new(&db_path, 4).unwrap();
+        assert_eq!(reopened.get_stats().unwrap(), (1, 1));
+        assert_eq!(count_vec_chunks(&reopened), 1);
+    }
+
+    #[test]
+    fn schema_init_recreates_vec_chunks_when_embedding_dim_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("syncmind.db");
+
+        {
+            let store = VectorStore::new(&db_path, 1024).unwrap();
+            let meta = FileMeta {
+                absolute_path: PathBuf::from("/tmp/old-dim.md"),
+                file_type: "markdown".to_string(),
+                last_modified: 1,
+                last_indexed: 1,
+            };
+            let chunks = vec![Chunk {
+                chunk_index: 0,
+                start_line: 1,
+                end_line: 1,
+                content: "Old dimension".to_string(),
+            }];
+            let embeddings = vec![mock_embedding(1024, 0.1)];
+            store.upsert_file(&meta, &chunks, &embeddings).unwrap();
+            assert_eq!(store.get_stats().unwrap(), (1, 1));
+            assert_eq!(count_vec_chunks(&store), 1);
+        }
+
+        let repaired = VectorStore::new(&db_path, 384).unwrap();
+        assert_eq!(repaired.get_stats().unwrap(), (0, 0));
+        assert_eq!(count_vec_chunks(&repaired), 0);
+
+        let meta = FileMeta {
+            absolute_path: PathBuf::from("/tmp/new-dim.md"),
+            file_type: "markdown".to_string(),
+            last_modified: 2,
+            last_indexed: 2,
+        };
+        let chunks = vec![Chunk {
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 1,
+            content: "New dimension".to_string(),
+        }];
+        let embeddings = vec![mock_embedding(384, 0.2)];
+        repaired.upsert_file(&meta, &chunks, &embeddings).unwrap();
+
+        assert_eq!(repaired.get_stats().unwrap(), (1, 1));
+        assert_eq!(count_vec_chunks(&repaired), 1);
     }
 
     #[test]
