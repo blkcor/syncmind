@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use syncmind_rag_engine::embedder::Embedder as _;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{include_image, Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -19,6 +20,14 @@ use commands::*;
 
 /// Maximum number of indexing errors retained in `IndexingState`.
 const MAX_RECENT_ERRORS: usize = 10;
+
+/// Tracks which embedder backend is actually in use at runtime (as opposed to
+/// the persisted config, which may be stale after ONNX fallback).
+#[derive(Debug, Clone, Serialize)]
+pub struct EmbedderInfo {
+    pub active_embedder: String,
+    pub active_model: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexingErrorEntry {
@@ -71,6 +80,8 @@ pub struct AppState {
     pub store: Arc<syncmind_storage::VectorStore>,
     pub embedder: Arc<dyn syncmind_rag_engine::embedder::Embedder>,
     pub swappable_embedder: Arc<syncmind_rag_engine::embedder::SwappableEmbedder>,
+    /// Tracks the active embedder backend type and model at runtime.
+    pub embedder_info: Arc<Mutex<EmbedderInfo>>,
     pub watcher: Mutex<Option<syncmind_file_watcher::FileWatcher>>,
     pub indexing_handle: Mutex<Option<tauri::async_runtime::JoinHandle<anyhow::Result<()>>>>,
     pub indexing: Arc<Mutex<IndexingState>>,
@@ -90,7 +101,16 @@ impl AppState {
         let real = syncmind_rag_engine::embedder::AutoEmbedder::new(config)
             .await
             .context("failed to initialize embedder")?;
+        let model_name = config.ollama_model.clone();
         self.swappable_embedder.swap(Arc::new(real));
+        {
+            let mut guard = self
+                .embedder_info
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            guard.active_embedder = self.swappable_embedder.embedder_type().to_string();
+            guard.active_model = model_name;
+        }
         Ok(())
     }
 }
@@ -113,6 +133,10 @@ impl syncmind_rag_engine::embedder::Embedder for UnavailableEmbedder {
 
     fn embedding_dim(&self) -> usize {
         self.embedding_dim
+    }
+
+    fn embedder_type(&self) -> &'static str {
+        "unavailable"
     }
 }
 
@@ -185,21 +209,45 @@ fn unavailable_embedder(
     })
 }
 
-async fn auto_offline_config(mut config: syncmind_core::Config) -> syncmind_core::Config {
+async fn auto_offline_config(
+    mut config: syncmind_core::Config,
+    embedder_info: &Arc<Mutex<EmbedderInfo>>,
+) -> syncmind_core::Config {
     config.normalize_embedding_dim();
-    if config.embedding_dim != 384
-        && syncmind_rag_engine::embedder::AutoEmbedder::new(&config)
-            .await
-            .is_err()
+    // Try the user's configured model first. If Ollama is reachable with it,
+    // great — nothing to do.
+    if syncmind_rag_engine::embedder::AutoEmbedder::new(&config)
+        .await
+        .is_ok()
     {
-        config.ollama_model = "bge-small".to_string();
-        config.normalize_embedding_dim();
-        if let Err(e) = config.save() {
-            error!(error = %e, "failed to persist automatic offline embedding config");
-        } else {
-            info!("Ollama unavailable; switched to bge-small ONNX fallback config");
-        }
+        return config;
     }
+
+    // If the user already configured bge-small (384 dim), ONNX fallback
+    // is handled inside AutoEmbedder::new() — no config change needed.
+    if config.embedding_dim == 384 {
+        return config;
+    }
+
+    // The user has a non-384-dim model (e.g. bge-m3) but Ollama is not
+    // reachable. Temporarily switch to ONNX fallback IN-MEMORY ONLY.
+    // Do NOT persist the model change — the user's original model choice
+    // must survive restarts so that when Ollama returns, it works again.
+    info!(
+        "Ollama model '{}' unavailable; using bge-small ONNX fallback for this session \
+         (config file unchanged — will retry Ollama on next restart)",
+        config.ollama_model
+    );
+    {
+        let mut guard = embedder_info.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.active_embedder = "onnx".to_string();
+        guard.active_model = "bge-small".to_string();
+    }
+    // Switch in-memory config so the embedder initializes correctly
+    config.ollama_model = "bge-small".to_string();
+    config.normalize_embedding_dim();
+    // Intentionally NOT calling config.save() — the user's original
+    // model preference stays on disk.
     config
 }
 
@@ -226,6 +274,8 @@ pub fn run() {
             unpin_chunk,
             is_chunk_pinned,
             list_pinned_chunks,
+            update_pin_tags,
+            search_pinned_chunks,
             list_indexed_file_types,
             validate_file_filter,
             // Spine (PRD 004) — desktop sync client.
@@ -256,7 +306,11 @@ pub fn run() {
                     error!(error = %e, "config load failed");
                     e.to_string()
                 })?;
-            let config = tauri::async_runtime::block_on(auto_offline_config(config));
+            let embedder_info = Arc::new(Mutex::new(EmbedderInfo {
+                active_embedder: "unavailable".to_string(),
+                active_model: config.ollama_model.clone(),
+            }));
+            let config = tauri::async_runtime::block_on(auto_offline_config(config, &embedder_info));
             let db_path = syncmind_core::db_path()
                 .context("Failed to resolve DB path")
                 .map_err(|e| e.to_string())?;
@@ -356,6 +410,7 @@ pub fn run() {
             let init_store = Arc::clone(&store);
             let init_on_index_result = Arc::clone(&on_index_result);
             let init_app_handle = app.handle().clone();
+            let init_embedder_info = Arc::clone(&embedder_info);
 
             // Initialize the Spine subsystem (PRD 004). Identity creation is best-effort:
             // if it fails (e.g., no keychain available and a write to <data-dir>/keys
@@ -449,6 +504,7 @@ pub fn run() {
                 store,
                 embedder,
                 swappable_embedder: Arc::clone(&swappable),
+                embedder_info: Arc::clone(&embedder_info),
                 watcher: Mutex::new(Some(watcher)),
                 indexing_handle: Mutex::new(Some(indexing_handle)),
                 indexing: Arc::clone(&indexing_state),
@@ -465,7 +521,16 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 match syncmind_rag_engine::embedder::AutoEmbedder::new(&init_config).await {
                     Ok(real) => {
+                        let model_name = init_config.ollama_model.clone();
                         init_swappable.swap(Arc::new(real));
+                        // Record the active embedder type after swap.
+                        {
+                            let mut guard = init_embedder_info
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner());
+                            guard.active_embedder = init_swappable.embedder_type().to_string();
+                            guard.active_model = model_name;
+                        }
                         info!("embedder ready; running startup indexing");
                         let _ = init_app_handle.emit("embedder-ready", ());
 
@@ -495,6 +560,13 @@ pub fn run() {
                         let message = format!("Embedder unavailable: {}", e);
                         let new_placeholder = unavailable_embedder(&init_config, message.clone());
                         init_swappable.swap(new_placeholder);
+                        {
+                            let mut guard = init_embedder_info
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner());
+                            guard.active_embedder = "unavailable".to_string();
+                            guard.active_model = init_config.ollama_model.clone();
+                        }
                         let _ = init_app_handle.emit("embedder-init-failed", message);
                     }
                 }

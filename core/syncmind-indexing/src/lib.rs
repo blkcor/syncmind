@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use syncmind_file_watcher::FileEvent;
-use syncmind_rag_engine::chunker::{Chunker, CodeChunker, FallbackChunker, MarkdownChunker};
+use syncmind_rag_engine::chunker::{Chunker, CodeChunker, CssChunker, FallbackChunker, MarkdownChunker};
 use syncmind_rag_engine::embedder::Embedder;
 use syncmind_rag_engine::error::{EmbedError, ExtractError};
 use syncmind_rag_engine::extractor::{CompositeExtractor, Extractor};
@@ -99,6 +99,31 @@ pub async fn index_file_once(
 /// shared `IndexingState` and emit events to the frontend / tray.
 pub type IndexResultCallback = Arc<dyn Fn(&Path, Result<(), &IndexingError>) + Send + Sync>;
 
+/// Minimum number of non-whitespace characters a chunk must contain to be
+/// considered semantically meaningful.  Chunks below this threshold are
+/// almost always markdown fences, horizontal rules, or accidental whitespace
+/// artefacts from the overlap algorithm.
+const MIN_CHUNK_CONTENT_CHARS: usize = 20;
+
+/// Returns `true` when a chunk carries enough non-trivial content to be worth
+/// indexing.  A chunk consisting solely of a markdown code fence (```),
+/// a horizontal rule, or whitespace is discarded.
+fn is_meaningful_chunk(chunk: &syncmind_core::Chunk) -> bool {
+    let stripped: String = chunk
+        .content
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    // Bail out if the stripped text is just fences, stars, dashes, etc.
+    if stripped
+        .chars()
+        .all(|c| matches!(c, '`' | '*' | '-' | '_' | '#' | '=' | '~' | '|' | '>'))
+    {
+        return false;
+    }
+    stripped.len() >= MIN_CHUNK_CONTENT_CHARS
+}
+
 /// Select the appropriate chunker for a file based on its extension.
 pub fn chunker_for_path(
     path: &std::path::Path,
@@ -108,6 +133,12 @@ pub fn chunker_for_path(
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         if ext.eq_ignore_ascii_case("md") {
             return Box::new(MarkdownChunker::new(chunk_size, chunk_overlap));
+        }
+        if ["css", "scss", "less"]
+            .iter()
+            .any(|&e| e.eq_ignore_ascii_case(ext))
+        {
+            return Box::new(CssChunker::new(chunk_size, chunk_overlap));
         }
         if [
             "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "c", "h", "cpp", "cc", "cxx",
@@ -137,13 +168,35 @@ pub async fn index_file(
             path: path.to_path_buf(),
             source,
         })?;
-    let chunks = chunker.chunk(&text, path);
+    let mut chunks = chunker.chunk(&text, path);
+
+    // Drop chunks whose non-whitespace content is below the minimum — these
+    // are typically markdown fences, horizontal-rule separators, or trailing
+    // whitespace that the overlap logic accidentally isolates into their own
+    // chunk.  Indexing them pollutes search results with meaningless snippets.
+    chunks.retain(is_meaningful_chunk);
+    // Renumber after filtering so chunk_index stays sequential.
+    for (i, chunk) in chunks.iter_mut().enumerate() {
+        chunk.chunk_index = i;
+    }
 
     if chunks.is_empty() {
         return Ok(0);
     }
 
-    let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
+    // Build embedding texts: prepend context_prefix (e.g. function signature)
+    // so the embedding captures semantic context, while stored content stays pristine.
+    let embed_texts: Vec<String> = chunks
+        .iter()
+        .map(|c| {
+            if let Some(ref prefix) = c.context_prefix {
+                format!("{}\n{}", prefix, c.content)
+            } else {
+                c.content.clone()
+            }
+        })
+        .collect();
+    let texts: Vec<&str> = embed_texts.iter().map(|s| s.as_str()).collect();
     let embeddings = embedder
         .embed(&texts)
         .await
@@ -368,6 +421,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn chunker_for_path_routes_stylesheets_to_css_chunker() {
+        let temp = tempfile::tempdir().unwrap();
+        for (ext, source, expected) in [
+            ("css", ".card { color: red; }\n", ".card"),
+            ("scss", ".card { &:hover { color: blue; } }\n", "&:hover"),
+            ("less", ".card { color: @accent; }\n", "@accent"),
+        ] {
+            let path = temp.path().join(format!("sample.{ext}"));
+            let chunker = chunker_for_path(&path, 400, 40);
+            let chunks = chunker.chunk(source, &path);
+            assert!(
+                chunks.iter().any(|chunk| chunk.content.contains(expected)),
+                "{ext} should be chunked as stylesheet content"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn indexes_mixed_documents_code_and_unsupported_files_end_to_end() {
         let temp = tempfile::tempdir().unwrap();
@@ -383,7 +454,9 @@ mod tests {
         let extractor = CompositeExtractor::with_ocr_config(OcrConfig {
             pdf_text_quality_threshold: 0.35,
             pdf_renderer_path: None,
-            ..OcrConfig::default()
+            ocr_language: "eng".to_string(),
+            ocr_psm_mode: 6,
+            ocr_render_dpi: 300,
         });
         let embedder = FixedEmbedder { dim: 4 };
         let store = syncmind_storage::VectorStore::new(&db, embedder.embedding_dim()).unwrap();

@@ -1,23 +1,8 @@
-# semantic-chunking Specification
+# semantic-chunking
 
-## Purpose
-Language-aware code chunking that produces semantically coherent units via tree-sitter AST parsing, with logical-boundary sub-chunking for oversized blocks. Preserves parent-function signature context across sub-chunks so downstream embeddings retain meaning even when a single function is split.
+Semantic code chunking keeps displayed chunk content pristine while retaining parent signature context for embedding and FTS indexing.
 
-## Requirements
-
-### Requirement: Extended language support for code chunking
-The chunker SHALL support Go source files using tree-sitter AST parsing in addition to the existing Rust, Python, and JavaScript/TypeScript support.
-
-#### Scenario: Go function extraction
-- **WHEN** a `.go` file is indexed
-- **THEN** `CodeChunker` SHALL parse the file with `tree-sitter-go`
-- **AND** extract chunks at `function_declaration`, `method_declaration`, `type_spec`, and `struct_type` boundaries
-- **AND** each chunk SHALL contain a complete syntactic unit
-
-#### Scenario: Unsupported language graceful fallback
-- **WHEN** a file extension is not mapped to any tree-sitter grammar
-- **THEN** `CodeChunker` SHALL delegate to `FallbackChunker`
-- **AND** indexing SHALL continue without error
+## MODIFIED Requirements
 
 ### Requirement: Semantic sub-chunking for oversized code blocks
 
@@ -48,11 +33,3 @@ Oversized code sub-chunks SHALL preserve parent function/class signature context
 - **WHEN** the indexing pipeline writes a chunk with `context_prefix = Some(prefix)` into the FTS index
 - **THEN** the indexed FTS content SHALL include the prefix
 - **AND** keyword search SHALL be able to match terms from the parent signature
-
-### Requirement: Chunk metadata integrity
-All chunks produced by any chunker SHALL retain accurate line numbers and unique indices even after sub-chunking.
-
-#### Scenario: Sub-chunk line number accuracy
-- **WHEN** an oversized function is split into three sub-chunks
-- **THEN** each sub-chunk SHALL report `start_line` and `end_line` relative to the original file
-- **AND** `chunk_index` SHALL be monotonically increasing across the file

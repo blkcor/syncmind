@@ -2740,6 +2740,7 @@ dependencies = [
  "anyhow",
  "rusqlite",
  "serde",
+ "serde_json",
  "sqlite-vec",
  "syncmind-core",
  "tempfile",

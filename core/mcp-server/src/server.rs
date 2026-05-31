@@ -258,8 +258,28 @@ impl ToolHandler for SearchKnowledgeHandler {
             }
         }
 
-        let text = serde_json::to_string_pretty(&results)
-            .unwrap_or_else(|_| "[]".to_string());
+        // Build response text preferring display_content (sentence-window expanded)
+        // over raw matched content.
+        let text = results
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let primary = if r.display_content.is_empty() {
+                    &r.content
+                } else {
+                    &r.display_content
+                };
+                format!(
+                    "[{i}] file: {}\nlines: {}-{}\nscore: {:.4}\n{}\n",
+                    r.file_path.display(),
+                    r.start_line,
+                    r.end_line,
+                    r.score,
+                    primary
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         Ok(CallToolResult::text(text))
     }
 }

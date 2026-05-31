@@ -1,7 +1,8 @@
-import { createSignal, onMount, onCleanup, Show } from 'solid-js';
+import { createSignal, onMount, onCleanup, Show, For } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
+import { store } from '../store';
 
 interface SpineConfigView {
   url: string | null;
@@ -84,6 +85,23 @@ function dotTone(status: string | null | undefined, liveValues: string[]): 'live
   if (liveValues.includes(status)) return 'live';
   if (['reconnecting', 'offline', 'failed', 'expired', 'cancelled'].includes(status)) return 'warn';
   return 'muted';
+}
+
+const PAIRING_STEPS: { key: string; label: string }[] = [
+  { key: 'contacting_server', label: 'Contacting server' },
+  { key: 'deriving_keys', label: 'Deriving encryption keys' },
+  { key: 'saving_keychain', label: 'Saving to keychain' },
+  { key: 'updating_config', label: 'Updating configuration' },
+];
+
+function pairingStepLabel(step: string): string {
+  const found = PAIRING_STEPS.find((s) => s.key === step);
+  return found ? found.label : step;
+}
+
+function pairingStepIndex(step: string): number {
+  const idx = PAIRING_STEPS.findIndex((s) => s.key === step);
+  return idx >= 0 ? idx : 999;
 }
 
 export default function DevicesTab() {
@@ -469,6 +487,32 @@ export default function DevicesTab() {
                       Join pairing
                     </button>
                   </div>
+                  <Show when={store.pairingStep}>
+                    <div class="pairing-progress-steps">
+                      <For each={PAIRING_STEPS}>
+                        {(s) => {
+                          const curIdx = () => pairingStepIndex(store.pairingStep!);
+                          const myIdx = PAIRING_STEPS.findIndex((x) => x.key === s.key);
+                          const done = () => myIdx < curIdx() || store.pairingStep === 'completed';
+                          const active = () => myIdx === curIdx() && store.pairingStep !== 'completed';
+                          return (
+                            <div
+                              class="pairing-step"
+                              classList={{
+                                active: active(),
+                                done: done(),
+                              }}
+                            >
+                              <span class="pairing-step-icon">
+                                {done() ? '✓' : active() ? '●' : '○'}
+                              </span>
+                              <span>{s.label}</span>
+                            </div>
+                          );
+                        }}
+                      </For>
+                    </div>
+                  </Show>
                 </div>
               }
             >

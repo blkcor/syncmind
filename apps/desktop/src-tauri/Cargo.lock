@@ -5164,6 +5164,7 @@ dependencies = [
  "anyhow",
  "rusqlite",
  "serde",
+ "serde_json",
  "sqlite-vec",
  "syncmind-core",
  "thiserror 1.0.69",

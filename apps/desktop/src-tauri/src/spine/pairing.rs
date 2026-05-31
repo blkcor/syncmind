@@ -107,12 +107,23 @@ pub struct PairingCompletion {
     pub sync_key_fingerprint: String,
 }
 
+/// Progress callback used by responder pairing to report user-visible steps.
+pub type PairingProgressCallback = Arc<dyn Fn(&str) + Send + Sync + 'static>;
+
 /// Complete pairing as the responder using a gateway short code.
+///
+/// `on_progress` is an optional callback that receives step labels so the
+/// caller can emit frontend events.
 pub async fn complete_with_short_code(
     client: &SpineClient,
     identity: &Identity,
     short_code: &str,
+    on_progress: Option<PairingProgressCallback>,
 ) -> Result<PairingCompletion, SpineError> {
+    if let Some(ref cb) = on_progress {
+        cb("contacting_server");
+    }
+
     let normalized = normalize_short_code(short_code)?;
     let resp = client
         .pairing_complete_short_code(
@@ -139,7 +150,15 @@ pub async fn complete_with_short_code(
             "short-code completion response missing initiator_pubkey",
         )
     })?;
-    completion_from_peer_pubkey(identity, session_id, initiator_b64, resp.initiator_id).await
+
+    completion_from_peer_pubkey(
+        identity,
+        session_id,
+        initiator_b64,
+        resp.initiator_id,
+        on_progress.as_ref(),
+    )
+    .await
 }
 
 /// Outcome of a single `poll_once` iteration.
@@ -478,6 +497,7 @@ async fn classify_status(
                 session_id,
                 responder_b64,
                 status.paired_device_id.clone(),
+                None, // poll path: no progress callback
             )
             .await
             .map(PollOutcome::Completed)
@@ -494,15 +514,25 @@ async fn completion_from_peer_pubkey(
     session_id: &str,
     peer_pubkey_b64: &str,
     peer_device_id: Option<String>,
+    on_progress: Option<&PairingProgressCallback>,
 ) -> Result<PairingCompletion, SpineError> {
     let peer_bytes = decode_pubkey(peer_pubkey_b64, "peer_pubkey")?;
     let peer_vk = VerifyingKey::from_bytes(&peer_bytes)
         .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
     let peer_fp = identity::fingerprint_hex(&peer_bytes);
 
+    if let Some(ref cb) = on_progress {
+        cb("deriving_keys");
+    }
+
     let sync_key =
         identity.with_signing_key(|sk| crypto::derive_sync_key(sk, &peer_vk, session_id));
     let sync_key_fp = hex::encode(crypto::sha256(&sync_key));
+
+    if let Some(ref cb) = on_progress {
+        cb("saving_keychain");
+    }
+
     identity::store_sync_key(&peer_fp, &sync_key)?;
     info!(
         peer_fingerprint = %peer_fp,

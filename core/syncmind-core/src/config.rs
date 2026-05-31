@@ -176,7 +176,7 @@ pub struct Config {
     pub chunk_overlap: usize,
     #[serde(default)]
     pub hybrid_search_enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_threshold")]
     pub relevance_threshold: Option<f64>,
     #[serde(default)]
     pub reranker_enabled: bool,
@@ -198,6 +198,12 @@ pub struct Config {
     pub pdf_text_quality_threshold: f64,
     #[serde(default)]
     pub pdf_renderer_path: Option<String>,
+    #[serde(default = "default_ocr_language")]
+    pub ocr_language: String,
+    #[serde(default = "default_ocr_psm_mode")]
+    pub ocr_psm_mode: u8,
+    #[serde(default = "default_ocr_render_dpi")]
+    pub ocr_render_dpi: u32,
     #[serde(default)]
     pub spine: SpineConfig,
 }
@@ -211,7 +217,23 @@ fn default_log_to_file() -> bool {
 }
 
 fn default_pdf_text_quality_threshold() -> f64 {
-    0.35
+    0.5
+}
+
+fn default_ocr_language() -> String {
+    "chi_sim+eng".to_string()
+}
+
+fn default_ocr_psm_mode() -> u8 {
+    6
+}
+
+fn default_ocr_render_dpi() -> u32 {
+    300
+}
+
+fn default_threshold() -> Option<f64> {
+    Some(0.4)
 }
 
 impl Default for Config {
@@ -224,9 +246,9 @@ impl Default for Config {
             registered_files: Vec::new(),
             embedding_dim: 1024,
             chunk_size: 512,
-            chunk_overlap: 50,
-            hybrid_search_enabled: false,
-            relevance_threshold: None,
+            chunk_overlap: 128,
+            hybrid_search_enabled: true,
+            relevance_threshold: Some(0.4),
             reranker_enabled: false,
             reranker_model_path: None,
             log_level: default_log_level(),
@@ -237,6 +259,9 @@ impl Default for Config {
             ocr_mode: OcrMode::default(),
             pdf_text_quality_threshold: default_pdf_text_quality_threshold(),
             pdf_renderer_path: None,
+            ocr_language: default_ocr_language(),
+            ocr_psm_mode: default_ocr_psm_mode(),
+            ocr_render_dpi: default_ocr_render_dpi(),
             spine: SpineConfig::default(),
         }
     }
@@ -343,6 +368,9 @@ mod tests {
             ocr_mode: OcrMode::Force,
             pdf_text_quality_threshold: 0.5,
             pdf_renderer_path: Some("/usr/local/bin/pdftoppm".to_string()),
+            ocr_language: "chi_sim+eng".to_string(),
+            ocr_psm_mode: 6,
+            ocr_render_dpi: 300,
             spine: SpineConfig::default(),
         };
 
@@ -376,7 +404,10 @@ chunk_overlap = 50
         assert_eq!(parsed.log_rotation, LogRotation::Daily);
         assert!(parsed.onnx_model_url.is_none());
         assert_eq!(parsed.ocr_mode, OcrMode::Auto);
-        assert_eq!(parsed.pdf_text_quality_threshold, 0.35);
+        assert_eq!(parsed.pdf_text_quality_threshold, 0.5);
+        assert_eq!(parsed.ocr_language, "chi_sim+eng");
+        assert_eq!(parsed.ocr_psm_mode, 6);
+        assert_eq!(parsed.ocr_render_dpi, 300);
     }
 
     #[test]
@@ -447,6 +478,26 @@ chunk_overlap = 50
         assert!(parsed.spine.url.is_none());
         assert!(parsed.spine.trust_ca_path.is_none());
         assert!(parsed.spine.paired_peer_fingerprint.is_none());
+    }
+
+    #[test]
+    fn legacy_config_without_threshold_defaults_to_0_4() {
+        let legacy = r#"
+ollama_url = "http://localhost:11434"
+ollama_model = "bge-m3"
+mcp_transport = "stdio"
+bind_addr = "127.0.0.1:3000"
+registered_files = []
+embedding_dim = 1024
+chunk_size = 512
+chunk_overlap = 50
+"#;
+        let parsed: Config = toml::from_str(legacy).unwrap();
+        assert_eq!(
+            parsed.relevance_threshold,
+            Some(0.4),
+            "legacy config without relevance_threshold should get Some(0.4)"
+        );
     }
 
     #[test]

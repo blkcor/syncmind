@@ -91,8 +91,8 @@ pub struct CodeExtractor;
 
 const CODE_EXTENSIONS: &[&str] = &[
     "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "c", "h", "cpp", "cc", "cxx", "hpp", "hh",
-    "hxx", "cs", "rb", "php", "swift", "kt", "kts", "toml", "json", "yaml", "yml", "sh", "fish",
-    "zsh",
+    "hxx", "cs", "rb", "php", "swift", "kt", "kts", "css", "scss", "less", "toml", "json",
+    "yaml", "yml", "sh", "fish", "zsh",
 ];
 
 impl Extractor for CodeExtractor {
@@ -147,7 +147,9 @@ impl Extractor for PdfExtractor {
                         _ => {}
                     }
 
-                    if text_quality(&text) >= self.ocr.pdf_text_quality_threshold {
+                    if text_quality(&text) >= self.ocr.pdf_text_quality_threshold
+                        && !has_excessive_nonprintable(&text)
+                    {
                         return Ok(text);
                     }
 
@@ -250,6 +252,14 @@ pub struct OcrConfig {
     pub mode: OcrMode,
     pub pdf_text_quality_threshold: f64,
     pub pdf_renderer_path: Option<PathBuf>,
+    /// Tesseract language specification (e.g. "chi_sim+eng" for Chinese Simplified + English).
+    /// Passed as `-l` flag to tesseract.
+    pub ocr_language: String,
+    /// Tesseract page segmentation mode (PSM).
+    /// Default 6 = "Assume a single uniform block of text".
+    pub ocr_psm_mode: u8,
+    /// DPI for pdftoppm rendering. Higher DPI improves OCR accuracy for small text.
+    pub ocr_render_dpi: u32,
 }
 
 impl Default for OcrConfig {
@@ -258,6 +268,9 @@ impl Default for OcrConfig {
             mode: OcrMode::Auto,
             pdf_text_quality_threshold: 0.35,
             pdf_renderer_path: None,
+            ocr_language: "chi_sim+eng".to_string(),
+            ocr_psm_mode: 6,
+            ocr_render_dpi: 300,
         }
     }
 }
@@ -268,6 +281,9 @@ impl From<&Config> for OcrConfig {
             mode: config.ocr_mode,
             pdf_text_quality_threshold: config.pdf_text_quality_threshold,
             pdf_renderer_path: config.pdf_renderer_path.as_ref().map(PathBuf::from),
+            ocr_language: config.ocr_language.clone(),
+            ocr_psm_mode: config.ocr_psm_mode,
+            ocr_render_dpi: config.ocr_render_dpi,
         }
     }
 }
@@ -347,7 +363,12 @@ fn pdf_text_extractor_available(config: &OcrConfig) -> bool {
     command_exists("pdftotext", &config.text_extractor_command())
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
+fn extract_pdf_text_safely(bytes: &[u8]) -> Result<String, ExtractError> {
+    extract_pdf_text_with(bytes, pdf_extract::extract_text_from_mem)
+}
+
+#[allow(dead_code)]
 fn extract_pdf_text_with_fallback<F>(
     path: &Path,
     bytes: &[u8],
@@ -382,7 +403,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn extract_pdf_text_with<F>(bytes: &[u8], extract_fn: F) -> Result<String, ExtractError>
 where
     F: FnOnce(&[u8]) -> Result<String, pdf_extract::OutputError>,
@@ -397,7 +418,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_string()
@@ -427,6 +448,22 @@ fn cjk_ratio(text: &str) -> f64 {
     }
     let cjk = trimmed.chars().filter(|c| is_cjk(*c)).count();
     cjk as f64 / trimmed.chars().count().max(1) as f64
+}
+
+/// Check if text has a high ratio of non-printable control characters,
+/// indicating encoding corruption or garbled extraction that would produce
+/// poor quality results even if `text_quality` appears acceptable.
+fn has_excessive_nonprintable(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let total = trimmed.chars().count().max(1);
+    let non_printable = trimmed
+        .chars()
+        .filter(|c| c.is_control() && *c != '\n' && *c != '\t')
+        .count();
+    non_printable as f64 / total as f64 > 0.05
 }
 
 fn is_cjk(c: char) -> bool {
@@ -461,6 +498,59 @@ fn should_prefer_pdf_text_fallback(embedded: &str, fallback: &str) -> bool {
     }
 
     fallback_quality > text_quality(embedded) + 0.25 && fallback.len() > embedded.trim().len() / 2
+}
+
+/// Clean up raw OCR output by removing excessive whitespace, control characters,
+/// and normalizing spacing. This improves downstream text quality for chunking and
+/// embedding.
+fn clean_ocr_text(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut prev_was_space = false;
+    let mut consecutive_newlines = 0;
+
+    for ch in text.chars() {
+        match ch {
+            '\r' => {
+                // Skip carriage returns; \n is used as line separator
+                continue;
+            }
+            '\n' => {
+                consecutive_newlines += 1;
+                if consecutive_newlines <= 2 {
+                    result.push('\n');
+                }
+                prev_was_space = false;
+            }
+            '\t' => {
+                // Replace tabs with a single space
+                if !prev_was_space {
+                    result.push(' ');
+                }
+                consecutive_newlines = 0;
+                prev_was_space = true;
+            }
+            c if c.is_control() => {
+                // Skip other control characters (null bytes, escapes, etc.)
+                consecutive_newlines = 0;
+                continue;
+            }
+            c if c.is_whitespace() => {
+                // Collapse horizontal whitespace runs into a single space
+                if !prev_was_space {
+                    result.push(' ');
+                }
+                consecutive_newlines = 0;
+                prev_was_space = true;
+            }
+            _ => {
+                result.push(ch);
+                consecutive_newlines = 0;
+                prev_was_space = false;
+            }
+        }
+    }
+
+    result.trim().to_string()
 }
 
 fn run_pdf_text_fallback(path: &Path, config: &OcrConfig) -> Result<String, ExtractError> {
@@ -500,6 +590,9 @@ fn run_pdf_ocr(path: &Path, config: &OcrConfig) -> Result<String, ExtractError> 
     let prefix = temp.path().join("page");
     let render = Command::new(&renderer)
         .arg("-png")
+        .arg("-r")
+        .arg(config.ocr_render_dpi.to_string())
+        .arg("-grayscale")
         .arg(path)
         .arg(&prefix)
         .output()
@@ -534,7 +627,7 @@ fn run_pdf_ocr(path: &Path, config: &OcrConfig) -> Result<String, ExtractError> 
             "OCR returned no text for rendered PDF".to_string(),
         ));
     }
-    Ok(text)
+    Ok(clean_ocr_text(&text))
 }
 
 fn run_image_ocr(path: &Path, _config: &OcrConfig) -> Result<String, ExtractError> {
@@ -727,6 +820,24 @@ mod tests {
         let extractor = CodeExtractor;
         let text = extractor.extract(&path).unwrap();
         assert_eq!(text, content);
+    }
+
+    #[test]
+    fn test_code_extractor_handles_stylesheet_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let extractor = CodeExtractor;
+
+        for (name, content) in [
+            ("reset.css", "body { margin: 0; }\n"),
+            ("variables.scss", "$accent: #f00;\n.button { color: $accent; }\n"),
+            ("theme.less", "@accent: #f00;\n.button { color: @accent; }\n"),
+        ] {
+            let path = dir.path().join(name);
+            fs::write(&path, content).unwrap();
+
+            assert!(extractor.can_handle(&path));
+            assert_eq!(extractor.extract(&path).unwrap(), content);
+        }
     }
 
     #[test]
