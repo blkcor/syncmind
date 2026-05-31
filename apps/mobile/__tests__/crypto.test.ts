@@ -4,103 +4,6 @@
 
 import * as SecureStore from "expo-secure-store";
 
-// All @noble packages are ESM-only and can't be resolved by CJS jest;
-// use {virtual: true} to bypass resolution checks.
-
-jest.mock(
-  "@noble/hashes/utils.js",
-  () => ({
-    bytesToHex: (bytes: Uint8Array) =>
-      Array.from(bytes)
-        .map((n) => n.toString(16).padStart(2, "0"))
-        .join(""),
-    hexToBytes: (hex: string) => {
-      const bytes = new Uint8Array(hex.length / 2);
-      for (let i = 0; i < hex.length; i += 2) {
-        bytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);
-      }
-      return bytes;
-    },
-  }),
-  { virtual: true },
-);
-
-jest.mock(
-  "@noble/hashes/sha2.js",
-  () => ({
-    sha256: {
-      create: () => ({
-        update: () => ({
-          digest: () => {
-            const hash = new Uint8Array(32);
-            for (let i = 0; i < 32; i++) hash[i] = (i * 7 + 3) % 256;
-            return hash;
-          },
-        }),
-      }),
-    },
-    sha512: {
-      create: () => ({
-        update: () => ({
-          digest: () => {
-            const hash = new Uint8Array(64);
-            for (let i = 0; i < 64; i++) hash[i] = (i * 3 + 7) % 256;
-            return hash;
-          },
-        }),
-      }),
-    },
-  }),
-  { virtual: true },
-);
-
-jest.mock(
-  "@noble/curves/ed25519.js",
-  () => ({
-    ed25519: {
-      utils: {
-        randomSecretKey: () => {
-          const key = new Uint8Array(32);
-          for (let i = 0; i < 32; i++) key[i] = (i + 1) % 256;
-          return key;
-        },
-      },
-      getPublicKey: (_priv: Uint8Array) => {
-        const key = new Uint8Array(32);
-        for (let i = 0; i < 32; i++) key[i] = (i * 2) % 256;
-        return key;
-      },
-      sign: (message: Uint8Array, _priv: Uint8Array) => {
-        const sig = new Uint8Array(64);
-        for (let i = 0; i < 64; i++)
-          sig[i] = message[i % message.length] ^ (i * 3);
-        return sig;
-      },
-      verify: (_sig: Uint8Array, _msg: Uint8Array, _pub: Uint8Array) => true,
-    },
-    x25519: {
-      utils: {
-        randomSecretKey: () => {
-          const key = new Uint8Array(32);
-          for (let i = 0; i < 32; i++) key[i] = (i + 1) % 256;
-          return key;
-        },
-      },
-      getPublicKey: (_priv: Uint8Array) => {
-        const key = new Uint8Array(32);
-        for (let i = 0; i < 32; i++) key[i] = (i * 2) % 256;
-        return key;
-      },
-      getSharedSecret: (_priv: Uint8Array, _pub: Uint8Array) => {
-        const secret = new Uint8Array(32);
-        for (let i = 0; i < 32; i++) secret[i] = (i * 11 + 5) % 256;
-        return secret;
-      },
-    },
-  }),
-  { virtual: true },
-);
-
 jest.mock("expo-secure-store", () => {
   const store = new Map<string, string>();
   return {
@@ -124,7 +27,9 @@ import {
   clearIdentity,
   device_reset,
   setAuthenticationRequirement,
+  __resetIdentityCacheForTests,
 } from "../src/crypto/identity";
+import NativeDeviceIdentity from "../src/crypto/native-device-identity";
 import {
   clearCurrentSpineSession,
   getCurrentSpineSession,
@@ -141,6 +46,79 @@ import { useAppStore } from "../src/store";
 
 const HEX_32_BYTE = /^[0-9a-f]{64}$/i;
 const FINGERPRINT_PREFIX = "sha256:";
+const mockPublicKeyHex = "02".repeat(32);
+const mockFingerprint = `${FINGERPRINT_PREFIX}${"ab".repeat(32)}`;
+const mockSignatureB64 = Buffer.from(new Uint8Array(64).fill(7)).toString("base64");
+const mockSharedSecretB64 = Buffer.from(new Uint8Array(32).fill(9)).toString("base64");
+
+type NativeIdentityState = {
+  fingerprint: string;
+  publicKeyHex: string;
+  biometricEnabled: boolean;
+  exists: boolean;
+};
+
+const mockNativeState: NativeIdentityState = {
+  fingerprint: mockFingerprint,
+  publicKeyHex: mockPublicKeyHex,
+  biometricEnabled: false,
+  exists: false,
+};
+
+function resetMockNativeState() {
+  mockNativeState.fingerprint = mockFingerprint;
+  mockNativeState.publicKeyHex = mockPublicKeyHex;
+  mockNativeState.biometricEnabled = false;
+  mockNativeState.exists = false;
+}
+
+jest.mock("../src/crypto/native-device-identity", () => {
+  const actual = {
+    ensureIdentity: jest.fn(async () => {
+      mockNativeState.exists = true;
+      return {
+        fingerprint: mockNativeState.fingerprint,
+        publicKeyHex: mockNativeState.publicKeyHex,
+        biometricEnabled: mockNativeState.biometricEnabled,
+      };
+    }),
+    getIdentityMeta: jest.fn(async () => {
+      if (!mockNativeState.exists) {
+        return null;
+      }
+      return {
+        fingerprint: mockNativeState.fingerprint,
+        publicKeyHex: mockNativeState.publicKeyHex,
+        biometricEnabled: mockNativeState.biometricEnabled,
+      };
+    }),
+    sign: jest.fn(async (_messageBase64: string) => mockSignatureB64),
+    deriveX25519: jest.fn(async (_peerPubKeyHex: string) => mockSharedSecretB64),
+    setBiometricProtection: jest.fn(async (enabled: boolean) => {
+      if (!mockNativeState.exists) {
+        throw new Error("Device identity not initialized.");
+      }
+      mockNativeState.biometricEnabled = enabled;
+    }),
+    resetIdentity: jest.fn(async () => {
+      mockNativeState.exists = false;
+      mockNativeState.biometricEnabled = false;
+    }),
+    importLegacyIdentity: jest.fn(async (_privateKeyHex: string) => {
+      mockNativeState.exists = true;
+      mockNativeState.biometricEnabled = false;
+      return {
+        fingerprint: mockNativeState.fingerprint,
+        publicKeyHex: mockNativeState.publicKeyHex,
+        biometricEnabled: mockNativeState.biometricEnabled,
+      };
+    }),
+  };
+  return {
+    __esModule: true,
+    default: actual,
+  };
+});
 
 function isValidFingerprint(s: string): boolean {
   return s.startsWith(FINGERPRINT_PREFIX) && HEX_32_BYTE.test(s.slice(7));
@@ -154,6 +132,9 @@ beforeEach(async () => {
     ok: true,
     status: 204,
   })) as typeof fetch;
+  resetMockNativeState();
+  await SecureStore.deleteItemAsync("device_identity");
+  await SecureStore.deleteItemAsync("device_identity_meta");
   await clearIdentity();
   await clearCurrentSpineSession();
   await clearOutbox();
@@ -168,13 +149,24 @@ describe("ensureIdentity", () => {
     expect(fingerprint2).toBe(fingerprint);
   });
 
-  it("persists the key to SecureStore", async () => {
+  it("persists public metadata to SecureStore", async () => {
     await ensureIdentity();
     expect(SecureStore.setItemAsync).toHaveBeenCalledWith(
-      "device_identity",
-      expect.any(String),
-      { requireAuthentication: false },
+      "device_identity_meta",
+      JSON.stringify({
+        fingerprint: mockFingerprint,
+        publicKeyHex: mockPublicKeyHex,
+        biometricEnabled: false,
+      }),
     );
+  });
+
+  it("does not persist private key material to SecureStore", async () => {
+    await ensureIdentity();
+    const writes = (SecureStore.setItemAsync as jest.Mock).mock.calls;
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.[0]).not.toBe("device_identity");
+    expect(JSON.stringify(writes)).not.toContain("privateKeyHex");
   });
 
   it("defaults biometric protection to disabled", async () => {
@@ -184,9 +176,45 @@ describe("ensureIdentity", () => {
 
   it("loads an existing identity from SecureStore on re-initialization", async () => {
     const fingerprint1 = await ensureIdentity();
-    await clearIdentity();
+    __resetIdentityCacheForTests();
     const fingerprint2 = await ensureIdentity();
     expect(fingerprint2).toBe(fingerprint1);
+  });
+
+  it("migrates legacy JS-stored identity into the native module and deletes the old blob", async () => {
+    await SecureStore.setItemAsync(
+      "device_identity",
+      JSON.stringify({
+        privateKeyHex: "11".repeat(32),
+        publicKeyHex: mockPublicKeyHex,
+        fingerprint: mockFingerprint,
+      }),
+    );
+
+    const fingerprint = await ensureIdentity();
+
+    expect(fingerprint).toBe(mockFingerprint);
+    expect(NativeDeviceIdentity.importLegacyIdentity).toHaveBeenCalledWith("11".repeat(32));
+    expect(SecureStore.deleteItemAsync).toHaveBeenCalledWith("device_identity");
+  });
+
+  it("does not silently continue when legacy migration fails", async () => {
+    await SecureStore.setItemAsync(
+      "device_identity",
+      JSON.stringify({
+        privateKeyHex: "11".repeat(32),
+        publicKeyHex: mockPublicKeyHex,
+        fingerprint: mockFingerprint,
+      }),
+    );
+    (NativeDeviceIdentity.importLegacyIdentity as jest.Mock).mockRejectedValueOnce(
+      new Error("native import failed"),
+    );
+
+    await expect(ensureIdentity()).rejects.toThrow(
+      "Unable to migrate legacy device identity",
+    );
+    expect(NativeDeviceIdentity.ensureIdentity).not.toHaveBeenCalled();
   });
 });
 
@@ -217,18 +245,18 @@ describe("getDevicePubkey", () => {
 describe("sign", () => {
   it("returns a 64-byte signature for a given message", async () => {
     await ensureIdentity();
-    const signature = sign(new Uint8Array([104, 101, 108, 108, 111]));
+    const signature = await sign(new Uint8Array([104, 101, 108, 108, 111]));
     expect(signature).toBeInstanceOf(Uint8Array);
     expect(signature.length).toBe(64);
   });
 
-  it("throws if called before ensureIdentity", () => {
-    expect(() => sign(new Uint8Array(0))).toThrow("not initialized");
+  it("throws if called before ensureIdentity", async () => {
+    await expect(sign(new Uint8Array(0))).rejects.toThrow("not initialized");
   });
 
   it("does NOT match a 32-byte hex pattern (no raw key leak)", async () => {
     await ensureIdentity();
-    const signature = sign(new Uint8Array(32));
+    const signature = await sign(new Uint8Array(32));
     const sigHex = Array.from(signature)
       .map((n) => n.toString(16).padStart(2, "0"))
       .join("");
@@ -240,7 +268,7 @@ describe("derive_x25519", () => {
   it("returns a 32-byte shared secret", async () => {
     await ensureIdentity();
     const peerPub = new Uint8Array(32);
-    const sharedSecret = derive_x25519(peerPub);
+    const sharedSecret = await derive_x25519(peerPub);
     expect(sharedSecret).toBeInstanceOf(Uint8Array);
     expect(sharedSecret.length).toBe(32);
   });
@@ -248,13 +276,13 @@ describe("derive_x25519", () => {
   it("produces a consistent shared secret (deterministic)", async () => {
     await ensureIdentity();
     const peerPub = new Uint8Array(32);
-    const secret1 = derive_x25519(peerPub);
-    const secret2 = derive_x25519(peerPub);
+    const secret1 = await derive_x25519(peerPub);
+    const secret2 = await derive_x25519(peerPub);
     expect(secret1).toEqual(secret2);
   });
 
-  it("throws if called before ensureIdentity", () => {
-    expect(() => derive_x25519(new Uint8Array(32))).toThrow("not initialized");
+  it("throws if called before ensureIdentity", async () => {
+    await expect(derive_x25519(new Uint8Array(32))).rejects.toThrow("not initialized");
   });
 });
 
@@ -268,7 +296,7 @@ describe("clearIdentity", () => {
   it("removes the entry from SecureStore", async () => {
     await ensureIdentity();
     await clearIdentity();
-    const stored = await SecureStore.getItemAsync("device_identity");
+    const stored = await SecureStore.getItemAsync("device_identity_meta");
     expect(stored).toBeNull();
   });
 
@@ -323,23 +351,14 @@ describe("setAuthenticationRequirement", () => {
   it("re-stores the key with requireAuthentication: true", async () => {
     await ensureIdentity();
     await setAuthenticationRequirement(true);
-    expect(SecureStore.deleteItemAsync).toHaveBeenCalledWith("device_identity");
-    expect(SecureStore.setItemAsync).toHaveBeenLastCalledWith(
-      "device_identity",
-      expect.any(String),
-      { requireAuthentication: true },
-    );
+    expect(NativeDeviceIdentity.setBiometricProtection).toHaveBeenCalledWith(true);
   });
 
   it("re-stores the key with requireAuthentication: false", async () => {
     await ensureIdentity();
     await setAuthenticationRequirement(true);
     await setAuthenticationRequirement(false);
-    expect(SecureStore.setItemAsync).toHaveBeenLastCalledWith(
-      "device_identity",
-      expect.any(String),
-      { requireAuthentication: false },
-    );
+    expect(NativeDeviceIdentity.setBiometricProtection).toHaveBeenLastCalledWith(false);
   });
 
   it("updates the cached biometric protection state", async () => {
@@ -348,6 +367,18 @@ describe("setAuthenticationRequirement", () => {
     expect(isAuthenticationRequired()).toBe(true);
     await setAuthenticationRequirement(false);
     expect(isAuthenticationRequired()).toBe(false);
+  });
+
+  it("restores biometric protection state across app restarts", async () => {
+    await ensureIdentity();
+    await setAuthenticationRequirement(true);
+
+    __resetIdentityCacheForTests();
+
+    const fingerprint = await ensureIdentity();
+
+    expect(fingerprint).toBe(mockFingerprint);
+    expect(isAuthenticationRequired()).toBe(true);
   });
 
   it("throws if called before ensureIdentity", async () => {
@@ -368,5 +399,33 @@ describe("privacy — no private key leak", () => {
     };
     const serialized = JSON.stringify(apiSurface);
     expect(serialized).not.toMatch(HEX_32_BYTE);
+  });
+
+  it("console.log of public API values does not leak private key material", async () => {
+    await ensureIdentity();
+    const spy = jest.spyOn(console, "log").mockImplementation(() => {});
+    const signature = await sign(new Uint8Array([1, 2, 3]));
+    const capturedLog = spy as unknown as (value: unknown) => void;
+
+    capturedLog({
+      fingerprint: getDeviceFingerprint(),
+      pubkey: Array.from(getDevicePubkey()),
+      signature: Array.from(signature),
+    });
+
+    const combined = spy.mock.calls.flat().map(String).join(" ");
+    expect(combined).not.toContain("privateKeyHex");
+    expect(combined).not.toContain("11".repeat(32));
+    spy.mockRestore();
+  });
+
+  it("error messages do not leak private key material", async () => {
+    await expect(setAuthenticationRequirement(true)).rejects.toThrow(
+      "Device identity not initialized",
+    );
+
+    await expect(setAuthenticationRequirement(true)).rejects.not.toThrow(
+      "11".repeat(32),
+    );
   });
 });

@@ -59,15 +59,20 @@ PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
 - [x] **不引入** Redux / MobX / Zustand 以外的全局 state 库；MVP 使用 Zustand（与桌面端 `apps/desktop/src/store.ts` 风格一致）。
 
 ### US-040: 移动端设备身份（iOS Keychain / Android Keystore）
+
+> **Status:** ⚠️ Code implementation and automated verification completed on 2026-05-30 via [`mobile-device-identity-native-completion`](../../openspec/changes/mobile-device-identity-native-completion/). The original JS + `expo-secure-store` design remains archived in [`2026-05-27-mobile-device-identity`](../../openspec/changes/archive/2026-05-27-mobile-device-identity/) as historical context only. US-040 is still **not accepted** until iOS and Android manual verification records identity creation, restart persistence, biometric toggle, and reset on device or emulator.
+
 **Description:** 作为系统，我需要在移动端本地生成持久 Ed25519 身份密钥对，存储在操作系统的安全密钥库中，跨 App 重启可读，但**绝不**通过 JS 桥暴露原始私钥字节。
 
 **Acceptance Criteria:**
-- [ ] 依赖 `expo-secure-store` + `expo-crypto`；Ed25519 通过 `@noble/curves` 在 RN 侧生成（noble 全平台纯 JS，兼容 Hermes）。
-- [ ] 密钥首次启动时生成；公钥 / 指纹（SHA-256 hex）存入 `expo-secure-store` 的 `device_identity` 键。
-- [ ] **私钥永不进 React 组件树 / context / store**；只通过 `apps/mobile/src/crypto/identity.ts` 的纯函数 API 间接使用（`sign(message)` / `derive_x25519(peer_pub)`），调用方拿不到 raw bytes。
-- [ ] 私钥的 `requireAuthentication` 设为 `false`（MVP 不强制生物识别解锁，避免每次发 capture 都弹 FaceID）；在设置面板中提供"启用生物识别保护"开关，开启时切到 `requireAuthentication: true`。
+- [ ] 通过本地 Expo native module `SyncMindDeviceIdentity` 管理身份密钥；iOS 使用 Keychain，Android 使用 Keystore-backed native storage，JS 不生成、不持有、不序列化原始私钥。
+- [ ] 密钥首次启动时由 native module 生成；JS 侧最多持久化非敏感 `device_identity_meta`（`fingerprint` / `publicKeyHex` / `biometricEnabled`），不得再写入包含私钥的 `device_identity`。
+- [ ] `apps/mobile/src/crypto/identity.ts` 保持公开 facade；`sign(message)` / `derive_x25519(peer_pub)` 只调用 native module，调用方拿不到 raw private key bytes。
+- [ ] 生物识别保护默认关闭；设置面板的"启用生物识别保护"开关必须更新 native secure-store 配置，且 `isAuthenticationRequired()` 在 App 重启后仍反映 native 状态。
 - [ ] 提供 `device_reset()` 操作：清除身份 + 解配对 + 清队列；UI 入口在设置最深处，需二次确认。
-- [ ] **Privacy check 单元测试**：在 `apps/mobile/__tests__/crypto.test.ts` 用 jest 验证 `identity.sign()` 的返回值不会泄露任何 32-byte 子串到日志 / Error.message / JSON.stringify 输出。
+- [ ] 支持从 legacy `device_identity` blob 一次性迁移到 native identity store；迁移成功后删除 legacy blob，迁移失败时不得继续使用 JS-stored 私钥。
+- [ ] **Privacy check 单元测试**：在 `apps/mobile/__tests__/crypto.test.ts` 用 jest 验证 private key material 不会泄露到 SecureStore 写入、日志、Error.message 或 JSON.stringify 输出。
+- [ ] `pnpm --filter mobile typecheck`、`pnpm --filter mobile lint`、`pnpm --filter mobile test --runInBand` 通过，并记录 iOS / Android create、restart persistence、biometric toggle、reset 的手工验证证据后，US-040 才能验收。
 
 ### US-041: QR 码配对（扫码端）
 **Description:** 作为移动端用户，我希望扫描桌面端 Devices 面板上的二维码就能完成配对，10 秒内进入"已配对"状态。
@@ -392,7 +397,7 @@ US-052 至 US-054 涉及桌面端 `apps/desktop/` 与 `core/`，**不属于 mobi
   - 用户在 App 前台时，10s 短轮询 `/bundles?since=...`（仅用于 search response）。
   - 后台时不轮询；OS-scheduled background fetch 触发时拉一次。
 - **Search request 与 outbox 的优先级**：search-request 在 outbox 中标 `priority: high`，跳过普通 capture 的 FIFO 顺序立即上传。
-- **Hermes 兼容性**：所有 crypto 库必须经过 Hermes JS engine 验证；`@noble/curves` / `@noble/hashes` 已知兼容，但 `react-native-crypto` 系列需慎用。
+- **Hermes 兼容性**：所有 JS crypto 库必须经过 Hermes JS engine 验证；US-040 身份密钥不再依赖 JS crypto，而是通过 native `SyncMindDeviceIdentity` module 使用 Keychain / Keystore-backed storage。
 - **二进制传输**：base64 内联是 MVP 折中。如果未来发现大图/长音频上传成本过高，再升级到 multipart blob endpoint（Spine 协议层改动）。
 - **EAS 与签名**：MVP 阶段只走 EAS internal distribution；用户自托管时可以用 sideloading / TestFlight；App Store 发布留到 Phase 4.5。
 - **monorepo 引用**：`apps/mobile/` 依赖 `packages/types`；不依赖 `apps/desktop/` 的源码（保持工作树清晰）。

@@ -13,8 +13,13 @@ Mobile capture client for SyncMind — a lightweight Expo-based app for iOS and 
 
 - Node.js 22+
 - pnpm 11+
-- [Expo Go](https://expo.dev/go) on your device (development mode)
+- [Expo Go](https://expo.dev/go) for JS-only screens
 - Xcode (iOS simulator) and/or Android Studio (Android emulator) for native testing
+
+US-040 device identity uses the local native module `SyncMindDeviceIdentity`.
+Expo Go does not include local native modules, so identity creation, signing,
+biometric toggle, and reset must be tested in a development build or rebuilt
+native app.
 
 ## Getting Started
 
@@ -32,7 +37,7 @@ cd apps/mobile && pnpm start
 Once the dev server is running, press:
 - `i` to open in iOS simulator
 - `a` to open in Android emulator
-- Scan the QR code with Expo Go on your device
+- Scan the QR code with Expo Go only for screens that do not depend on local native modules
 
 ## Development Scripts
 

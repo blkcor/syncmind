@@ -1,0 +1,13 @@
+apply plugin: 'com.android.library'
+apply plugin: 'expo-module-gradle-plugin'
+
+group = 'expo.modules.syncminddeviceidentity'
+version = '0.0.1'
+
+android {
+  namespace 'expo.modules.syncminddeviceidentity'
+}
+
+dependencies {
+  implementation 'org.bouncycastle:bcprov-jdk18on:1.82'
+}
