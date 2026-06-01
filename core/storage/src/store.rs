@@ -1513,6 +1513,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
                 content: "Still indexed".to_string(),
+                context_prefix: None,
             }];
             let embeddings = vec![mock_embedding(4, 0.1)];
             store.upsert_file(&meta, &chunks, &embeddings).unwrap();
@@ -1543,6 +1544,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
                 content: "Old dimension".to_string(),
+                context_prefix: None,
             }];
             let embeddings = vec![mock_embedding(1024, 0.1)];
             store.upsert_file(&meta, &chunks, &embeddings).unwrap();
@@ -1565,6 +1567,7 @@ mod tests {
             start_line: 1,
             end_line: 1,
             content: "New dimension".to_string(),
+            context_prefix: None,
         }];
         let embeddings = vec![mock_embedding(384, 0.2)];
         repaired.upsert_file(&meta, &chunks, &embeddings).unwrap();

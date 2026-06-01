@@ -719,6 +719,8 @@ async fn search_local_knowledge(
             end_line: r.end_line,
             content: r.content,
             score: r.score,
+            tags: r.tags,
+            pinned_at: r.pinned_at,
         })
         .collect())
 }
