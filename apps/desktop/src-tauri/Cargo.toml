@@ -12,6 +12,9 @@ default = ["keyring-native"]
 keyring-native = ["keyring/apple-native", "keyring/windows-native", "keyring/linux-native"]
 keyring-mock = []
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

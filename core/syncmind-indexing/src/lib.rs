@@ -309,6 +309,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::fs;
+    use syncmind_core::OcrMode;
     use syncmind_rag_engine::extractor::{CompositeExtractor, OcrConfig};
 
     struct FixedEmbedder {
@@ -452,6 +453,7 @@ mod tests {
         fs::write(&unsupported, "unsupported_text = \"still falls back\"").unwrap();
 
         let extractor = CompositeExtractor::with_ocr_config(OcrConfig {
+            mode: OcrMode::Auto,
             pdf_text_quality_threshold: 0.35,
             pdf_renderer_path: None,
             ocr_language: "eng".to_string(),
