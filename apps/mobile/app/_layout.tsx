@@ -5,8 +5,12 @@ import { useEffect, useState } from 'react';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/components/useColorScheme';
+import { checkCurrentDevicePairing, UnpairedError } from '@/src/spine/client';
 import { restorePairingState } from '@/src/spine/session';
 import { useAppStore } from '@/src/store';
+import { ensureIdentity } from '@/src/crypto/identity';
+
+const PAIRING_HEALTH_CHECK_MS = 1500;
 
 export {
   // Catch any errors thrown by the Layout component.
@@ -45,32 +49,74 @@ export default function RootLayout() {
     }
 
     let cancelled = false;
-    restorePairingState()
-      .then((state) => {
-        if (cancelled) {
-          return;
-        }
+
+    async function restore() {
+      try {
+        const state = await restorePairingState();
+        if (cancelled) return;
+
         if (state) {
           useAppStore.getState().setPaired(state.pairedPeerFingerprint, false);
+
+          // Startup health check: verify device is still valid on Spine.
+          try {
+            await ensureIdentity();
+            await checkCurrentDevicePairing({ allowJwtMint: true });
+            if (!cancelled) {
+              useAppStore.getState().setConnectionStatus("connected");
+            }
+          } catch (err) {
+            if (err instanceof UnpairedError) {
+              // authenticatedFetch already cleared pairing state and set unpaired.
+            } else if (!cancelled) {
+              useAppStore.getState().setConnectionStatus("error");
+            }
+          }
         } else {
           useAppStore.getState().setUnpaired();
         }
-      })
-      .catch(() => {
+      } catch {
         if (!cancelled) {
           useAppStore.getState().setUnpaired();
         }
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) {
           setPairingRestored(true);
         }
-      });
+      }
+    }
+
+    restore();
 
     return () => {
       cancelled = true;
     };
   }, [loaded]);
+
+  useEffect(() => {
+    if (!loaded || !pairingRestored) {
+      return;
+    }
+
+    const timer = setInterval(() => {
+      if (!useAppStore.getState().isPaired) {
+        return;
+      }
+
+      void checkCurrentDevicePairing()
+        .then(() => {
+          useAppStore.getState().setConnectionStatus("connected");
+        })
+        .catch((err) => {
+          if (err instanceof UnpairedError) {
+            return;
+          }
+          useAppStore.getState().setConnectionStatus("error");
+        });
+    }, PAIRING_HEALTH_CHECK_MS);
+
+    return () => clearInterval(timer);
+  }, [loaded, pairingRestored]);
 
   if (!loaded || !pairingRestored) {
     return null;

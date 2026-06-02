@@ -1,7 +1,12 @@
 import * as SecureStore from "expo-secure-store";
 import { clearOutbox } from "../outbox/service";
-import { revokeCurrentDevice } from "../spine/client";
-import { clearPairingState } from "../spine/session";
+import {
+  abortInFlightSpineWorkForPairing,
+  revokeCurrentDevice,
+  UnpairedError,
+} from "../spine/client";
+import { setMobileDeviceUuid } from "../pairing/device";
+import { clearPairingState, getRestoredPairingState } from "../spine/session";
 import { useAppStore } from "../store";
 import NativeDeviceIdentity, {
   type DeviceIdentityMeta,
@@ -203,6 +208,42 @@ export async function clearIdentity(): Promise<void> {
     await SecureStore.deleteItemAsync(META_STORAGE_KEY);
     clearIdentityCache();
   }
+}
+
+export interface UnpairResult {
+  revokeWarning: "network_error" | null;
+}
+
+/**
+ * Lightweight unpair: revokes device on Spine, clears pairing state and outbox,
+ * and transitions to unpaired — all without destroying the Ed25519 identity key.
+ * Returns a warning if the remote revoke could not reach Spine.
+ */
+export async function unpair(): Promise<UnpairResult> {
+  let revokeWarning: "network_error" | null = null;
+  const selfDeviceUuid = getRestoredPairingState()?.selfDeviceUuid ?? null;
+
+  try {
+    await revokeCurrentDevice();
+  } catch (err) {
+    if (err instanceof UnpairedError) {
+      // Server already considers device revoked — silent success.
+    } else {
+      revokeWarning = "network_error";
+    }
+  }
+
+  if (selfDeviceUuid) {
+    abortInFlightSpineWorkForPairing(selfDeviceUuid);
+  }
+  await clearPairingState();
+  if (selfDeviceUuid) {
+    await setMobileDeviceUuid(selfDeviceUuid);
+  }
+  await clearOutbox();
+  useAppStore.getState().setUnpaired();
+
+  return { revokeWarning };
 }
 
 /**

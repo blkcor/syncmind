@@ -203,6 +203,53 @@ func TestPairingInitiateRecoveryWithSameFingerprint(t *testing.T) {
 	}
 }
 
+func TestPairingInitiateReactivatesExistingDeviceWithSameFingerprint(t *testing.T) {
+	pool := setupTestDB(t)
+	defer pool.Close()
+
+	handler := NewPairingHandler(pool)
+
+	pubkey := make([]byte, 32)
+	for i := range pubkey {
+		pubkey[i] = byte(i)
+	}
+	deviceID := uuid.New()
+	body, _ := json.Marshal(map[string]string{
+		"device_uuid":      deviceID.String(),
+		"initiator_pubkey": base64.RawURLEncoding.EncodeToString(pubkey),
+		"device_type":      "desktop",
+	})
+
+	ctx1 := app.NewContext(0)
+	ctx1.Request.SetBody(body)
+	ctx1.Request.Header.Set("Content-Type", "application/json")
+	handler.Initiate(context.Background(), ctx1)
+	if ctx1.Response.StatusCode() != consts.StatusOK {
+		t.Fatalf("first initiate expected 200, got %d: %s", ctx1.Response.StatusCode(), ctx1.Response.Body())
+	}
+
+	deviceStore := model.NewDeviceStore(pool)
+	if err := deviceStore.Deactivate(context.Background(), deviceID); err != nil {
+		t.Fatalf("failed to deactivate device: %v", err)
+	}
+
+	ctx2 := app.NewContext(0)
+	ctx2.Request.SetBody(body)
+	ctx2.Request.Header.Set("Content-Type", "application/json")
+	handler.Initiate(context.Background(), ctx2)
+	if ctx2.Response.StatusCode() != consts.StatusOK {
+		t.Fatalf("reactivation initiate expected 200, got %d: %s", ctx2.Response.StatusCode(), ctx2.Response.Body())
+	}
+
+	device, err := deviceStore.GetByID(context.Background(), deviceID)
+	if err != nil {
+		t.Fatalf("failed to fetch device: %v", err)
+	}
+	if !device.IsActive {
+		t.Fatal("expected existing device to be reactivated")
+	}
+}
+
 func TestPairingInitiateFingerprintConflict(t *testing.T) {
 	pool := setupTestDB(t)
 	defer pool.Close()
@@ -241,6 +288,13 @@ func TestPairingInitiateFingerprintConflict(t *testing.T) {
 	}
 	if !json.Valid(ctx2.Response.Body()) {
 		t.Fatalf("expected json error body, got %s", ctx2.Response.Body())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(ctx2.Response.Body(), &resp); err != nil {
+		t.Fatalf("failed to parse json error body: %v", err)
+	}
+	if resp["existing_device_uuid"] == "" {
+		t.Fatalf("expected existing_device_uuid in fingerprint conflict body, got %s", ctx2.Response.Body())
 	}
 }
 

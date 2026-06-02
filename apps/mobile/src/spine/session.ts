@@ -15,6 +15,7 @@ export interface PersistedPairingState {
   pairedAt: string;
   spineUrl: string;
   caFingerprint: string | null;
+  lastSeenAt: string | null;
 }
 
 const PAIRING_KEYS = {
@@ -26,6 +27,7 @@ const PAIRING_KEYS = {
   pairedAt: "syncmind.pairing.paired_at",
   spineUrl: "syncmind.pairing.spine_url",
   caFingerprint: "syncmind.pairing.ca_fingerprint",
+  lastSeenAt: "syncmind.pairing.last_seen_at",
 } as const;
 
 let currentSession: SpineSession | null = null;
@@ -66,6 +68,10 @@ export async function persistPairingState(
     PAIRING_KEYS.caFingerprint,
     state.caFingerprint ?? "null",
   );
+  await SecureStore.setItemAsync(
+    PAIRING_KEYS.lastSeenAt,
+    state.lastSeenAt ?? "null",
+  );
   currentPairingState = clonePairingState(state);
 }
 
@@ -79,6 +85,7 @@ export async function restorePairingState(): Promise<PersistedPairingState | nul
     pairedAt,
     spineUrl,
     caFingerprint,
+    lastSeenAt,
   ] = await Promise.all([
     SecureStore.getItemAsync(PAIRING_KEYS.selfDeviceUuid),
     SecureStore.getItemAsync(PAIRING_KEYS.syncKey),
@@ -88,6 +95,7 @@ export async function restorePairingState(): Promise<PersistedPairingState | nul
     SecureStore.getItemAsync(PAIRING_KEYS.pairedAt),
     SecureStore.getItemAsync(PAIRING_KEYS.spineUrl),
     SecureStore.getItemAsync(PAIRING_KEYS.caFingerprint),
+    SecureStore.getItemAsync(PAIRING_KEYS.lastSeenAt),
   ]);
 
   if (
@@ -113,6 +121,7 @@ export async function restorePairingState(): Promise<PersistedPairingState | nul
     pairedAt,
     spineUrl,
     caFingerprint: caFingerprint === "null" ? null : caFingerprint,
+    lastSeenAt: lastSeenAt === "null" || lastSeenAt === null ? null : lastSeenAt,
   };
   currentPairingState = clonePairingState(state);
   return state;
@@ -127,6 +136,29 @@ export async function clearPairingState(): Promise<void> {
 
 export function getRestoredPairingState(): PersistedPairingState | null {
   return currentPairingState ? clonePairingState(currentPairingState) : null;
+}
+
+let lastSeenPersistedAt = 0;
+const LAST_SEEN_THROTTLE_MS = 30_000;
+
+export function __resetLastSeenThrottleForTests(): void {
+  lastSeenPersistedAt = 0;
+}
+
+export async function updateLastSeenAt(): Promise<void> {
+  const now = new Date().toISOString();
+  if (currentPairingState) {
+    currentPairingState.lastSeenAt = now;
+  }
+  if (Date.now() - lastSeenPersistedAt < LAST_SEEN_THROTTLE_MS) {
+    return;
+  }
+  lastSeenPersistedAt = Date.now();
+  await SecureStore.setItemAsync(PAIRING_KEYS.lastSeenAt, now);
+}
+
+export function getLastSeenAt(): string | null {
+  return currentPairingState?.lastSeenAt ?? null;
 }
 
 function clonePairingState(state: PersistedPairingState): PersistedPairingState {

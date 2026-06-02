@@ -316,6 +316,9 @@ pub async fn spine_pair_status(state: State<'_, AppState>) -> Result<PairingStat
     let cfg = state.config.lock().expect("config mutex poisoned").clone();
     let active_session = runtime.current_pairing_session().await;
     if cfg.spine.is_paired() {
+        if let Some(view) = reconcile_remote_pairing_state(&state, &cfg.spine).await? {
+            return Ok(view);
+        }
         Ok(PairingStateView {
             state: "paired".to_string(),
             session_id: active_session,
@@ -343,6 +346,81 @@ pub async fn spine_pair_status(state: State<'_, AppState>) -> Result<PairingStat
             error_message: None,
         })
     }
+}
+
+async fn reconcile_remote_pairing_state(
+    state: &AppState,
+    spine_cfg: &syncmind_core::SpineConfig,
+) -> Result<Option<PairingStateView>, String> {
+    if !spine_cfg.is_enabled() {
+        return Ok(None);
+    }
+
+    let client = match state.spine.require_client().await {
+        Ok(client) => client,
+        Err(_) => return Ok(None),
+    };
+
+    match client.device_status().await {
+        Ok(status) if !status.is_active || status.paired_device_id.is_none() => {
+            clear_local_pairing_after_remote_unpair(state, "REMOTE_UNPAIRED").await
+        }
+        Ok(status)
+            if spine_cfg
+                .peer_device_id_uuid
+                .as_ref()
+                .is_some_and(|peer| status.paired_device_id.as_ref() != Some(peer)) =>
+        {
+            clear_local_pairing_after_remote_unpair(state, "REMOTE_UNPAIRED").await
+        }
+        Ok(_) => Ok(None),
+        Err(e) if e.code == SpineErrorCode::AuthInvalid.as_str() => {
+            clear_local_pairing_after_remote_unpair(state, "REMOTE_UNPAIRED").await
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to reconcile remote pairing state");
+            Ok(None)
+        }
+    }
+}
+
+async fn clear_local_pairing_after_remote_unpair(
+    state: &AppState,
+    error_code: &str,
+) -> Result<Option<PairingStateView>, String> {
+    let peer_fp = state
+        .config
+        .lock()
+        .expect("config mutex poisoned")
+        .spine
+        .paired_peer_fingerprint
+        .clone();
+
+    if let Some(fp) = peer_fp.as_deref() {
+        state.spine.local_unpair(fp).await;
+    } else {
+        state.spine.cancel_pairing().await;
+        state
+            .spine
+            .refresh_live_sync(false)
+            .await
+            .map_err(String::from)?;
+    }
+
+    {
+        let mut cfg = state.config.lock().expect("config mutex poisoned");
+        cfg.spine.clear_pairing();
+        cfg.save().map_err(|e| format!("save config: {e}"))?;
+    }
+
+    Ok(Some(PairingStateView {
+        state: "idle".to_string(),
+        session_id: None,
+        peer_fingerprint: None,
+        peer_device_id: None,
+        error_code: Some(error_code.to_string()),
+        error_message: Some("paired device link no longer exists".to_string()),
+    }))
 }
 
 #[tauri::command]
@@ -462,8 +540,8 @@ pub async fn spine_unpair(
 
     if had_client {
         if let Ok(client) = state.spine.require_client().await {
-            if let Err(e) = client.auth_revoke().await {
-                warn!(error = %e, "auth_revoke failed during unpair");
+            if let Err(e) = client.device_revoke().await {
+                warn!(error = %e, "device_revoke failed during unpair");
             }
         }
     }
@@ -507,7 +585,7 @@ pub async fn spine_reset_identity(state: State<'_, AppState>) -> Result<(), Stri
         .paired_peer_fingerprint
         .clone();
     if let Ok(client) = state.spine.require_client().await {
-        let _ = client.auth_revoke().await;
+        let _ = client.device_revoke().await;
     }
     if let Some(fp) = peer_fp.as_deref() {
         state.spine.local_unpair(fp).await;

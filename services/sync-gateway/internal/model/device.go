@@ -86,10 +86,25 @@ func (s *DeviceStore) Deactivate(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+// Reactivate sets is_active = true for a previously revoked device.
+func (s *DeviceStore) Reactivate(ctx context.Context, id uuid.UUID) error {
+	query := `UPDATE devices SET is_active = true WHERE id = $1`
+	_, err := s.pool.Exec(ctx, query, id)
+	return err
+}
+
 // UpdateLastSeen sets last_seen_at to the provided timestamp.
 func (s *DeviceStore) UpdateLastSeen(ctx context.Context, id uuid.UUID, t time.Time) error {
 	query := `UPDATE devices SET last_seen_at = $1 WHERE id = $2`
 	_, err := s.pool.Exec(ctx, query, t, id)
+	return err
+}
+
+// UnlinkPeer clears paired_device_id for any device that points at the given device ID.
+// Used during device revocation to break the bidirectional pairing link.
+func (s *DeviceStore) UnlinkPeer(ctx context.Context, deviceID uuid.UUID) error {
+	query := `UPDATE devices SET paired_device_id = NULL WHERE paired_device_id = $1`
+	_, err := s.pool.Exec(ctx, query, deviceID)
 	return err
 }
 
