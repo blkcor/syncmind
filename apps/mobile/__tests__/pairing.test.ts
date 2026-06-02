@@ -223,6 +223,23 @@ describe("completePairing", () => {
     });
     expect(body.x25519_ephemeral_pubkey).toBeUndefined();
   });
+
+  it("reports a readable error when the identity key is already bound to another device UUID", async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        code: "FINGERPRINT_CONFLICT",
+        message: "identity key is already bound to device_uuid f57377ee-93a5-4f09-baa0-d26c0901e558",
+      }),
+    })) as unknown as typeof fetch;
+    const parsed = parsePairingPayload(JSON.stringify(payload()));
+    const responderPubkey = base64UrlNoPad(new Uint8Array(32).fill(7));
+
+    await expect(completePairing(parsed, deviceUuid, responderPubkey)).rejects.toThrow(
+      "This mobile identity is already registered under another device ID - reset device identity before pairing again",
+    );
+  });
 });
 
 describe("deriveSyncKey", () => {
@@ -248,6 +265,7 @@ describe("pairing state persistence", () => {
     pairedAt: "2026-05-31T00:00:00.000Z",
     spineUrl: "https://spine.example.com:8443",
     caFingerprint: null,
+    lastSeenAt: null,
   };
 
   it("round-trips required state through SecureStore", async () => {
@@ -301,5 +319,40 @@ describe("startPairingFlow", () => {
         isFirstPairing: true,
       }),
     );
+  });
+
+  it("recovers a lost mobile device UUID from a fingerprint conflict and retries pairing", async () => {
+    const existingDeviceUuid = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          code: "FINGERPRINT_CONFLICT",
+          existing_device_uuid: existingDeviceUuid,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: "completed",
+          session_id: sessionId,
+          initiator_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          responder_id: existingDeviceUuid,
+          initiator_pubkey: validPubkeyB64,
+        }),
+      });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const parsed = parsePairingPayload(JSON.stringify(payload()));
+
+    await startPairingFlow(parsed);
+
+    const [, retryInit] = fetchMock.mock.calls[1];
+    expect(JSON.parse(retryInit.body as string).device_uuid).toBe(existingDeviceUuid);
+    const restored = await restorePairingState();
+    expect(restored?.selfDeviceUuid).toBe(existingDeviceUuid);
+    await expect(ensureMobileDeviceUuid()).resolves.toBe(existingDeviceUuid);
   });
 });

@@ -12,6 +12,7 @@ import (
 	"github.com/blkcor/syncmind/spine/internal/handler"
 	"github.com/blkcor/syncmind/spine/internal/logger"
 	"github.com/blkcor/syncmind/spine/internal/middleware"
+	"github.com/blkcor/syncmind/spine/internal/model"
 	"github.com/blkcor/syncmind/spine/internal/pkg/websocket"
 	"github.com/blkcor/syncmind/spine/internal/scheduler"
 	"github.com/cloudwego/hertz/pkg/app"
@@ -106,6 +107,8 @@ func main() {
 	syncHandler := handler.NewSyncHandler(dbPool, rdb)
 	mediaHandler := handler.NewMediaHandler(dbPool, rdb)
 	authHandler := handler.NewAuthHandler(rdb)
+	deviceStore := model.NewDeviceStore(dbPool)
+	deviceHandler := handler.NewDeviceHandler(deviceStore)
 	wsHub := websocket.NewHub()
 
 	// Rate limiters
@@ -135,6 +138,8 @@ func main() {
 	h.DELETE("/v1/sync/bundles/:id", authMW, syncHandler.Ack)
 	h.POST("/v1/media/upload", authMW, syncRateLimit, mediaHandler.Upload)
 	h.POST("/v1/auth/revoke", authMW, authHandler.Revoke)
+	h.GET("/v1/devices/:self_device_uuid", authMW, deviceHandler.Status)
+	h.POST("/v1/devices/:self_device_uuid/revoke", authMW, deviceHandler.Revoke)
 
 	// Metrics endpoint
 	h.GET("/metrics", func(c context.Context, ctx *app.RequestContext) {

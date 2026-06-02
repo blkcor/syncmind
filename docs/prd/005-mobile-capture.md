@@ -78,8 +78,8 @@ PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
 **Description:** 作为移动端用户，我希望扫描桌面端 Devices 面板上的二维码就能完成配对，10 秒内进入"已配对"状态。
 
 **Acceptance Criteria:**
-- [ ] 使用 `expo-camera` 实现扫码界面，相机权限通过 `Camera.requestCameraPermissionsAsync()` 申请；拒绝权限时显示降级 UI：手输配对载荷 base64。
-- [ ] QR payload schema（与桌面端约定，需要 Phase 3 桌面端配合扩展，见 §US-052）：
+- [x] 使用 `expo-camera` 实现扫码界面，相机权限通过 `Camera.requestCameraPermissionsAsync()` 申请；拒绝权限时显示降级 UI：手输配对载荷 base64。
+- [x] QR payload schema（与桌面端约定，需要 Phase 3 桌面端配合扩展，见 §US-052）：
   ```json
   {
     "v": 1,
@@ -92,23 +92,23 @@ PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
     "device_a_fingerprint": "sha256:HEX..."
   }
   ```
-- [ ] 客户端在解码后必须校验：
+- [x] 客户端在解码后必须校验：
   - `v == 1`，否则提示"App 版本过低"。
   - `expires_at` > now（容忍 ±60s 时钟漂移）；过期时提示"二维码已过期，请桌面端重新生成"。
   - `spine_url` 必须 `https://`；dev mode（`__DEV__ === true`）放行 `http://`。
-- [ ] 调用 Spine `POST /pairing/complete`（PRD 002 §US-012）完成握手：上传 mobile 的 Ed25519 pubkey + X25519 ephemeral pubkey；收到 device_b 的 session_id。
-- [ ] 派生 `sync_key = HKDF-SHA256(x25519_shared, salt=session_id, info="syncmind-v1")`，与桌面端 §PRD 004 完全一致。
-- [ ] 持久化到 `expo-secure-store`：`sync_key`、`paired_peer_fingerprint`、`paired_peer_device_type="desktop"`、`paired_at`、`peer_device_id_uuid`、`spine_url`、`ca_fingerprint`。
-- [ ] 自定义 CA 场景：从 `ca_fingerprint` 校验 TLS 证书指纹（使用 `expo-network` + 自定义 fetch wrapper，或 `react-native-ssl-pinning`）；MVP 接受 system trust + 可选 fingerprint pin。
-- [ ] 配对成功后跳转到"首条 capture"引导页。
+- [x] 调用 Spine `POST /pairing/complete`（PRD 002 §US-012）完成握手：上传 mobile 的 Ed25519 pubkey + X25519 ephemeral pubkey；收到 device_b 的 session_id。
+- [x] 派生 `sync_key = HKDF-SHA256(x25519_shared, salt=session_id, info="syncmind-v1")`，与桌面端 §PRD 004 完全一致。
+- [x] 持久化到 `expo-secure-store`：`sync_key`、`paired_peer_fingerprint`、`paired_peer_device_type="desktop"`、`paired_at`、`peer_device_id_uuid`、`spine_url`、`ca_fingerprint`。
+- [x] 自定义 CA 场景：从 `ca_fingerprint` 校验 TLS 证书指纹（使用 `expo-network` + 自定义 fetch wrapper，或 `react-native-ssl-pinning`）；MVP 接受 system trust + 可选 fingerprint pin。
+- [x] 配对成功后跳转到"首条 capture"引导页。
 
 ### US-042: 配对状态管理与解配对
 **Description:** 作为用户，我希望在设置中清楚看到当前配对的对端设备信息，并能一键解除配对。
 
 **Acceptance Criteria:**
-- [ ] 设置页 / Devices section 显示：对端 fingerprint（前 8 位 + 后 4 位缩略）、对端 device_type、`paired_at` 相对时间、Spine URL、最后一次成功上传时间。
+- [ ] 设置页 / Devices section 显示：对端 fingerprint（前 8 位 + 后 4 位缩略）、对端 device_type、`paired_at` 相对时间、Spine URL、最后一次成功 Spine 联系时间（`last_seen_at`）。
 - [ ] "Unpair" 按钮触发：
-  1. 调用 Spine `POST /devices/{self}/revoke`（PRD 002 §US-014）撤销自身设备。
+  1. 调用 Spine `POST /v1/devices/{self}/revoke` 撤销自身设备并解除 paired 关系。
   2. 清除所有 `expo-secure-store` 同步键。
   3. **保留** Ed25519 身份密钥（不重置身份），允许后续重新配对。
   4. 清空发送队列；正在发送的 in-flight 请求 abort。

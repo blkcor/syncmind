@@ -11,6 +11,7 @@ import {
   decodePairingPubkey,
   deriveSyncKey,
   ed25519PublicKeyToX25519,
+  PairingFingerprintConflictError,
 } from "./handshake";
 import type { PairingPayload } from "./payload";
 import {
@@ -39,7 +40,7 @@ export async function startPairingFlow(
   await ensureIdentity();
   const selfDeviceUuid = await ensureMobileDeviceUuid();
   const identityPubkey = getDevicePubkey();
-  const completion = await completePairing(
+  const { completion, selfDeviceUuid: completedSelfDeviceUuid } = await completePairingWithDeviceUuidRecovery(
     payload,
     selfDeviceUuid,
     identityPubkey,
@@ -51,7 +52,7 @@ export async function startPairingFlow(
   const syncKey = await deriveSyncKey(peerX25519Pubkey, payload.session_id);
 
   const state: PersistedPairingState = {
-    selfDeviceUuid,
+    selfDeviceUuid: completedSelfDeviceUuid,
     syncKey,
     pairedPeerFingerprint: payload.device_a_fingerprint,
     pairedPeerDeviceId: completion.initiator_id,
@@ -59,6 +60,7 @@ export async function startPairingFlow(
     pairedAt: new Date().toISOString(),
     spineUrl: payload.spine_url,
     caFingerprint: payload.ca_fingerprint,
+    lastSeenAt: null,
   };
 
   await persistPairingState(state);
@@ -67,6 +69,32 @@ export async function startPairingFlow(
     .setPaired(payload.device_a_fingerprint, !previousState?.pairedPeerFingerprint);
 
   return state;
+}
+
+async function completePairingWithDeviceUuidRecovery(
+  payload: PairingPayload,
+  selfDeviceUuid: string,
+  identityPubkey: Uint8Array | string,
+) {
+  try {
+    return {
+      completion: await completePairing(payload, selfDeviceUuid, identityPubkey),
+      selfDeviceUuid,
+    };
+  } catch (error) {
+    if (
+      error instanceof PairingFingerprintConflictError &&
+      error.existingDeviceUuid
+    ) {
+      const completion = await completePairing(
+        payload,
+        error.existingDeviceUuid,
+        identityPubkey,
+      );
+      return { completion, selfDeviceUuid: error.existingDeviceUuid };
+    }
+    throw error;
+  }
 }
 
 export function pairingFlowErrorMessage(error: unknown, payload?: PairingPayload): string {

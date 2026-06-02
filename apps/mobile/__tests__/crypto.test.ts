@@ -32,10 +32,8 @@ import {
 import NativeDeviceIdentity from "../src/crypto/native-device-identity";
 import {
   clearCurrentSpineSession,
-  getCurrentSpineSession,
   persistPairingState,
   restorePairingState,
-  setCurrentSpineSession,
 } from "../src/spine/session";
 import {
   clearOutbox,
@@ -319,11 +317,18 @@ describe("device_reset", () => {
     await expect(device_reset()).resolves.toBeUndefined();
   });
 
-  it("revokes the current Spine session, clears the outbox, and unpairs the app state", async () => {
+  it("revokes the current device on Spine, clears the outbox, and unpairs the app state", async () => {
     await ensureIdentity();
-    await setCurrentSpineSession({
-      baseUrl: "https://spine.syncmind.local",
-      accessToken: "test-token",
+    await persistPairingState({
+      selfDeviceUuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      syncKey: new Uint8Array(32).fill(3),
+      pairedPeerFingerprint: `${FINGERPRINT_PREFIX}${"cd".repeat(32)}`,
+      pairedPeerDeviceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      pairedPeerDeviceType: "desktop",
+      pairedAt: "2026-05-31T00:00:00.000Z",
+      spineUrl: "https://spine.syncmind.local",
+      caFingerprint: null,
+      lastSeenAt: null,
     });
     await enqueueOutboxItem({
       id: "capture-1",
@@ -334,15 +339,14 @@ describe("device_reset", () => {
     await device_reset();
 
     expect(global.fetch).toHaveBeenCalledWith(
-      "https://spine.syncmind.local/v1/auth/revoke",
+      "https://spine.syncmind.local/v1/devices/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/revoke",
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({
-          Authorization: "Bearer test-token",
+          Authorization: expect.stringMatching(/^Bearer /),
         }),
       }),
     );
-    await expect(getCurrentSpineSession()).resolves.toBeNull();
     await expect(getOutboxItems()).resolves.toEqual([]);
     expect(useAppStore.getState().isPaired).toBe(false);
     expect(useAppStore.getState().peerDeviceFingerprint).toBeNull();
@@ -359,6 +363,7 @@ describe("device_reset", () => {
       pairedAt: "2026-05-31T00:00:00.000Z",
       spineUrl: "https://spine.syncmind.local",
       caFingerprint: null,
+      lastSeenAt: null,
     });
 
     await device_reset();

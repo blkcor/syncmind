@@ -24,7 +24,14 @@ export default function CaptureScreen() {
   const [note, setNote] = useState('');
 
   if (!isPaired) {
-    return <PairingScanner />;
+    return (
+      <View style={styles.unpairedContainer}>
+        <Text style={styles.unpairedHint}>
+          Pair with a desktop to start capturing
+        </Text>
+        <PairingScanner />
+      </View>
+    );
   }
 
   const handleSend = () => {
@@ -147,5 +154,17 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
+  },
+  unpairedContainer: {
+    flex: 1,
+    backgroundColor: '#fff',
+  },
+  unpairedHint: {
+    textAlign: "center",
+    fontSize: 14,
+    color: "#6b7280",
+    paddingTop: 60,
+    paddingBottom: 12,
+    fontWeight: "500",
   },
 });

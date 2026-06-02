@@ -21,6 +21,17 @@ export interface PairingCompleteResponse {
   initiator_pubkey?: string;
 }
 
+export class PairingFingerprintConflictError extends Error {
+  constructor(public readonly existingDeviceUuid: string | null) {
+    super(
+      existingDeviceUuid
+        ? "This mobile identity was already registered under an earlier device ID. Retrying with the existing device ID."
+        : "This mobile identity is already registered under another device ID - reset device identity before pairing again",
+    );
+    this.name = "PairingFingerprintConflictError";
+  }
+}
+
 export async function completePairing(
   payload: PairingPayload,
   selfDeviceUuid: string,
@@ -103,9 +114,15 @@ async function pairingHttpError(
   spineUrl: string,
 ): Promise<Error> {
   let code: string | undefined;
+  let existingDeviceUuid: string | null = null;
   try {
-    const body = (await response.json()) as { code?: string; error?: string };
+    const body = (await response.json()) as {
+      code?: string;
+      error?: string;
+      existing_device_uuid?: string;
+    };
     code = body.code ?? body.error;
+    existingDeviceUuid = body.existing_device_uuid ?? null;
   } catch {
     code = undefined;
   }
@@ -122,6 +139,9 @@ async function pairingHttpError(
     return new Error(
       "This mobile identity is already registered differently - reset device identity before pairing again",
     );
+  }
+  if (response.status === 409 && code === "FINGERPRINT_CONFLICT") {
+    return new PairingFingerprintConflictError(existingDeviceUuid);
   }
   return new Error(`Cannot reach ${spineUrl} - check your network connection`);
 }

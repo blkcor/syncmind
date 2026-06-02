@@ -160,6 +160,17 @@ pub struct UploadBundleResponse {
     pub bundle_id: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeviceStatusResponse {
+    pub device_uuid: String,
+    pub device_type: String,
+    #[serde(default)]
+    pub paired_device_id: Option<String>,
+    pub is_active: bool,
+    #[serde(default)]
+    pub last_seen_at: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -435,6 +446,39 @@ impl SpineClient {
         // revoked). We don't propagate 401 here because best-effort.
         let status = resp.status();
         if status.is_success() || status == StatusCode::UNAUTHORIZED {
+            Ok(())
+        } else {
+            Err(http_status_to_spine_err(&resp))
+        }
+    }
+
+    pub async fn device_status(&self) -> Result<DeviceStatusResponse, SpineError> {
+        let url = self.url(&format!("v1/devices/{}", self.identity.device_uuid()))?;
+        let resp = self
+            .send_authenticated(Method::GET, url, None, None)
+            .await?;
+        json_or_error(resp).await
+    }
+
+    pub async fn device_revoke(&self) -> Result<(), SpineError> {
+        let url = self.url(&format!(
+            "v1/devices/{}/revoke",
+            self.identity.device_uuid()
+        ))?;
+        let body = serde_json::to_vec(&serde_json::json!({
+            "device_uuid": self.identity.device_uuid(),
+        }))
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let resp = self
+            .send_authenticated(Method::POST, url, Some(body), Some(headers))
+            .await?;
+        let status = resp.status();
+        if status.is_success()
+            || status == StatusCode::UNAUTHORIZED
+            || status == StatusCode::NOT_FOUND
+        {
             Ok(())
         } else {
             Err(http_status_to_spine_err(&resp))
@@ -989,6 +1033,60 @@ mod tests {
 
         let status = client.pairing_status("s-1").await.unwrap();
         assert_eq!(status.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn device_status_parses_self_device_state() {
+        let server = MockServer::start().await;
+        let (client, identity, _) = test_client(server.uri());
+
+        server
+            .register(
+                Mock::given(method("GET"))
+                    .and(path(format!("/v1/devices/{}", identity.device_uuid())))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                        "device_uuid": identity.device_uuid(),
+                        "device_type": "desktop",
+                        "paired_device_id": null,
+                        "is_active": true,
+                        "last_seen_at": null,
+                    }))),
+            )
+            .await;
+
+        let status = client.device_status().await.unwrap();
+        assert_eq!(status.device_uuid, identity.device_uuid());
+        assert_eq!(status.device_type, "desktop");
+        assert_eq!(status.paired_device_id, None);
+        assert!(status.is_active);
+    }
+
+    #[tokio::test]
+    async fn device_revoke_posts_self_device_revoke() {
+        let server = MockServer::start().await;
+        let (client, identity, _) = test_client(server.uri());
+
+        server
+            .register(
+                Mock::given(method("POST"))
+                    .and(path(format!(
+                        "/v1/devices/{}/revoke",
+                        identity.device_uuid()
+                    )))
+                    .respond_with(ResponseTemplate::new(204)),
+            )
+            .await;
+
+        client.device_revoke().await.unwrap();
+
+        let reqs = received_requests(&server).await;
+        assert_eq!(reqs.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&reqs[0].body).expect("valid JSON body");
+        assert_eq!(
+            body["device_uuid"].as_str().unwrap(),
+            identity.device_uuid()
+        );
     }
 
     #[tokio::test]

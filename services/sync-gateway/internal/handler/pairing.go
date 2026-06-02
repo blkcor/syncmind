@@ -75,8 +75,8 @@ func (h *PairingHandler) Initiate(ctx context.Context, c *app.RequestContext) {
 
 	deviceStore := model.NewDeviceStore(h.db)
 	fingerprint := model.PublicKeyFingerprint(pubkeyBytes)
-	if conflict, status, code, msg := h.resolveDeviceConflict(ctx, deviceStore, deviceID, fingerprint); conflict {
-		c.JSON(status, map[string]any{"code": code, "message": msg})
+	if conflict, status, code, msg, existingDeviceID := h.resolveDeviceConflict(ctx, deviceStore, deviceID, fingerprint); conflict {
+		c.JSON(status, pairingConflictBody(code, msg, existingDeviceID))
 		return
 	} else if status == http.StatusCreated {
 		device := &model.Device{
@@ -209,9 +209,9 @@ func (h *PairingHandler) Complete(ctx context.Context, c *app.RequestContext) {
 
 	deviceStore := model.NewDeviceStore(h.db)
 	fingerprint := model.PublicKeyFingerprint(pubkeyBytes)
-	conflict, status, code, msg := h.resolveDeviceConflict(ctx, deviceStore, responderID, fingerprint)
+	conflict, status, code, msg, existingDeviceID := h.resolveDeviceConflict(ctx, deviceStore, responderID, fingerprint)
 	if conflict {
-		c.JSON(status, map[string]any{"code": code, "message": msg})
+		c.JSON(status, pairingConflictBody(code, msg, existingDeviceID))
 		return
 	}
 	if status == http.StatusCreated {
@@ -382,22 +382,35 @@ func parseClientUUID(s string) (uuid.UUID, error) {
 //
 // Any other database error is reported as conflict=false, status=http.StatusInternalServerError
 // so the caller can return a generic 500.
-func (h *PairingHandler) resolveDeviceConflict(ctx context.Context, store *model.DeviceStore, id uuid.UUID, fingerprint string) (conflict bool, status int, code, msg string) {
+func (h *PairingHandler) resolveDeviceConflict(ctx context.Context, store *model.DeviceStore, id uuid.UUID, fingerprint string) (conflict bool, status int, code, msg string, existingDeviceID *uuid.UUID) {
 	existing, err := store.GetByID(ctx, id)
 	if err == nil {
 		if existing.PublicKeyFingerprint != fingerprint {
-			return true, http.StatusConflict, "UUID_CONFLICT", "device_uuid is already bound to a different identity key"
+			return true, http.StatusConflict, "UUID_CONFLICT", "device_uuid is already bound to a different identity key", nil
 		}
-		return false, http.StatusOK, "", ""
+		if !existing.IsActive {
+			if err := store.Reactivate(ctx, id); err != nil {
+				return false, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error", nil
+			}
+		}
+		return false, http.StatusOK, "", "", nil
 	}
 
 	existingByFingerprint, err := store.GetByFingerprint(ctx, fingerprint)
 	if err == nil {
-		return true, http.StatusConflict, "FINGERPRINT_CONFLICT", fmt.Sprintf("identity key is already bound to device_uuid %s", existingByFingerprint.ID)
+		return true, http.StatusConflict, "FINGERPRINT_CONFLICT", fmt.Sprintf("identity key is already bound to device_uuid %s", existingByFingerprint.ID), &existingByFingerprint.ID
 	}
 
 	// pgx returns pgx.ErrNoRows when both lookups are absent; treat any not-found-shaped
 	// error as a signal that we should create the row. Genuine connection errors will
 	// be surfaced by the subsequent Create call.
-	return false, http.StatusCreated, "", ""
+	return false, http.StatusCreated, "", "", nil
+}
+
+func pairingConflictBody(code, msg string, existingDeviceID *uuid.UUID) map[string]any {
+	body := map[string]any{"code": code, "message": msg}
+	if existingDeviceID != nil {
+		body["existing_device_uuid"] = existingDeviceID.String()
+	}
+	return body
 }

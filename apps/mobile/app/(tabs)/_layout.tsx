@@ -5,16 +5,16 @@ import { Pressable } from 'react-native';
 import Colors from '@/constants/Colors';
 import { useColorScheme } from '@/components/useColorScheme';
 import { useClientOnlyValue } from '@/components/useClientOnlyValue';
+import { useAppStore } from '@/src/store';
 
 export default function TabLayout() {
   const colorScheme = useColorScheme();
+  const isPaired = useAppStore((s) => s.isPaired);
 
   return (
     <Tabs
       screenOptions={{
         tabBarActiveTintColor: Colors[colorScheme].tint,
-        // Disable the static render of the header on web
-        // to prevent a hydration error in React Navigation v6.
         headerShown: useClientOnlyValue(false, true),
       }}>
       <Tabs.Screen
@@ -51,18 +51,30 @@ export default function TabLayout() {
       <Tabs.Screen
         name="two"
         options={{
-          title: 'Graph',
+          title: isPaired ? 'Graph' : 'Graph (locked)',
           tabBarIcon: ({ color }) => (
             <SymbolView
               name={{
-                ios: 'chevron.left.forwardslash.chevron.right',
-                android: 'code',
-                web: 'code',
+                ios: isPaired
+                  ? 'chevron.left.forwardslash.chevron.right'
+                  : 'lock.fill',
+                android: isPaired ? 'code' : 'lock',
+                web: isPaired ? 'code' : 'lock',
               }}
               tintColor={color}
               size={28}
             />
           ),
+          tabBarItemStyle: isPaired ? undefined : { opacity: 0.4 },
+          ...(isPaired
+            ? {}
+            : {
+                listeners: {
+                  tabPress: (e: { preventDefault: () => void }) => {
+                    e.preventDefault();
+                  },
+                },
+              }),
         }}
       />
       <Tabs.Screen
