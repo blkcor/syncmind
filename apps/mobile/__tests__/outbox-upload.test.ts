@@ -305,7 +305,12 @@ const defaultPairingState = {
 
 async function createEncryptedFixture(id: string, text: string): Promise<Uint8Array> {
   const result = await encryptCaptureText(
-    { id, text, source: "mobile", client_ts: "2026-06-02T00:00:00.000Z" },
+    {
+      id,
+      text,
+      client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+    },
     defaultPairingState,
   );
   return result.blob;

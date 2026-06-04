@@ -4,11 +4,19 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import type { PersistedPairingState } from "../spine/session";
 
 export interface CaptureTextPayload {
+  v: 1;
+  kind: "capture-text";
   id: string;
   text: string;
-  source: "mobile";
+  source: "typed";
   client_ts: string;
+  client_device_fingerprint: string;
 }
+
+export type CaptureTextPayloadInput = Omit<
+  CaptureTextPayload,
+  "v" | "kind" | "source"
+>;
 
 export interface BundleEnvelope {
   schema_version: number;
@@ -50,8 +58,15 @@ export function secureSerialize<T>(payload: T): Uint8Array {
   return encoder.encode(JSON.stringify(payload));
 }
 
-export function createCaptureTextPayload(payload: CaptureTextPayload): CaptureTextPayload {
-  return withSecureSerializeGuard({ ...payload });
+export function createCaptureTextPayload(
+  payload: CaptureTextPayloadInput,
+): CaptureTextPayload {
+  return withSecureSerializeGuard({
+    v: 1,
+    kind: "capture-text",
+    ...payload,
+    source: "typed",
+  });
 }
 
 function withSecureSerializeGuard<T extends object>(payload: T): T {
@@ -95,8 +110,11 @@ export function peerFingerprintToAAD(fingerprint: string): Uint8Array {
 /**
  * Build the inner capture text payload and outer BundleEnvelope.
  */
-export function buildCaptureTextEnvelope(payload: CaptureTextPayload): BundleEnvelope {
-  const contentUtf8 = new TextDecoder().decode(secureSerialize(payload));
+export function buildCaptureTextEnvelope(
+  payload: CaptureTextPayloadInput,
+): BundleEnvelope {
+  const capturePayload = createCaptureTextPayload(payload);
+  const contentUtf8 = new TextDecoder().decode(secureSerialize(capturePayload));
   const sha256 = computeLowerHexSha256(new TextEncoder().encode(contentUtf8));
 
   return {
