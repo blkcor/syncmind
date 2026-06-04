@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as Crypto from 'expo-crypto';
 import {
   Alert,
@@ -16,6 +16,7 @@ import {
 
 import { PairingScanner } from '@/src/pairing/scanner';
 import { useAppStore } from '@/src/store';
+import { ensureIdentity } from '@/src/crypto/identity';
 import { createCaptureTextPayload, encryptCaptureText } from '@/src/crypto/bundle';
 import { getRestoredPairingState } from '@/src/spine/session';
 import {
@@ -28,6 +29,8 @@ import {
   subscribeToOutboxChanges,
 } from '@/src/outbox/service';
 
+const MAX_CAPTURE_TEXT_CHARS = 50_000;
+
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
   const sec = Math.floor(diff / 1000);
@@ -37,6 +40,15 @@ function relativeTime(iso: string): string {
   const hr = Math.floor(min / 60);
   if (hr < 24) return `${hr}h ago`;
   return `${Math.floor(hr / 24)}d ago`;
+}
+
+function shortFingerprint(fingerprint: string | null): string {
+  if (!fingerprint) return "Unknown peer";
+  const normalized = fingerprint.startsWith("sha256:")
+    ? fingerprint.slice("sha256:".length)
+    : fingerprint;
+  if (normalized.length <= 12) return normalized;
+  return `${normalized.slice(0, 8)}...${normalized.slice(-4)}`;
 }
 
 function statusIcon(state: OutboxState): string {
@@ -67,12 +79,36 @@ function statusText(state: OutboxState): string {
 
 export default function CaptureScreen() {
   const isPaired = useAppStore((state) => state.isPaired);
+  const peerDeviceFingerprint = useAppStore(
+    (state) => state.peerDeviceFingerprint,
+  );
+  const connectionStatus = useAppStore((state) => state.connectionStatus);
   const showFirstCaptureGuide = useAppStore((state) => state.showFirstCaptureGuide);
   const dismissFirstCaptureGuide = useAppStore(
     (state) => state.dismissFirstCaptureGuide,
   );
   const [note, setNote] = useState('');
   const [outboxStatusRows, setOutboxStatusRows] = useState<OutboxStatusRow[]>([]);
+  const textInputRef = useRef<TextInput>(null);
+  const isTooLong = note.length > MAX_CAPTURE_TEXT_CHARS;
+  const canSend = note.trim().length > 0 && !isTooLong;
+  const hasQueuedRows = outboxStatusRows.some((row) =>
+    row.state === "pending" || row.state === "sending" || row.state === "failed"
+  );
+  const captureStatusLabel =
+    connectionStatus === "connected"
+      ? "Connected"
+      : connectionStatus === "error"
+        ? "Pairing invalid"
+        : hasQueuedRows
+          ? "Queued locally"
+          : "Queued locally";
+  const captureStatusColor =
+    connectionStatus === "connected"
+      ? "#16a34a"
+      : connectionStatus === "error"
+        ? "#dc2626"
+        : "#6b7280";
 
   const refreshOutboxStatuses = useCallback(async () => {
     if (!isPaired) {
@@ -103,6 +139,18 @@ export default function CaptureScreen() {
     };
   }, [isPaired, refreshOutboxStatuses]);
 
+  useEffect(() => {
+    if (!isPaired) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      textInputRef.current?.focus();
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [isPaired]);
+
   if (!isPaired) {
     return (
       <View style={styles.unpairedContainer}>
@@ -116,16 +164,17 @@ export default function CaptureScreen() {
 
   const handleSend = async () => {
     const trimmed = note.trim();
-    if (!trimmed) return;
+    if (!canSend || !trimmed) return;
 
     const state = getRestoredPairingState();
     if (!state) return;
+    const clientDeviceFingerprint = await ensureIdentity();
 
     const payload = createCaptureTextPayload({
       id: Crypto.randomUUID(),
       text: trimmed,
-      source: "mobile",
       client_ts: new Date().toISOString(),
+      client_device_fingerprint: clientDeviceFingerprint,
     });
 
     try {
@@ -173,9 +222,24 @@ export default function CaptureScreen() {
           <ScrollView
             style={styles.inputScroll}
             contentContainerStyle={styles.inputScrollContent}
+            keyboardDismissMode="on-drag"
             keyboardShouldPersistTaps="handled"
           >
+            <View style={styles.statusRow}>
+              <View
+                style={[
+                  styles.statusDot,
+                  { backgroundColor: captureStatusColor },
+                ]}
+              />
+              <Text style={styles.statusText}>{captureStatusLabel}</Text>
+              <Text style={styles.statusPeer} numberOfLines={1}>
+                {shortFingerprint(peerDeviceFingerprint)}
+              </Text>
+            </View>
             <TextInput
+              ref={textInputRef}
+              autoFocus
               multiline
               placeholder="Capture a note"
               style={styles.input}
@@ -187,10 +251,14 @@ export default function CaptureScreen() {
             />
           </ScrollView>
 
+          {isTooLong ? (
+            <Text style={styles.limitError}>Too long - try splitting</Text>
+          ) : null}
+
           <TouchableOpacity
-            style={[styles.sendButton, !note.trim() && styles.sendButtonDisabled]}
+            style={[styles.sendButton, !canSend && styles.sendButtonDisabled]}
             onPress={handleSend}
-            disabled={!note.trim()}
+            disabled={!canSend}
           >
             <Text style={styles.sendButtonText}>Send</Text>
           </TouchableOpacity>
@@ -265,6 +333,29 @@ const styles = StyleSheet.create({
   },
   inputScrollContent: {
     flexGrow: 1,
+    gap: 12,
+  },
+  statusRow: {
+    minHeight: 26,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  statusText: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#111827",
+  },
+  statusPeer: {
+    flex: 1,
+    textAlign: "right",
+    fontSize: 12,
+    color: "#6b7280",
   },
   input: {
     flex: 1,
@@ -274,6 +365,11 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 14,
     fontSize: 16,
+  },
+  limitError: {
+    marginTop: -8,
+    fontSize: 13,
+    color: "#b91c1c",
   },
   sendButton: {
     alignItems: 'center',

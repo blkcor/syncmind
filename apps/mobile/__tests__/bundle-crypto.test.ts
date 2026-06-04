@@ -92,12 +92,31 @@ describe("secureSerialize", () => {
     const payload = createCaptureTextPayload({
       id: "cap-guard",
       text: "secret",
-      source: "mobile",
       client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
     });
 
     expect(() => JSON.stringify(payload)).toThrow("secureSerialize");
     expect(() => secureSerialize(payload)).not.toThrow();
+  });
+
+  it("creates the US-043 capture-text payload schema", () => {
+    const payload = createCaptureTextPayload({
+      id: "cap-us-043",
+      text: "hello",
+      client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+    });
+
+    expect(payload).toMatchObject({
+      v: 1,
+      kind: "capture-text",
+      id: "cap-us-043",
+      text: "hello",
+      source: "typed",
+      client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+    });
   });
 });
 
@@ -138,8 +157,8 @@ describe("buildCaptureTextEnvelope", () => {
     const payload = {
       id: "cap-1",
       text: "hello world",
-      source: "mobile" as const,
       client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
     };
 
     const envelope = buildCaptureTextEnvelope(payload);
@@ -148,7 +167,12 @@ describe("buildCaptureTextEnvelope", () => {
     expect(envelope.kind).toBe("capture-text");
     expect(envelope.filename).toBe("capture-cap-1.json");
     expect(envelope.captured_at).toBeTruthy();
-    expect(envelope.content_utf8).toBe(JSON.stringify(payload));
+    expect(JSON.parse(envelope.content_utf8)).toEqual({
+      v: 1,
+      kind: "capture-text",
+      ...payload,
+      source: "typed",
+    });
     expect(envelope.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -156,14 +180,14 @@ describe("buildCaptureTextEnvelope", () => {
     const e1 = buildCaptureTextEnvelope({
       id: "cap-1",
       text: "hello",
-      source: "mobile",
       client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
     });
     const e2 = buildCaptureTextEnvelope({
       id: "cap-2",
       text: "world",
-      source: "mobile",
       client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
     });
 
     expect(e1.sha256).not.toBe(e2.sha256);
@@ -177,8 +201,8 @@ describe("encryptBundle", () => {
     const envelope = buildCaptureTextEnvelope({
       id: "cap-1",
       text: "secret message",
-      source: "mobile",
       client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
     });
     const aad = peerFingerprintToAAD(testPairingState.pairedPeerFingerprint);
 
@@ -201,8 +225,8 @@ describe("encryptBundle", () => {
     const envelope = buildCaptureTextEnvelope({
       id: "cap-1",
       text: "deterministic",
-      source: "mobile",
       client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
     });
     const aad = peerFingerprintToAAD(testPairingState.pairedPeerFingerprint);
 
@@ -230,8 +254,8 @@ describe("encryptBundle", () => {
     const envelope = buildCaptureTextEnvelope({
       id: "cap-1",
       text: "test",
-      source: "mobile",
       client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
     });
     const aad = peerFingerprintToAAD(testPairingState.pairedPeerFingerprint);
 
@@ -254,8 +278,8 @@ describe("encryptBundle", () => {
     const envelope = buildCaptureTextEnvelope({
       id: "cap-1",
       text: "test",
-      source: "mobile",
       client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
     });
     const aad = peerFingerprintToAAD(testPairingState.pairedPeerFingerprint);
 
@@ -272,8 +296,8 @@ describe("encryptBundle", () => {
     const envelope = buildCaptureTextEnvelope({
       id: "cap-1",
       text: "tamper test",
-      source: "mobile",
       client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
     });
     const aad = peerFingerprintToAAD(testPairingState.pairedPeerFingerprint);
 
@@ -300,8 +324,8 @@ describe("encryptCaptureText", () => {
     const payload = {
       id: "cap-1",
       text: "end-to-end test",
-      source: "mobile" as const,
       client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
     };
 
     const result = await encryptCaptureText(payload, testPairingState);
@@ -319,8 +343,8 @@ describe("privacy — no plaintext leak in encryption outputs", () => {
     const payload = {
       id: "cap-1",
       text: "my secret note",
-      source: "mobile" as const,
       client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
     };
 
     const result = await encryptCaptureText(payload, testPairingState);
@@ -331,11 +355,21 @@ describe("privacy — no plaintext leak in encryption outputs", () => {
 
   it("payloadHash does not leak plaintext", async () => {
     const result1 = await encryptCaptureText(
-      { id: "a", text: "message one", source: "mobile", client_ts: "2026-01-01T00:00:00.000Z" },
+      {
+        id: "a",
+        text: "message one",
+        client_ts: "2026-01-01T00:00:00.000Z",
+        client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+      },
       testPairingState,
     );
     const result2 = await encryptCaptureText(
-      { id: "b", text: "message two", source: "mobile", client_ts: "2026-01-01T00:00:00.000Z" },
+      {
+        id: "b",
+        text: "message two",
+        client_ts: "2026-01-01T00:00:00.000Z",
+        client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+      },
       testPairingState,
     );
 
@@ -357,8 +391,8 @@ describe("deterministic crypto fixture", () => {
     const envelope = buildCaptureTextEnvelope({
       id: "fixture-1",
       text: "fixture plaintext",
-      source: "mobile",
       client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
     });
 
     const result = await encryptBundle({

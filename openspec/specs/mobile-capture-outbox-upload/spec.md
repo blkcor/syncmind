@@ -3,17 +3,16 @@
 ## Purpose
 
 Defines the mobile capture outbox persistence, envelope encryption, ordered upload with retry, background flush, and capture screen integration for SyncMind mobile clients.
-
 ## Requirements
-
 ### Requirement: Capture payloads are securely serialized before encryption
 
-The mobile app SHALL convert capture payload objects into UTF-8 plaintext bytes only through a `secureSerialize()` helper used by the bundle encryption path. The app MUST NOT log, persist, or attach plaintext capture payloads to diagnostics, retry metadata, or outbox rows.
+The mobile app SHALL convert capture payload objects into UTF-8 plaintext bytes only through a `secureSerialize()` helper used by the bundle encryption path. For text captures, the inner plaintext payload serialized into `BundleEnvelope.content_utf8` SHALL contain `v: 1`, `kind: "capture-text"`, `id`, `text`, `source: "typed"`, `client_ts`, and `client_device_fingerprint`. The app MUST NOT log, persist, or attach plaintext capture payloads to diagnostics, retry metadata, or outbox rows beyond the bounded mini-preview metadata explicitly used by the capture screen.
 
 #### Scenario: Text capture serialization produces plaintext bytes only transiently
 
 - **WHEN** the user sends a non-empty text capture
-- **THEN** the app constructs an inner capture payload object with `id`, `text`, `source`, and `client_ts`
+- **THEN** the app constructs an inner capture payload object with `v = 1`, `kind = "capture-text"`, `id`, `text`, `source = "typed"`, `client_ts`, and `client_device_fingerprint`
+- **AND** `client_device_fingerprint` is the local mobile device fingerprint string
 - **AND** constructs an outer `BundleEnvelope` with `schema_version = 1`, `kind = "capture-text"`, `filename`, `content_utf8`, `captured_at`, and `sha256`
 - **AND** `content_utf8` contains the serialized inner capture payload
 - **AND** `secureSerialize()` returns UTF-8 JSON bytes of the outer envelope for encryption
@@ -242,3 +241,4 @@ The paired capture screen SHALL show a minimal local status list for the 3 most 
 - **WHEN** enqueue or flush changes an outbox row
 - **THEN** the capture screen refreshes its status list from SQLite through an in-process change notification
 - **AND** a 10-second polling fallback refreshes the same local query while the screen remains paired
+

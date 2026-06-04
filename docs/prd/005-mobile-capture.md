@@ -118,14 +118,16 @@ PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
 ### US-043: 文本捕获主屏
 **Description:** 作为用户，我希望打开 App 就是一个空白文本框，键盘自动弹出，写完点发送即可。
 
+> **Status:** ✅ Implemented via OpenSpec change [`mobile-text-capture-home`](../../openspec/changes/archive/2026-06-04-mobile-text-capture-home/). Text capture now uses the paired default Capture tab, auto-focused multiline input, local status row, 50,000-character limit, optimistic encrypted outbox enqueue, and the US-043 `capture-text` plaintext schema before encryption. Voice-mode capture remains deferred to US-044.
+
 **Acceptance Criteria:**
-- [ ] App 启动后默认进入 `CaptureScreen`（已配对状态下）；`autoFocus={true}` 的多行 `TextInput`。
-- [ ] 顶部一行薄状态栏显示对端连接状态（绿色圆点 = 已连接 / 灰色 = 队列中 / 红色 = 配对失效）。
-- [ ] 底部一个明显的 "Send" 按钮 + 一行最近 3 条 capture 的迷你预览（点击进入完整列表，§US-049）。
-- [ ] 输入字数 ≤ 50,000 字符（envelope 限制）；超过时按钮变灰并显示 "Too long — try splitting"。
-- [ ] Send 触发后 `TextInput` 立即清空（乐观更新）；后台进入 §US-047 的加密队列。
-- [ ] 支持下拉关闭键盘 / 上滑切到语音模式（§US-044）。
-- [ ] Capture payload schema（明文，加密前）：
+- [x] App 启动后默认进入 `CaptureScreen`（已配对状态下）；`autoFocus={true}` 的多行 `TextInput`。
+- [x] 顶部一行薄状态栏显示对端连接状态（绿色圆点 = 已连接 / 灰色 = 队列中 / 红色 = 配对失效）。
+- [x] 底部一个明显的 "Send" 按钮 + 一行最近 3 条 capture 的迷你预览（完整列表仍归 §US-049）。
+- [x] 输入字数 ≤ 50,000 字符（envelope 限制）；超过时按钮变灰并显示 "Too long — try splitting"。
+- [x] Send 触发后 `TextInput` 立即清空（乐观更新）；后台进入 §US-047 的加密队列。
+- [ ] 支持下拉关闭键盘 / 上滑切到语音模式（§US-044）。下拉/拖动/点击关闭键盘已实现；上滑语音模式仍归 US-044。
+- [x] Capture payload schema（明文，加密前）：
   ```json
   {
     "v": 1,
