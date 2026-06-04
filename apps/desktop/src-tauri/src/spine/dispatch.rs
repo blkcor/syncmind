@@ -29,10 +29,7 @@ use crate::spine::{SpineError, SpineErrorCode};
 #[derive(Debug, Clone)]
 pub enum DispatchOutcome {
     /// Text content was written to the sync-inbox and fed into the local index.
-    TextIndexed {
-        path: PathBuf,
-        chunks_added: usize,
-    },
+    TextIndexed { path: PathBuf, chunks_added: usize },
     /// Binary content (audio, image) was stored on disk alongside a placeholder
     /// markdown file.
     BinaryStored {
@@ -44,16 +41,12 @@ pub enum DispatchOutcome {
     RpcHandled,
     /// The bundle was a search RPC request that exceeded the per-peer rate
     /// limit; the caller must encrypt/upload the provided response envelope.
-    RpcRateLimited {
-        response: BundleEnvelope,
-    },
+    RpcRateLimited { response: BundleEnvelope },
     /// The bundle was intentionally skipped (e.g. deduplicated, expired).
     Ignored,
     /// The kind was recognized but did not match any active handler — logged
     /// for forensic analysis.
-    Unknown {
-        forensic_path: PathBuf,
-    },
+    Unknown { forensic_path: PathBuf },
 }
 
 /// Maximum decoded (plaintext) bundle payload size. 12 MB.
@@ -119,7 +112,10 @@ pub struct SearchErrorPayload {
 ///
 /// Sets the envelope kind to `"search-response"`, serialises the response payload
 /// as JSON, and computes the SHA-256 content hash.
-pub fn build_search_response_envelope(request_id: &str, results: &[SearchHitDto]) -> BundleEnvelope {
+pub fn build_search_response_envelope(
+    request_id: &str,
+    results: &[SearchHitDto],
+) -> BundleEnvelope {
     let payload = SearchResponsePayload {
         v: 1,
         kind: "search-response".to_string(),
@@ -127,8 +123,8 @@ pub fn build_search_response_envelope(request_id: &str, results: &[SearchHitDto]
         results: results.to_vec(),
         server_ts: chrono::Utc::now().to_rfc3339(),
     };
-    let content = serde_json::to_string(&payload)
-        .expect("SearchResponsePayload is always serializable");
+    let content =
+        serde_json::to_string(&payload).expect("SearchResponsePayload is always serializable");
     let sha = hex::encode(crate::spine::crypto::sha256(content.as_bytes()));
     BundleEnvelope {
         schema_version: crate::spine::bundle::SCHEMA_VERSION_V1,
@@ -269,7 +265,16 @@ where
         ));
     }
 
-    route_bundle(data_dir, envelope, bundle_id, peer_fingerprint, indexer, rpc, None).await
+    route_bundle(
+        data_dir,
+        envelope,
+        bundle_id,
+        peer_fingerprint,
+        indexer,
+        rpc,
+        None,
+    )
+    .await
 }
 
 pub async fn dispatch_bundle_with_postprocess<I, IF, R, RF>(
@@ -346,8 +351,8 @@ where
         }
 
         "capture-text" => {
-            let payload: CaptureTextPayload =
-                serde_json::from_str(&envelope.content_utf8).map_err(|e| {
+            let payload: CaptureTextPayload = serde_json::from_str(&envelope.content_utf8)
+                .map_err(|e| {
                     SpineError::new(
                         SpineErrorCode::BadRequest,
                         format!("invalid capture-text payload: {e}"),
@@ -373,9 +378,9 @@ where
             let file_path = dir.join(format!("{}.md", payload.id));
             write_text_atomically(&file_path, &markdown).await?;
 
-            let chunks_added = indexer(file_path.clone()).await.map_err(|e| {
-                SpineError::new(SpineErrorCode::Internal, format!("indexer: {e}"))
-            })?;
+            let chunks_added = indexer(file_path.clone())
+                .await
+                .map_err(|e| SpineError::new(SpineErrorCode::Internal, format!("indexer: {e}")))?;
             Ok(DispatchOutcome::TextIndexed {
                 path: file_path,
                 chunks_added,
@@ -383,8 +388,8 @@ where
         }
 
         "capture-link" => {
-            let payload: CaptureLinkPayload =
-                serde_json::from_str(&envelope.content_utf8).map_err(|e| {
+            let payload: CaptureLinkPayload = serde_json::from_str(&envelope.content_utf8)
+                .map_err(|e| {
                     SpineError::new(
                         SpineErrorCode::BadRequest,
                         format!("invalid capture-link payload: {e}"),
@@ -411,9 +416,9 @@ where
             let file_path = dir.join(format!("{}.md", payload.id));
             write_text_atomically(&file_path, &markdown).await?;
 
-            let chunks_added = indexer(file_path.clone()).await.map_err(|e| {
-                SpineError::new(SpineErrorCode::Internal, format!("indexer: {e}"))
-            })?;
+            let chunks_added = indexer(file_path.clone())
+                .await
+                .map_err(|e| SpineError::new(SpineErrorCode::Internal, format!("indexer: {e}")))?;
             Ok(DispatchOutcome::TextIndexed {
                 path: file_path,
                 chunks_added,
@@ -422,8 +427,8 @@ where
 
         // ---- Persistent binary kinds ----
         "capture-audio" => {
-            let payload: CaptureAudioPayload =
-                serde_json::from_str(&envelope.content_utf8).map_err(|e| {
+            let payload: CaptureAudioPayload = serde_json::from_str(&envelope.content_utf8)
+                .map_err(|e| {
                     SpineError::new(
                         SpineErrorCode::BadRequest,
                         format!("invalid capture-audio payload: {e}"),
@@ -476,9 +481,9 @@ where
             write_text_atomically(&markdown_path, &markdown).await?;
 
             // Index only the markdown (RAG engine does not handle raw audio).
-            indexer(markdown_path.clone()).await.map_err(|e| {
-                SpineError::new(SpineErrorCode::Internal, format!("indexer: {e}"))
-            })?;
+            indexer(markdown_path.clone())
+                .await
+                .map_err(|e| SpineError::new(SpineErrorCode::Internal, format!("indexer: {e}")))?;
 
             spawn_audio_postprocess(
                 binary_path.clone(),
@@ -494,8 +499,8 @@ where
         }
 
         "capture-image" => {
-            let payload: CaptureImagePayload =
-                serde_json::from_str(&envelope.content_utf8).map_err(|e| {
+            let payload: CaptureImagePayload = serde_json::from_str(&envelope.content_utf8)
+                .map_err(|e| {
                     SpineError::new(
                         SpineErrorCode::BadRequest,
                         format!("invalid capture-image payload: {e}"),
@@ -550,9 +555,9 @@ where
             write_text_atomically(&markdown_path, &markdown).await?;
 
             // Index only the markdown (RAG engine does not handle raw images).
-            indexer(markdown_path.clone()).await.map_err(|e| {
-                SpineError::new(SpineErrorCode::Internal, format!("indexer: {e}"))
-            })?;
+            indexer(markdown_path.clone())
+                .await
+                .map_err(|e| SpineError::new(SpineErrorCode::Internal, format!("indexer: {e}")))?;
 
             spawn_image_postprocess(
                 binary_path.clone(),
@@ -572,8 +577,8 @@ where
 
         // ---- Transient / silent kinds ----
         "search-request" => {
-            let payload: SearchRequestPayload =
-                serde_json::from_str(&envelope.content_utf8).map_err(|e| {
+            let payload: SearchRequestPayload = serde_json::from_str(&envelope.content_utf8)
+                .map_err(|e| {
                     SpineError::new(
                         SpineErrorCode::BadRequest,
                         format!("invalid search-request payload: {e}"),
@@ -617,8 +622,7 @@ where
         "search-response" => {
             warn!(
                 bundle_id,
-                peer_fingerprint,
-                "unexpected search-response received by desktop; ignoring",
+                peer_fingerprint, "unexpected search-response received by desktop; ignoring",
             );
             Ok(DispatchOutcome::Ignored)
         }
@@ -638,8 +642,7 @@ where
 
             warn!(
                 bundle_id,
-                kind,
-                "unhandled bundle kind; envelope saved for forensic analysis",
+                kind, "unhandled bundle kind; envelope saved for forensic analysis",
             );
             #[cfg(not(test))]
             debug_assert!(false, "unhandled bundle kind: {kind}");
@@ -721,7 +724,8 @@ fn spawn_image_postprocess(
                 }
             }
             Ok(Ok(_)) => {
-                if let Err(error) = append_to_markdown(&markdown_path, "[image: no text detected]").await
+                if let Err(error) =
+                    append_to_markdown(&markdown_path, "[image: no text detected]").await
                 {
                     warn!(path = %markdown_path.display(), error = %error, "failed to append no-text OCR marker");
                 }
@@ -861,7 +865,10 @@ mod tests {
         let mut m = serde_json::Map::new();
         m.insert("id".into(), serde_json::json!(id));
         m.insert("url".into(), serde_json::json!(url));
-        m.insert("client_ts".into(), serde_json::json!(chrono::Utc::now().to_rfc3339()));
+        m.insert(
+            "client_ts".into(),
+            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        );
         if let Some(st) = shared_text {
             m.insert("shared_text".into(), serde_json::json!(st));
         }
@@ -870,8 +877,7 @@ mod tests {
 
     /// Construct a valid `capture-audio` JSON payload body (small base64 string).
     fn capture_audio_json(id: &str) -> String {
-        let audio_b64 =
-            base64::engine::general_purpose::STANDARD.encode(b"fake-wav-bytes-minimal");
+        let audio_b64 = base64::engine::general_purpose::STANDARD.encode(b"fake-wav-bytes-minimal");
         serde_json::json!({
             "id": id,
             "audio_base64": audio_b64,
@@ -884,8 +890,7 @@ mod tests {
 
     /// Construct a valid `capture-image` JSON payload body (small base64 string).
     fn capture_image_json(id: &str) -> String {
-        let img_b64 =
-            base64::engine::general_purpose::STANDARD.encode(b"fake-jpeg-bytes-minimal");
+        let img_b64 = base64::engine::general_purpose::STANDARD.encode(b"fake-jpeg-bytes-minimal");
         serde_json::json!({
             "id": id,
             "image_base64": img_b64,
@@ -937,10 +942,7 @@ mod tests {
         .unwrap();
 
         match outcome {
-            DispatchOutcome::TextIndexed {
-                path,
-                chunks_added,
-            } => {
+            DispatchOutcome::TextIndexed { path, chunks_added } => {
                 assert!(path.exists());
                 assert_eq!(chunks_added, 3);
             }
@@ -977,10 +979,7 @@ mod tests {
         .unwrap();
 
         match outcome {
-            DispatchOutcome::TextIndexed {
-                path,
-                chunks_added,
-            } => {
+            DispatchOutcome::TextIndexed { path, chunks_added } => {
                 assert!(path.exists());
                 assert!(path.to_string_lossy().contains(id));
                 assert_eq!(chunks_added, 2);
@@ -1232,7 +1231,11 @@ mod tests {
         .unwrap();
 
         assert!(matches!(outcome, DispatchOutcome::RpcHandled));
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "rpc handler must be called exactly once");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "rpc handler must be called exactly once"
+        );
     }
 
     #[test]
@@ -1262,9 +1265,7 @@ mod tests {
             "bid-sr-err",
             "peer-fp",
             |_path| async move { Ok::<_, anyhow::Error>(1usize) },
-            |_payload| async move {
-                Err(anyhow::anyhow!("search engine unavailable"))
-            },
+            |_payload| async move { Err(anyhow::anyhow!("search engine unavailable")) },
         )
         .await
         .unwrap_err();
@@ -1410,9 +1411,15 @@ mod tests {
 
         let md = captured_markdown.lock().unwrap().take().unwrap();
         // Must start with ---\n
-        assert!(md.starts_with("---\n"), "frontmatter must start with ---\\n");
+        assert!(
+            md.starts_with("---\n"),
+            "frontmatter must start with ---\\n"
+        );
         // Must contain source: mobile-capture
-        assert!(md.contains("source: mobile-capture"), "must contain source key");
+        assert!(
+            md.contains("source: mobile-capture"),
+            "must contain source key"
+        );
         // Must contain kind: capture-text
         assert!(md.contains("kind: capture-text"), "must contain kind key");
         // Must contain the id
@@ -1420,11 +1427,17 @@ mod tests {
         // Must close with \n---\n after the frontmatter block
         let after_first = md.strip_prefix("---\n").unwrap();
         let frontmatter_end = after_first.find("\n---\n");
-        assert!(frontmatter_end.is_some(), "frontmatter must be closed with \\n---\\n");
+        assert!(
+            frontmatter_end.is_some(),
+            "frontmatter must be closed with \\n---\\n"
+        );
         // Body after frontmatter should contain the text
         let body_start = frontmatter_end.unwrap() + 5; // skip \n---\n
         let body = &after_first[body_start..];
-        assert!(body.contains("check frontmatter"), "body must contain original text");
+        assert!(
+            body.contains("check frontmatter"),
+            "body must contain original text"
+        );
     }
 
     #[tokio::test]
@@ -1627,7 +1640,10 @@ mod tests {
 
         let md = captured.lock().unwrap().take().unwrap();
         // No `shared_text` in the JSON, so the markdown's Shared text section should be empty.
-        assert!(md.contains("## Shared text\n\n"), "shared text section should be present but empty");
+        assert!(
+            md.contains("## Shared text\n\n"),
+            "shared text section should be present but empty"
+        );
     }
 
     #[tokio::test]
@@ -1651,7 +1667,10 @@ mod tests {
         match outcome {
             DispatchOutcome::Unknown { forensic_path } => {
                 let name = forensic_path.file_name().unwrap().to_string_lossy();
-                assert!(name.starts_with("my-bundle-id"), "forensic filename should use bundle_id");
+                assert!(
+                    name.starts_with("my-bundle-id"),
+                    "forensic filename should use bundle_id"
+                );
             }
             other => panic!("expected Unknown, got {other:?}"),
         }
@@ -1668,11 +1687,15 @@ mod tests {
         assert!(path.exists());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
         // No .tmp file should remain.
-        assert!(!path.with_extension("md.tmp").exists() && !dir.path().join("hello.md.tmp").exists());
+        assert!(
+            !path.with_extension("md.tmp").exists() && !dir.path().join("hello.md.tmp").exists()
+        );
 
         // Binary variant.
         let bin_path = dir.path().join("data.bin");
-        write_binary_atomically(&bin_path, b"\x00\x01\x02").await.unwrap();
+        write_binary_atomically(&bin_path, b"\x00\x01\x02")
+            .await
+            .unwrap();
         assert_eq!(std::fs::read(&bin_path).unwrap(), vec![0x00, 0x01, 0x02]);
     }
 

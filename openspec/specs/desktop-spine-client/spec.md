@@ -103,7 +103,7 @@ After pairing completes, the desktop client SHALL convert its Ed25519 private ke
 - **THEN** the keychain SHALL NOT contain any entry whose `account` field starts with `"sync-key:"`
 
 ### Requirement: JWTs are signed by the device's Ed25519 identity and held only in memory
-The desktop client SHALL mint Ed25519-signed JWTs (`alg=EdDSA`) for all authenticated Spine requests. JWT claims SHALL include `sub` (= `device_uuid` from `device.json`), `iat`, `exp` (= `iat + 3600`), `jti` (UUIDv4), `iss = "syncmind-client"`, and `aud = "syncmind-spine"`. The signed token SHALL be kept only in process memory and SHALL never be persisted to disk. The client SHALL automatically refresh the token 5 minutes before `exp`.
+The desktop client SHALL mint Ed25519-signed JWTs (`alg=EdDSA`) for all authenticated Spine requests. JWT claims SHALL include `sub` (= `device_uuid` from `device.json`), `iat`, `exp` (= `iat + 3600`), `jti` (UUIDv4), `iss = "syncmind-device"`, and `aud = "syncmind-spine"`. The signed token SHALL be kept only in process memory and SHALL never be persisted to disk. The client SHALL automatically refresh the token 5 minutes before `exp`.
 
 #### Scenario: First JWT mint
 - **WHEN** the client needs to make its first authenticated Spine request after startup

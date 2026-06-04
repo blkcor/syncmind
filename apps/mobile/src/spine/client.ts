@@ -31,8 +31,8 @@ async function createDeviceJWT(state: PersistedPairingState): Promise<string> {
   const header = { alg: "EdDSA", typ: "JWT" };
   const payload = {
     sub: state.selfDeviceUuid,
-    iss: "syncmind-spine",
-    aud: "syncmind-device",
+    iss: "syncmind-device",
+    aud: "syncmind-spine",
     iat: now,
     exp: now + 86_400,
     jti: Crypto.randomUUID(),

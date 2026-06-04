@@ -18,6 +18,17 @@ jest.mock("expo-secure-store", () => {
 
 jest.mock("expo-crypto", () => ({
   randomUUID: jest.fn(() => "cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+  getRandomBytes: jest.fn((size: number) => new Uint8Array(size).fill(0x01)),
+}));
+
+jest.mock("expo-sqlite", () => ({
+  openDatabaseAsync: jest.fn(async () => ({
+    execAsync: jest.fn(async () => {}),
+    runAsync: jest.fn(async () => ({ lastInsertRowId: 0, changes: 0 })),
+    getFirstAsync: jest.fn(async () => null),
+    getAllAsync: jest.fn(async () => []),
+    closeAsync: jest.fn(async () => {}),
+  })),
 }));
 jest.mock("../src/crypto/native-device-identity", () => {
   return {
@@ -87,6 +98,16 @@ const FINGERPRINT_PREFIX = "sha256:";
 
 function buildFingerprint(hex: string): string {
   return `${FINGERPRINT_PREFIX}${hex}`;
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> {
+  const payload = token.split(".")[1];
+  if (!payload) {
+    throw new Error("JWT payload segment missing");
+  }
+  const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  return JSON.parse(atob(padded)) as Record<string, unknown>;
 }
 
 const defaultPairingState = {
@@ -339,6 +360,21 @@ describe("authenticatedFetch", () => {
     expect(lastSeen).toBeTruthy();
   });
 
+  it("uses standard device-issued JWT issuer and Spine audience claims", async () => {
+    global.fetch = jest.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })) as typeof fetch;
+
+    await persistPairingState(defaultPairingState);
+    useAppStore.getState().setPaired(defaultPairingState.pairedPeerFingerprint);
+
+    await authenticatedFetch("https://spine.syncmind.local:8443/v1/devices/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+
+    const headers = (global.fetch as jest.Mock).mock.calls[0][1].headers as Record<string, string>;
+    const token = headers.Authorization.replace(/^Bearer /, "");
+    const payload = decodeJwtPayload(token);
+    expect(payload.iss).toBe("syncmind-device");
+    expect(payload.aud).toBe("syncmind-spine");
+  });
+
   it("throws UnpairedError and clears state on 401", async () => {
     global.fetch = jest.fn(async () => new Response(JSON.stringify({ code: "AUTH_INVALID" }), { status: 401 })) as typeof fetch;
 
@@ -499,7 +535,7 @@ describe("unpair", () => {
     );
 
     await persistPairingState(defaultPairingState);
-    await enqueueOutboxItem({ id: "cap-1", payload: { kind: "note" } });
+    await enqueueOutboxItem("cap-1", new Uint8Array(32).fill(0xff));
     useAppStore.getState().setPaired(defaultPairingState.pairedPeerFingerprint);
 
     const result = await unpair();
@@ -572,7 +608,7 @@ describe("unpair", () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 })) as typeof fetch;
 
     await persistPairingState(defaultPairingState);
-    await enqueueOutboxItem({ id: "cap-1", payload: { kind: "note" } });
+    await enqueueOutboxItem("cap-1", new Uint8Array(32).fill(0xff));
     useAppStore.getState().setPaired(defaultPairingState.pairedPeerFingerprint);
 
     const inFlight = authenticatedFetch(

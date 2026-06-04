@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::State;
 use tauri::Emitter;
+use tauri::State;
 
 use crate::AppState;
 
@@ -124,10 +124,7 @@ pub async fn search_knowledge(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    Ok(results
-        .into_iter()
-        .map(search_result_to_dto)
-        .collect())
+    Ok(results.into_iter().map(search_result_to_dto).collect())
 }
 
 #[tauri::command]
@@ -240,7 +237,11 @@ pub async fn update_config(
         .embedder_info
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    Ok(config_to_dto(&updated, &info.active_embedder, &info.active_model))
+    Ok(config_to_dto(
+        &updated,
+        &info.active_embedder,
+        &info.active_model,
+    ))
 }
 
 #[tauri::command]
@@ -566,6 +567,8 @@ mod tests {
                 ollama_model: Some("bge-small".to_string()),
                 embedding_dim: Some(384),
                 registered_files: None,
+                hybrid_search_enabled: None,
+                reranker_enabled: None,
             },
         );
 
@@ -588,6 +591,8 @@ mod tests {
                 ollama_model: Some("bge-small".to_string()),
                 embedding_dim: Some(1024),
                 registered_files: None,
+                hybrid_search_enabled: None,
+                reranker_enabled: None,
             },
         );
 

@@ -13,13 +13,13 @@ The system SHALL associate each paired device with a persistent Ed25519 identity
 - **AND** the system marks the device as `is_active = TRUE`
 
 ### Requirement: JWT authentication for all endpoints
-The system SHALL reject any request to protected endpoints that does not carry a valid Ed25519-signed JWT. The JWT `sub` claim SHALL be the client-supplied `device_uuid` recorded as `devices.id` during pairing.
+The system SHALL reject any request to protected endpoints that does not carry a valid Ed25519-signed JWT. The JWT `sub` claim SHALL be the client-supplied `device_uuid` recorded as `devices.id` during pairing. The canonical protected Spine request contract SHALL use the signing device as the token issuer and Spine as the intended audience.
 
 #### Scenario: Valid JWT grants access
 - **WHEN** a device sends an HTTP request with an `Authorization: Bearer <jwt>` header
 - **AND** the JWT contains a `sub` claim matching a registered device ID (the UUID supplied by the client at pairing time)
 - **AND** the JWT contains `iat`, `exp` (≤ 24h from issuance), and `jti` claims
-- **AND** the JWT `iss` claim is `"syncmind-client"` and `aud` is `"syncmind-spine"`
+- **AND** the JWT `iss` claim is `"syncmind-device"` and `aud` is `"syncmind-spine"`
 - **AND** the JWT signature verifies against the device's registered Ed25519 public key
 - **AND** the JWT has not expired and `jti` has not been used before
 - **THEN** the system authenticates the request and sets the request context `device_id`
@@ -73,4 +73,3 @@ The system SHALL generate the Ed25519 identity key pair on the mobile device, no
 - **THEN** it generates its own Ed25519 key pair using `@noble/curves`
 - **AND** the private key is stored only in `expo-secure-store` (iOS Keychain / Android Keystore)
 - **AND** the Spine never receives or stores the private key
-

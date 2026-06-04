@@ -239,7 +239,9 @@ async fn auto_offline_config(
         config.ollama_model
     );
     {
-        let mut guard = embedder_info.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut guard = embedder_info
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         guard.active_embedder = "onnx".to_string();
         guard.active_model = "bge-small".to_string();
     }

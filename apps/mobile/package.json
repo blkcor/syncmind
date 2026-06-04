@@ -3,10 +3,12 @@
   "main": "expo-router/entry",
   "version": "1.0.0",
   "dependencies": {
+    "@noble/ciphers": "^1.2.1",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
     "@syncmind/types": "workspace:*",
     "expo": "~56.0.5",
+    "expo-background-fetch": "~56.0.4",
     "expo-camera": "~56.0.7",
     "expo-constants": "~56.0.16",
     "expo-crypto": "~56.0.4",
@@ -16,6 +18,8 @@
     "expo-router": "~56.2.7",
     "expo-secure-store": "~56.0.4",
     "expo-splash-screen": "~56.0.10",
+    "expo-sqlite": "~56.0.3",
+    "expo-task-manager": "~56.0.4",
     "expo-status-bar": "~56.0.4",
     "expo-symbols": "~56.0.5",
     "expo-web-browser": "~56.0.5",
@@ -55,8 +59,9 @@
   },
   "jest": {
     "preset": "jest-expo",
+    "setupFiles": ["<rootDir>/jest.setup.ts"],
     "transformIgnorePatterns": [
-      "/node_modules/(?!(.pnpm|react-native|@react-native|@react-native-community|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry/react-native|native-base|@noble/curves|@noble/hashes))",
+      "/node_modules/(?!(.pnpm|react-native|@react-native|@react-native-community|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry/react-native|native-base|@noble/curves|@noble/hashes|@noble/ciphers))",
       "/node_modules/react-native-reanimated/plugin/",
       "/node_modules/@react-native/babel-preset/"
     ],

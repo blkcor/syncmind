@@ -77,8 +77,8 @@ Copy `spine.yaml` and adjust:
 database_url: "postgres://postgres:postgres@localhost:5432/syncmind?sslmode=disable"
 redis_addr: "localhost:6379"
 bind_addr: ":8080"
-jwt_issuer: "syncmind"
-jwt_audience: "spine"
+jwt_issuer: "syncmind-device"
+jwt_audience: "syncmind-spine"
 ```
 
 ## API Overview

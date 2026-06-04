@@ -110,7 +110,7 @@ PRD 002《The Spine》交付了一个完整的盲中继同步网关（`services/
 **Acceptance Criteria:**
 - [ ] 模块 `apps/desktop/src-tauri/src/spine/crypto.rs::jwt` 提供：
   - `mint(identity: &Ed25519Identity) -> Result<MintedJwt>` — 返回 `{ token, jti, exp }`。
-  - Claims：`{ sub: device_uuid, iat, exp: iat + 3600, jti: uuid_v4(), iss: "syncmind-client", aud: "syncmind-spine" }`。
+  - Claims：`{ sub: device_uuid, iat, exp: iat + 3600, jti: uuid_v4(), iss: "syncmind-device", aud: "syncmind-spine" }`。
   - 算法：`EdDSA`（`jsonwebtoken = "9"` 的 `Algorithm::EdDSA`）。
 - [ ] JWT 在内存中持有：`tokio::sync::RwLock<Option<MintedJwt>>`；进程退出即丢失，**永不写盘**。
 - [ ] 自动刷新：

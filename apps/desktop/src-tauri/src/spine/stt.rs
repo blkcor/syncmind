@@ -89,8 +89,11 @@ pub async fn transcribe_audio(
         }
         Err(SttError::Decode(message)) => {
             tracing::warn!(path = %audio_path.display(), error = %message, "audio decode failed");
-            append_marker(&markdown_path, "[audio decode failed - transcription unavailable]")
-                .await?;
+            append_marker(
+                &markdown_path,
+                "[audio decode failed - transcription unavailable]",
+            )
+            .await?;
             Ok(false)
         }
         Err(error) => {
@@ -142,7 +145,9 @@ async fn download_model(data_dir: &Path) -> Result<PathBuf, SttError> {
     if !response.status().is_success() {
         let status = response.status();
         mark_unavailable().await;
-        return Err(SttError::Download(format!("model download returned {status}")));
+        return Err(SttError::Download(format!(
+            "model download returned {status}"
+        )));
     }
     let bytes = response
         .bytes()
@@ -167,10 +172,7 @@ async fn download_model(data_dir: &Path) -> Result<PathBuf, SttError> {
 }
 
 fn model_path(data_dir: &Path) -> PathBuf {
-    data_dir
-        .join("models")
-        .join("whisper")
-        .join(MODEL_FILENAME)
+    data_dir.join("models").join("whisper").join(MODEL_FILENAME)
 }
 
 fn verify_model_hash(path: &Path) -> Result<(), SttError> {
@@ -264,8 +266,8 @@ fn decode_audio_to_pcm(audio_path: &Path) -> Result<Vec<f32>, SttError> {
         )));
     }
 
-    let reader = hound::WavReader::open(&tmp_wav)
-        .map_err(|error| SttError::Decode(error.to_string()))?;
+    let reader =
+        hound::WavReader::open(&tmp_wav).map_err(|error| SttError::Decode(error.to_string()))?;
     let spec = reader.spec();
     if spec.sample_rate != 16_000 {
         return Err(SttError::Decode(format!(
@@ -415,9 +417,7 @@ mod tests {
         .unwrap();
 
         assert!(formatted.contains("1\n00:00:00,000 --> 00:00:03,200\nHello and welcome."));
-        assert!(formatted.contains(
-            "2\n00:00:03,200 --> 00:00:06,500\nThis is the next paragraph."
-        ));
+        assert!(formatted.contains("2\n00:00:03,200 --> 00:00:06,500\nThis is the next paragraph."));
     }
 
     #[tokio::test]
@@ -446,7 +446,9 @@ mod tests {
 
         let result = ensure_model(dir.path()).await;
 
-        assert!(matches!(result, Err(SttError::Download(message)) if message.contains("checksum mismatch")));
+        assert!(
+            matches!(result, Err(SttError::Download(message)) if message.contains("checksum mismatch"))
+        );
     }
 
     #[test]
