@@ -124,21 +124,13 @@ pub fn list_inbox(data_dir: &Path) -> Result<Vec<InboxEntry>, SpineError> {
         return Ok(Vec::new());
     }
     let mut entries = Vec::new();
-    for raw in
-        fs::read_dir(&dir).map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?
-    {
-        let raw = raw.map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
-        let path = raw.path();
-        if !path.is_file() {
-            continue;
-        }
+    for path in inbox_files_recursive(&dir)? {
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if name.ends_with(".meta.json") {
                 continue;
             }
         }
-        let meta = raw
-            .metadata()
+        let meta = fs::metadata(&path)
             .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
         let modified_unix = meta
             .modified()
@@ -164,19 +156,37 @@ pub fn clear_inbox(data_dir: &Path) -> Result<usize, SpineError> {
         return Ok(0);
     }
     let mut count = 0usize;
-    for raw in
-        fs::read_dir(&dir).map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?
-    {
-        let raw = raw.map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
-        let p = raw.path();
-        if p.is_file() {
-            fs::remove_file(&p)
-                .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
-            count += 1;
-        }
+    for p in inbox_files_recursive(&dir)? {
+        fs::remove_file(&p)
+            .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+        count += 1;
     }
     set_dir_permissions_0700(&dir)?;
     Ok(count)
+}
+
+fn inbox_files_recursive(dir: &Path) -> Result<Vec<PathBuf>, SpineError> {
+    let mut files = Vec::new();
+    collect_inbox_files(dir, &mut files)?;
+    Ok(files)
+}
+
+fn collect_inbox_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), SpineError> {
+    for raw in
+        fs::read_dir(dir).map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?
+    {
+        let raw = raw.map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+        let path = raw.path();
+        let meta = raw
+            .metadata()
+            .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
+        if meta.is_dir() {
+            collect_inbox_files(&path, files)?;
+        } else if meta.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +380,24 @@ mod tests {
     }
 
     #[test]
+    fn list_inbox_includes_capture_subdirectory_files() {
+        let data_dir = tempdir().unwrap();
+        let dir = ensure_inbox_dir(data_dir.path()).unwrap();
+        let captures_dir = dir.join("captures");
+        fs::create_dir_all(&captures_dir).unwrap();
+        fs::write(captures_dir.join("capture-1.md"), b"hello").unwrap();
+        fs::write(captures_dir.join("capture-1.md.meta.json"), b"{}").unwrap();
+
+        let entries = list_inbox(data_dir.path()).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].path.file_name().unwrap().to_string_lossy(),
+            "capture-1.md"
+        );
+    }
+
+    #[test]
     fn clear_inbox_removes_files_and_preserves_dir() {
         let data_dir = tempdir().unwrap();
         ensure_inbox_dir(data_dir.path()).unwrap();
@@ -380,5 +408,20 @@ mod tests {
         assert_eq!(removed, 2);
         assert!(dir.exists());
         assert_eq!(list_inbox(data_dir.path()).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn clear_inbox_removes_capture_subdirectory_files() {
+        let data_dir = tempdir().unwrap();
+        let dir = ensure_inbox_dir(data_dir.path()).unwrap();
+        let captures_dir = dir.join("captures");
+        fs::create_dir_all(&captures_dir).unwrap();
+        fs::write(captures_dir.join("capture-1.md"), b"x").unwrap();
+
+        let removed = clear_inbox(data_dir.path()).unwrap();
+
+        assert_eq!(removed, 1);
+        assert_eq!(list_inbox(data_dir.path()).unwrap().len(), 0);
+        assert!(!captures_dir.join("capture-1.md").exists());
     }
 }

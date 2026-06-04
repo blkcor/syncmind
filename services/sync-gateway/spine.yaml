@@ -6,5 +6,5 @@ tls_key: ""
 pairing_session_ttl: 300
 bundle_retention_days: 30
 max_bundle_size_mb: 100
-jwt_issuer: "syncmind-spine"
-jwt_audience: "syncmind-device"
+jwt_issuer: "syncmind-device"
+jwt_audience: "syncmind-spine"

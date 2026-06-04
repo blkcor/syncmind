@@ -141,6 +141,10 @@ export function getRestoredPairingState(): PersistedPairingState | null {
 let lastSeenPersistedAt = 0;
 const LAST_SEEN_THROTTLE_MS = 30_000;
 
+export function __clearPairingStateForTests(): void {
+  currentPairingState = null;
+}
+
 export function __resetLastSeenThrottleForTests(): void {
   lastSeenPersistedAt = 0;
 }

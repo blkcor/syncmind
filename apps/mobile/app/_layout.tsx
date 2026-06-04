@@ -9,6 +9,8 @@ import { checkCurrentDevicePairing, UnpairedError } from '@/src/spine/client';
 import { restorePairingState } from '@/src/spine/session';
 import { useAppStore } from '@/src/store';
 import { ensureIdentity } from '@/src/crypto/identity';
+import { initOutbox, flushOutbox } from '@/src/outbox/service';
+import { registerBackgroundFlush } from '@/src/outbox/background';
 
 const PAIRING_HEALTH_CHECK_MS = 1500;
 
@@ -92,6 +94,20 @@ export default function RootLayout() {
       cancelled = true;
     };
   }, [loaded]);
+
+  // Initialize outbox, recover stale sending rows, register background flush.
+  useEffect(() => {
+    if (!loaded || !pairingRestored) {
+      return;
+    }
+
+    void initOutbox().then(() => {
+      if (useAppStore.getState().isPaired) {
+        void flushOutbox().catch(() => {});
+      }
+    });
+    void registerBackgroundFlush();
+  }, [loaded, pairingRestored]);
 
   useEffect(() => {
     if (!loaded || !pairingRestored) {

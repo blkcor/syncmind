@@ -279,7 +279,10 @@ fn compute_ca_fingerprint(config: &syncmind_core::SpineConfig) -> Option<String>
     let mut reader = std::io::Cursor::new(&bytes);
     let first = rustls_pemfile::certs(&mut reader).next();
     match first {
-        Some(Ok(cert)) => Some(format!("sha256:{}", hex::encode(Sha256::digest(cert.as_ref())))),
+        Some(Ok(cert)) => Some(format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(cert.as_ref()))
+        )),
         Some(Err(e)) => {
             warn!(
                 path = %path.display(),
@@ -311,7 +314,10 @@ fn extract_pk_from_qr_payload(uri: &str) -> Result<String, SpineError> {
     if url.scheme() != "spine" {
         return Err(SpineError::new(
             SpineErrorCode::Internal,
-            format!("server qr_payload scheme: expected spine, got {}", url.scheme()),
+            format!(
+                "server qr_payload scheme: expected spine, got {}",
+                url.scheme()
+            ),
         ));
     }
     let pk = url
@@ -374,7 +380,10 @@ fn validate_payload(
     if payload.v != 1 {
         return Err(SpineError::new(
             SpineErrorCode::SchemaVersionUnsupported,
-            format!("unsupported pairing payload version {}; expected 1", payload.v),
+            format!(
+                "unsupported pairing payload version {}; expected 1",
+                payload.v
+            ),
         ));
     }
     if payload.kind != PAIRING_PAYLOAD_KIND {
@@ -808,7 +817,11 @@ mod tests {
         let expected = format!("sha256:{}", hex::encode(Sha256::digest(&decoded)));
         assert_eq!(p.device_a_fingerprint, expected);
         assert!(p.device_a_fingerprint.starts_with("sha256:"));
-        assert!(p.device_a_fingerprint.chars().skip(7).all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(p
+            .device_a_fingerprint
+            .chars()
+            .skip(7)
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     #[test]
@@ -848,7 +861,10 @@ mod tests {
     fn debug_impl_redacts_pairing_token() {
         let p = sample_payload();
         let dbg = format!("{:?}", p);
-        assert!(!dbg.contains("abc123def456"), "raw token leaked in Debug output: {dbg}");
+        assert!(
+            !dbg.contains("abc123def456"),
+            "raw token leaked in Debug output: {dbg}"
+        );
     }
 
     #[test]
@@ -871,7 +887,11 @@ mod tests {
         // ~300-char payload — must still encode without error at ECC Low.
         let p = sample_payload();
         let json = serde_json::to_string(&p).unwrap();
-        assert!(json.len() > 200, "sample payload unexpectedly short: {}", json.len());
+        assert!(
+            json.len() > 200,
+            "sample payload unexpectedly short: {}",
+            json.len()
+        );
         let url = render_qr_png_base64(&json).unwrap();
         assert!(url.starts_with("data:image/png;base64,"));
     }

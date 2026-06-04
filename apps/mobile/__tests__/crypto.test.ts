@@ -17,6 +17,16 @@ jest.mock("expo-secure-store", () => {
   };
 });
 
+jest.mock("expo-sqlite", () => ({
+  openDatabaseAsync: jest.fn(async () => ({
+    execAsync: jest.fn(async () => {}),
+    runAsync: jest.fn(async () => ({ lastInsertRowId: 0, changes: 0 })),
+    getFirstAsync: jest.fn(async () => null),
+    getAllAsync: jest.fn(async () => []),
+    closeAsync: jest.fn(async () => {}),
+  })),
+}));
+
 import {
   ensureIdentity,
   getDeviceFingerprint,
@@ -330,10 +340,7 @@ describe("device_reset", () => {
       caFingerprint: null,
       lastSeenAt: null,
     });
-    await enqueueOutboxItem({
-      id: "capture-1",
-      payload: { kind: "note", text: "hello" },
-    });
+    await enqueueOutboxItem("capture-1", new Uint8Array(32).fill(0xff));
     useAppStore.getState().setPaired("sha256:peer");
 
     await device_reset();
@@ -350,6 +357,61 @@ describe("device_reset", () => {
     await expect(getOutboxItems()).resolves.toEqual([]);
     expect(useAppStore.getState().isPaired).toBe(false);
     expect(useAppStore.getState().peerDeviceFingerprint).toBeNull();
+  });
+
+  it("hydrates the persisted native identity before revoking during reset", async () => {
+    await NativeDeviceIdentity.ensureIdentity();
+    __resetIdentityCacheForTests();
+    await persistPairingState({
+      selfDeviceUuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      syncKey: new Uint8Array(32).fill(3),
+      pairedPeerFingerprint: `${FINGERPRINT_PREFIX}${"cd".repeat(32)}`,
+      pairedPeerDeviceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      pairedPeerDeviceType: "desktop",
+      pairedAt: "2026-05-31T00:00:00.000Z",
+      spineUrl: "https://spine.syncmind.local",
+      caFingerprint: null,
+      lastSeenAt: null,
+    });
+    useAppStore.getState().setPaired("sha256:peer");
+
+    await device_reset();
+
+    expect(NativeDeviceIdentity.getIdentityMeta).toHaveBeenCalled();
+    expect(global.fetch).toHaveBeenCalledWith(
+      "https://spine.syncmind.local/v1/devices/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/revoke",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          Authorization: expect.stringMatching(/^Bearer /),
+        }),
+      }),
+    );
+    expect(useAppStore.getState().isPaired).toBe(false);
+  });
+
+  it("still clears local pairing state when remote revoke is unreachable", async () => {
+    await ensureIdentity();
+    global.fetch = jest.fn(async () => {
+      throw new TypeError("Network request failed");
+    }) as typeof fetch;
+    await persistPairingState({
+      selfDeviceUuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      syncKey: new Uint8Array(32).fill(3),
+      pairedPeerFingerprint: `${FINGERPRINT_PREFIX}${"cd".repeat(32)}`,
+      pairedPeerDeviceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      pairedPeerDeviceType: "desktop",
+      pairedAt: "2026-05-31T00:00:00.000Z",
+      spineUrl: "https://spine.syncmind.local",
+      caFingerprint: null,
+      lastSeenAt: null,
+    });
+    useAppStore.getState().setPaired("sha256:peer");
+
+    await expect(device_reset()).rejects.toThrow("Network request failed");
+
+    expect(useAppStore.getState().isPaired).toBe(false);
+    await expect(restorePairingState()).resolves.toBeNull();
   });
 
   it("clears persisted pairing state during a full device reset", async () => {

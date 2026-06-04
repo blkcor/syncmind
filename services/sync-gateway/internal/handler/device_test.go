@@ -61,7 +61,7 @@ func createPeerDevice(t *testing.T, store *model.DeviceStore, paired *uuid.UUID)
 
 func signToken(t *testing.T, priv ed25519.PrivateKey, deviceID uuid.UUID) string {
 	t.Helper()
-	cfg := &config.Config{JWTIssuer: "syncmind-spine", JWTAudience: "syncmind-device"}
+	cfg := &config.Config{JWTIssuer: "syncmind-device", JWTAudience: "syncmind-spine"}
 	token, err := crypto.SignDeviceJWT(priv, deviceID, cfg.JWTIssuer, cfg.JWTAudience, time.Hour)
 	if err != nil {
 		t.Fatalf("failed to sign token: %v", err)
@@ -78,7 +78,7 @@ func TestDeviceStatusSuccess(t *testing.T) {
 	device, priv := createTestDevice(t, store)
 	token := signToken(t, priv, device.ID)
 
-	cfg := &config.Config{JWTIssuer: "syncmind-spine", JWTAudience: "syncmind-device"}
+	cfg := &config.Config{JWTIssuer: "syncmind-device", JWTAudience: "syncmind-spine"}
 	authMW := middleware.AuthMiddleware(cfg, db, rdb)
 	deviceHandler := NewDeviceHandler(store)
 
@@ -126,7 +126,7 @@ func TestDeviceStatusMismatchedPathAndJWT(t *testing.T) {
 	device, priv := createTestDevice(t, store)
 	token := signToken(t, priv, device.ID)
 
-	cfg := &config.Config{JWTIssuer: "syncmind-spine", JWTAudience: "syncmind-device"}
+	cfg := &config.Config{JWTIssuer: "syncmind-device", JWTAudience: "syncmind-spine"}
 	authMW := middleware.AuthMiddleware(cfg, db, rdb)
 	deviceHandler := NewDeviceHandler(store)
 
@@ -180,7 +180,7 @@ func TestDeviceRevokeSuccess(t *testing.T) {
 		t.Fatal("expected peer to be linked to device before revoke")
 	}
 
-	cfg := &config.Config{JWTIssuer: "syncmind-spine", JWTAudience: "syncmind-device"}
+	cfg := &config.Config{JWTIssuer: "syncmind-device", JWTAudience: "syncmind-spine"}
 	authMW := middleware.AuthMiddleware(cfg, db, rdb)
 	deviceHandler := NewDeviceHandler(store)
 
@@ -238,7 +238,7 @@ func TestDeviceStatusInactiveDevice(t *testing.T) {
 
 	token := signToken(t, priv, device.ID)
 
-	cfg := &config.Config{JWTIssuer: "syncmind-spine", JWTAudience: "syncmind-device"}
+	cfg := &config.Config{JWTIssuer: "syncmind-device", JWTAudience: "syncmind-spine"}
 	authMW := middleware.AuthMiddleware(cfg, db, rdb)
 
 	ctx := app.NewContext(0)
@@ -277,7 +277,7 @@ func TestDeviceRevokeUnknownDevice(t *testing.T) {
 
 	token := signToken(t, priv, device.ID)
 
-	cfg := &config.Config{JWTIssuer: "syncmind-spine", JWTAudience: "syncmind-device"}
+	cfg := &config.Config{JWTIssuer: "syncmind-device", JWTAudience: "syncmind-spine"}
 	authMW := middleware.AuthMiddleware(cfg, db, rdb)
 
 	// The auth middleware checks IsActive, so inactive device will be rejected at auth.

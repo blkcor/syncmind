@@ -7,6 +7,8 @@
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::time::Instant;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as _B64URL_UNUSED;
 use base64::Engine as _;
@@ -17,7 +19,7 @@ use tracing::{info, warn};
 
 use crate::commands::SearchResultDto;
 use crate::spine::bundle::{self, BundleEnvelope};
-use crate::spine::client::{self, BundleListItem};
+use crate::spine::client::{self, BundleListItem, DeviceStatusResponse};
 use crate::spine::crypto;
 use crate::spine::dispatch;
 use crate::spine::identity;
@@ -26,6 +28,16 @@ use crate::spine::pairing::{self, PairingCompletion, PairingHandleView, PollOutc
 use crate::spine::state::ActivePairing;
 use crate::spine::{SpineError, SpineErrorCode};
 use crate::AppState;
+
+const FRESH_PAIRING_REMOTE_RECONCILE_GRACE_SECONDS: i64 = 10;
+
+/// Minimum interval between remote reconciliation calls to avoid hammering the server
+/// and to prevent transient server state from clearing a valid local pairing.
+const RECONCILE_COOLDOWN_SECONDS: u64 = 60;
+
+/// Tracks when the last remote reconciliation ran so we don't run it more than
+/// once per `RECONCILE_COOLDOWN_SECONDS`.
+static LAST_RECONCILE: StdMutex<Option<Instant>> = StdMutex::new(None);
 
 #[derive(Clone)]
 struct PullContext {
@@ -316,8 +328,14 @@ pub async fn spine_pair_status(state: State<'_, AppState>) -> Result<PairingStat
     let cfg = state.config.lock().expect("config mutex poisoned").clone();
     let active_session = runtime.current_pairing_session().await;
     if cfg.spine.is_paired() {
-        if let Some(view) = reconcile_remote_pairing_state(&state, &cfg.spine).await? {
-            return Ok(view);
+        // Defer remote reconciliation for freshly-completed pairings: the server
+        // may still be converging (WebSocket connect, DB replication), and a
+        // transient is_active=false or AuthInvalid response must not clear a
+        // just-established local pairing.
+        if !is_recently_paired(&cfg.spine) {
+            if let Some(view) = reconcile_remote_pairing_state(&state, &cfg.spine).await? {
+                return Ok(view);
+            }
         }
         Ok(PairingStateView {
             state: "paired".to_string(),
@@ -356,25 +374,65 @@ async fn reconcile_remote_pairing_state(
         return Ok(None);
     }
 
+    // Honour a minimum interval between remote reconciliation calls. The
+    // frontend polls spine_pair_status every 1.5 s, but remote device state
+    // changes on the order of minutes.  Throttling avoids hammering the
+    // server and prevents transient responses from clearing valid local
+    // pairing state.
+    {
+        let since_last = LAST_RECONCILE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map(|t| t.elapsed().as_secs());
+        if since_last.is_some_and(|s| s < RECONCILE_COOLDOWN_SECONDS) {
+            return Ok(None);
+        }
+    }
+
+    // Mark reconciliation as attempted *before* the network call so a
+    // transient error doesn't trigger an immediate retry on the next poll.
+    {
+        let mut last = LAST_RECONCILE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *last = Some(Instant::now());
+    }
+
     let client = match state.spine.require_client().await {
         Ok(client) => client,
         Err(_) => return Ok(None),
     };
 
     match client.device_status().await {
-        Ok(status) if !status.is_active || status.paired_device_id.is_none() => {
-            clear_local_pairing_after_remote_unpair(state, "REMOTE_UNPAIRED").await
-        }
-        Ok(status)
-            if spine_cfg
-                .peer_device_id_uuid
-                .as_ref()
-                .is_some_and(|peer| status.paired_device_id.as_ref() != Some(peer)) =>
-        {
-            clear_local_pairing_after_remote_unpair(state, "REMOTE_UNPAIRED").await
-        }
-        Ok(_) => Ok(None),
+        Ok(status) => match decide_remote_pairing_state(spine_cfg, &status, chrono::Utc::now()) {
+            RemotePairingDecision::Keep => Ok(None),
+            RemotePairingDecision::UpdatePeerDeviceId(peer_device_id) => {
+                info!(
+                    local_peer_device_id = ?spine_cfg.peer_device_id_uuid,
+                    remote_peer_device_id = %peer_device_id,
+                    "updating local paired peer UUID from Spine device status"
+                );
+                persist_remote_peer_device_id(state, peer_device_id)?;
+                Ok(None)
+            }
+            RemotePairingDecision::Clear(reason) => {
+                warn!(
+                    reason = reason.as_str(),
+                    local_peer_device_id = ?spine_cfg.peer_device_id_uuid,
+                    remote_device_uuid = %status.device_uuid,
+                    remote_peer_device_id = ?status.paired_device_id,
+                    remote_is_active = status.is_active,
+                    paired_at = ?spine_cfg.paired_at,
+                    "remote pairing state no longer matches local config; clearing local pairing"
+                );
+                clear_local_pairing_after_remote_unpair(state, "REMOTE_UNPAIRED").await
+            }
+        },
         Err(e) if e.code == SpineErrorCode::AuthInvalid.as_str() => {
+            warn!(
+                error = %e,
+                "Spine rejected desktop device auth during pairing reconcile; clearing local pairing"
+            );
             clear_local_pairing_after_remote_unpair(state, "REMOTE_UNPAIRED").await
         }
         Err(e) => {
@@ -382,6 +440,92 @@ async fn reconcile_remote_pairing_state(
             Ok(None)
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemotePairingDecision {
+    Keep,
+    UpdatePeerDeviceId(String),
+    Clear(RemotePairingClearReason),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemotePairingClearReason {
+    Inactive,
+    MissingPeerLink,
+    PeerMismatch,
+}
+
+impl RemotePairingClearReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inactive => "inactive",
+            Self::MissingPeerLink => "missing_peer_link",
+            Self::PeerMismatch => "peer_mismatch",
+        }
+    }
+}
+
+fn decide_remote_pairing_state(
+    spine_cfg: &syncmind_core::SpineConfig,
+    status: &DeviceStatusResponse,
+    now: chrono::DateTime<chrono::Utc>,
+) -> RemotePairingDecision {
+    let is_fresh = is_fresh_pairing(spine_cfg, now);
+
+    if !status.is_active {
+        if is_fresh {
+            return RemotePairingDecision::Keep;
+        }
+        return RemotePairingDecision::Clear(RemotePairingClearReason::Inactive);
+    }
+    let Some(remote_peer_id) = status.paired_device_id.as_deref() else {
+        if is_fresh {
+            return RemotePairingDecision::Keep;
+        }
+        return RemotePairingDecision::Clear(RemotePairingClearReason::MissingPeerLink);
+    };
+
+    match spine_cfg.peer_device_id_uuid.as_deref() {
+        Some(local_peer_id) if local_peer_id == remote_peer_id => RemotePairingDecision::Keep,
+        Some(_) if is_fresh => {
+            RemotePairingDecision::UpdatePeerDeviceId(remote_peer_id.to_string())
+        }
+        Some(_) => RemotePairingDecision::Clear(RemotePairingClearReason::PeerMismatch),
+        None => RemotePairingDecision::UpdatePeerDeviceId(remote_peer_id.to_string()),
+    }
+}
+
+fn is_fresh_pairing(
+    spine_cfg: &syncmind_core::SpineConfig,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    spine_cfg
+        .paired_at
+        .as_deref()
+        .and_then(|paired_at| chrono::DateTime::parse_from_rfc3339(paired_at).ok())
+        .map(|paired_at| {
+            let elapsed = now.signed_duration_since(paired_at.with_timezone(&chrono::Utc));
+            elapsed >= chrono::Duration::zero()
+                && elapsed
+                    <= chrono::Duration::seconds(FRESH_PAIRING_REMOTE_RECONCILE_GRACE_SECONDS)
+        })
+        .unwrap_or(false)
+}
+
+/// True when the local pairing was completed recently enough that we should
+/// defer remote reconciliation — the server may still be converging.
+fn is_recently_paired(spine_cfg: &syncmind_core::SpineConfig) -> bool {
+    is_fresh_pairing(spine_cfg, chrono::Utc::now())
+}
+
+fn persist_remote_peer_device_id(state: &AppState, peer_device_id: String) -> Result<(), String> {
+    let mut cfg = state.config.lock().expect("config mutex poisoned");
+    if cfg.spine.peer_device_id_uuid.as_deref() == Some(peer_device_id.as_str()) {
+        return Ok(());
+    }
+    cfg.spine.peer_device_id_uuid = Some(peer_device_id);
+    cfg.save().map_err(|e| format!("save config: {e}"))
 }
 
 async fn clear_local_pairing_after_remote_unpair(
@@ -457,13 +601,9 @@ pub async fn spine_complete_pairing_short_code(
         let _ = ah.emit("spine://pairing/step", serde_json::json!({ "step": step }));
     }));
 
-    let completion = pairing::complete_with_short_code(
-        &client,
-        &runtime.identity,
-        &short_code,
-        on_progress,
-    )
-    .await?;
+    let completion =
+        pairing::complete_with_short_code(&client, &runtime.identity, &short_code, on_progress)
+            .await?;
 
     {
         let _ = app_handle.emit(
@@ -756,12 +896,10 @@ async fn search_local_knowledge(
     let embedder = Arc::clone(&ctx.embedder);
     let store = Arc::clone(&ctx.store);
 
-    let embeddings = embedder.embed(&[query]).await.map_err(|e| {
-        SpineError::new(
-            SpineErrorCode::Internal,
-            format!("embedding failed: {e}"),
-        )
-    })?;
+    let embeddings = embedder
+        .embed(&[query])
+        .await
+        .map_err(|e| SpineError::new(SpineErrorCode::Internal, format!("embedding failed: {e}")))?;
 
     if embeddings.is_empty() {
         return Ok(Vec::new());
@@ -811,7 +949,7 @@ async fn process_inbound_bundle(
     local_pub: [u8; 32],
     data_dir: &std::path::Path,
 ) -> Result<(), SpineError> {
-    if item.content_type != bundle::CONTENT_TYPE_NOTE {
+    if !is_supported_inbound_content_type(&item.content_type) {
         return Err(SpineError::new(
             SpineErrorCode::SchemaVersionUnsupported,
             format!("unsupported content_type: {}", item.content_type),
@@ -861,15 +999,17 @@ async fn process_inbound_bundle(
                 )
                 .await?;
 
-                let hits: Vec<dispatch::SearchHitDto> =
-                    results.into_iter().map(|r| dispatch::SearchHitDto {
+                let hits: Vec<dispatch::SearchHitDto> = results
+                    .into_iter()
+                    .map(|r| dispatch::SearchHitDto {
                         chunk_id: r.chunk_id,
                         file_path: r.file_path,
                         start_line: r.start_line,
                         end_line: r.end_line,
                         content: r.content,
                         score: r.score,
-                    }).collect();
+                    })
+                    .collect();
 
                 let response_envelope =
                     dispatch::build_search_response_envelope(&payload.request_id, &hits);
@@ -917,8 +1057,12 @@ async fn process_inbound_bundle(
             );
         }
         dispatch::DispatchOutcome::RpcRateLimited { response } => {
-            let blob = bundle::encrypt(response, &sync_key, &local_pub)
-                .map_err(|e| SpineError::new(SpineErrorCode::Internal, format!("encrypt rate-limit response: {e}")))?;
+            let blob = bundle::encrypt(response, &sync_key, &local_pub).map_err(|e| {
+                SpineError::new(
+                    SpineErrorCode::Internal,
+                    format!("encrypt rate-limit response: {e}"),
+                )
+            })?;
             let idempotency_key = client::new_idempotency_key();
             client
                 .upload_bundle(blob, bundle::CONTENT_TYPE_NOTE, &idempotency_key)
@@ -948,10 +1092,16 @@ async fn process_inbound_bundle(
     Ok(())
 }
 
+fn is_supported_inbound_content_type(content_type: &str) -> bool {
+    matches!(
+        content_type,
+        bundle::CONTENT_TYPE_NOTE | bundle::CONTENT_TYPE_CAPTURE_TEXT
+    )
+}
+
 fn build_dispatch_indexer(ctx: &PullContext) -> dispatch::PostprocessIndexer {
-    let extractor = Arc::new(syncmind_rag_engine::extractor::CompositeExtractor::from_config(
-        &ctx.config,
-    ));
+    let extractor =
+        Arc::new(syncmind_rag_engine::extractor::CompositeExtractor::from_config(&ctx.config));
     let embedder = Arc::clone(&ctx.embedder);
     let store = Arc::clone(&ctx.store);
     let chunk_size = ctx.config.chunk_size;
@@ -1069,4 +1219,127 @@ async fn ensure_paired_resources_runtime(
     let peer_pub = load_peer_pubkey_raw(&runtime.data_dir, &peer_fp)?;
 
     Ok((client, sync_key, peer_pub))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spine::client::DeviceStatusResponse;
+
+    fn paired_config(
+        peer_device_id_uuid: Option<&str>,
+        paired_at: &str,
+    ) -> syncmind_core::SpineConfig {
+        syncmind_core::SpineConfig {
+            paired_peer_fingerprint: Some("sha256:peer".to_string()),
+            paired_at: Some(paired_at.to_string()),
+            peer_device_id_uuid: peer_device_id_uuid.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn device_status(paired_device_id: Option<&str>) -> DeviceStatusResponse {
+        DeviceStatusResponse {
+            device_uuid: "11111111-1111-4111-8111-111111111111".to_string(),
+            device_type: "desktop".to_string(),
+            paired_device_id: paired_device_id.map(str::to_string),
+            is_active: true,
+            last_seen_at: None,
+        }
+    }
+
+    #[test]
+    fn inbound_content_type_accepts_mobile_capture_text_bundles() {
+        assert!(is_supported_inbound_content_type(
+            bundle::CONTENT_TYPE_CAPTURE_TEXT
+        ));
+    }
+
+    #[test]
+    fn inbound_content_type_rejects_unknown_types() {
+        assert!(!is_supported_inbound_content_type("application/octet-stream"));
+    }
+
+    #[test]
+    fn remote_reconcile_keeps_fresh_pairing_when_peer_link_is_temporarily_missing() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-03T12:00:05Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let cfg = paired_config(None, "2026-06-03T12:00:00Z");
+        let status = device_status(None);
+
+        assert_eq!(
+            decide_remote_pairing_state(&cfg, &status, now),
+            RemotePairingDecision::Keep
+        );
+    }
+
+    #[test]
+    fn remote_reconcile_updates_missing_peer_device_id_from_spine_status() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-03T12:00:30Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let cfg = paired_config(None, "2026-06-03T12:00:00Z");
+        let status = device_status(Some("22222222-2222-4222-8222-222222222222"));
+
+        assert_eq!(
+            decide_remote_pairing_state(&cfg, &status, now),
+            RemotePairingDecision::UpdatePeerDeviceId(
+                "22222222-2222-4222-8222-222222222222".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn remote_reconcile_updates_fresh_peer_device_id_mismatch_from_spine_status() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-03T12:00:05Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let cfg = paired_config(
+            Some("33333333-3333-4333-8333-333333333333"),
+            "2026-06-03T12:00:00Z",
+        );
+        let status = device_status(Some("22222222-2222-4222-8222-222222222222"));
+
+        assert_eq!(
+            decide_remote_pairing_state(&cfg, &status, now),
+            RemotePairingDecision::UpdatePeerDeviceId(
+                "22222222-2222-4222-8222-222222222222".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn remote_reconcile_clears_stale_pairing_when_peer_link_is_missing() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-03T12:00:30Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let cfg = paired_config(
+            Some("33333333-3333-4333-8333-333333333333"),
+            "2026-06-03T12:00:00Z",
+        );
+        let status = device_status(None);
+
+        assert_eq!(
+            decide_remote_pairing_state(&cfg, &status, now),
+            RemotePairingDecision::Clear(RemotePairingClearReason::MissingPeerLink)
+        );
+    }
+
+    #[test]
+    fn remote_reconcile_clears_stale_pairing_when_peer_id_mismatches() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-03T12:00:30Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let cfg = paired_config(
+            Some("33333333-3333-4333-8333-333333333333"),
+            "2026-06-03T12:00:00Z",
+        );
+        let status = device_status(Some("22222222-2222-4222-8222-222222222222"));
+
+        assert_eq!(
+            decide_remote_pairing_state(&cfg, &status, now),
+            RemotePairingDecision::Clear(RemotePairingClearReason::PeerMismatch)
+        );
+    }
 }

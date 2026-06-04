@@ -214,6 +214,20 @@ export interface UnpairResult {
   revokeWarning: "network_error" | null;
 }
 
+export class DeviceResetRemoteRevokeError extends Error {
+  public readonly originalError: unknown;
+
+  constructor(originalError: unknown) {
+    super(
+      originalError instanceof Error
+        ? originalError.message
+        : "Could not notify Spine during device reset.",
+    );
+    this.name = "DeviceResetRemoteRevokeError";
+    this.originalError = originalError;
+  }
+}
+
 /**
  * Lightweight unpair: revokes device on Spine, clears pairing state and outbox,
  * and transitions to unpaired — all without destroying the Ed25519 identity key.
@@ -250,11 +264,29 @@ export async function unpair(): Promise<UnpairResult> {
  * Full device reset: clears identity, calls Spine unpair, and flushes the outbox.
  */
 export async function device_reset(): Promise<void> {
-  await revokeCurrentDevice();
+  const selfDeviceUuid = getRestoredPairingState()?.selfDeviceUuid ?? null;
+  let revokeError: unknown = null;
+
+  try {
+    await ensureIdentity();
+    await revokeCurrentDevice();
+  } catch (err) {
+    if (!(err instanceof UnpairedError)) {
+      revokeError = err;
+    }
+  }
+
+  if (selfDeviceUuid) {
+    abortInFlightSpineWorkForPairing(selfDeviceUuid);
+  }
   await clearPairingState();
   await clearOutbox();
   useAppStore.getState().setUnpaired();
   await clearIdentity();
+
+  if (revokeError) {
+    throw new DeviceResetRemoteRevokeError(revokeError);
+  }
 }
 
 export function __resetIdentityCacheForTests(): void {

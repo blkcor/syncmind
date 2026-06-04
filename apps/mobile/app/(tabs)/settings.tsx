@@ -14,6 +14,7 @@ import {
   ensureIdentity,
   isAuthenticationRequired,
   setAuthenticationRequirement,
+  DeviceResetRemoteRevokeError,
   device_reset,
   unpair,
 } from "@/src/crypto/identity";
@@ -24,7 +25,7 @@ import {
 } from "@/src/spine/session";
 import { useAppStore } from "@/src/store";
 
-type IdentityStatus = "loading" | "active" | "unpaired" | "error";
+type IdentityStatus = "loading" | "active" | "offline" | "unpaired" | "error";
 
 function StatusDot({ status }: { status: IdentityStatus }) {
   const color =
@@ -32,9 +33,11 @@ function StatusDot({ status }: { status: IdentityStatus }) {
       ? "#22c55e"
       : status === "error"
         ? "#ef4444"
-        : status === "loading"
-          ? "#94a3b8"
-          : "#f59e0b";
+        : status === "offline"
+          ? "#f59e0b"
+          : status === "loading"
+            ? "#94a3b8"
+            : "#f59e0b";
 
   return (
     <View style={[statusDotStyles.dot, { backgroundColor: color }]}>
@@ -82,6 +85,7 @@ export default function SettingsScreen() {
   const colorScheme = useColorScheme();
   const tint = Colors[colorScheme].tint;
   const isPaired = useAppStore((s) => s.isPaired);
+  const connectionStatus = useAppStore((s) => s.connectionStatus);
   const [biometricEnabled, setBiometricEnabled] = useState<boolean | null>(null);
   const [fingerprint, setFingerprint] = useState<string | null>(null);
   const [identityError, setIdentityError] = useState<string | null>(null);
@@ -111,9 +115,11 @@ export default function SettingsScreen() {
     ? "loading"
     : identityError
       ? "error"
-      : fingerprint
-        ? "active"
-        : "unpaired";
+      : !fingerprint
+        ? "unpaired"
+        : connectionStatus === "connected"
+          ? "active"
+          : "offline";
 
   const handleBiometricToggle = async (enabled: boolean) => {
     if (biometricEnabled === null) return;
@@ -197,8 +203,17 @@ export default function SettingsScreen() {
               await device_reset();
               setFingerprint(null);
               setBiometricEnabled(false);
-            } catch {
-              Alert.alert("Error", "Reset failed. Try again.");
+            } catch (error) {
+              if (error instanceof DeviceResetRemoteRevokeError) {
+                setFingerprint(null);
+                setBiometricEnabled(false);
+                Alert.alert(
+                  "Reset Locally",
+                  "The mobile identity was reset locally, but Spine could not be notified. The old device may remain active on the server until you revoke it from a paired device or retry when the server is reachable.",
+                );
+              } else {
+                Alert.alert("Error", "Reset failed. Try again.");
+              }
             }
           },
         },
@@ -234,21 +249,25 @@ export default function SettingsScreen() {
                   color:
                     identityStatus === "active"
                       ? "#22c55e"
-                      : identityStatus === "error"
-                        ? "#ef4444"
-                        : identityStatus === "unpaired"
-                          ? "#f59e0b"
-                          : "#94a3b8",
+                      : identityStatus === "offline"
+                        ? "#f59e0b"
+                        : identityStatus === "error"
+                          ? "#ef4444"
+                          : identityStatus === "unpaired"
+                            ? "#f59e0b"
+                            : "#94a3b8",
                 },
               ]}
             >
               {identityStatus === "active"
                 ? "Active"
-                : identityStatus === "error"
-                  ? "Error"
-                  : identityStatus === "unpaired"
-                    ? "Unpaired"
-                    : "Checking"}
+                : identityStatus === "offline"
+                  ? "Offline"
+                  : identityStatus === "error"
+                    ? "Error"
+                    : identityStatus === "unpaired"
+                      ? "Unpaired"
+                      : "Checking"}
             </Text>
           </View>
         </View>
@@ -326,11 +345,11 @@ export default function SettingsScreen() {
         return (
           <View style={styles.card} lightColor="#f8fafc" darkColor="#0f172a">
             <View style={styles.cardHeader}>
-              <StatusDot status="active" />
+              <StatusDot status={connectionStatus === "connected" ? "active" : "offline"} />
               <Text style={styles.cardTitle}>Paired Desktop</Text>
-              <View style={[styles.statusBadge, { backgroundColor: "#22c55e20" }]}>
-                <Text style={[styles.statusText, { color: "#22c55e" }]}>
-                  {state?.pairedPeerDeviceType ?? "Desktop"}
+              <View style={[styles.statusBadge, { backgroundColor: connectionStatus === "connected" ? "#22c55e20" : "#f59e0b20" }]}>
+                <Text style={[styles.statusText, { color: connectionStatus === "connected" ? "#22c55e" : "#f59e0b" }]}>
+                  {connectionStatus === "connected" ? (state?.pairedPeerDeviceType ?? "Desktop") : "Offline"}
                 </Text>
               </View>
             </View>

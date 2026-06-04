@@ -94,14 +94,13 @@ const PAIRING_STEPS: { key: string; label: string }[] = [
   { key: 'updating_config', label: 'Updating configuration' },
 ];
 
-function pairingStepLabel(step: string): string {
-  const found = PAIRING_STEPS.find((s) => s.key === step);
-  return found ? found.label : step;
-}
-
 function pairingStepIndex(step: string): number {
   const idx = PAIRING_STEPS.findIndex((s) => s.key === step);
   return idx >= 0 ? idx : 999;
+}
+
+function shouldClearPairHandle(cfg: SpineConfigView, ps: PairingStateView): boolean {
+  return cfg.is_paired || ['paired', 'expired', 'failed', 'cancelled', 'idle'].includes(ps.state);
 }
 
 export default function DevicesTab() {
@@ -124,24 +123,32 @@ export default function DevicesTab() {
   const [joinShortCode, setJoinShortCode] = createSignal('');
 
   let pollTimer: number | null = null;
+  let refreshInFlight = false;
+  let disposed = false;
 
   async function refresh() {
+    if (refreshInFlight) return;
+    refreshInFlight = true;
     try {
-      const [cfg, id, ps, inb, ws] = await Promise.all([
-        invoke<SpineConfigView>('spine_get_config'),
+      const [id, ps, inb, ws] = await Promise.all([
         invoke<IdentityView>('spine_get_identity'),
         invoke<PairingStateView>('spine_pair_status'),
         invoke<InboxEntry[]>('spine_list_inbox').catch(() => [] as InboxEntry[]),
         invoke<string>('spine_ws_status'),
       ]);
+      const cfg = await invoke<SpineConfigView>('spine_get_config');
+      if (disposed) return;
       setConfig(cfg);
       setIdentity(id);
       setPairState(ps);
       setInbox(inb);
       if (ws) setConnectionStatus(ws);
       if (urlDraft() === '' && cfg.url) setUrlDraft(cfg.url);
+      if (shouldClearPairHandle(cfg, ps)) setPairHandle(null);
     } catch (e) {
       console.error('devices refresh failed', e);
+    } finally {
+      refreshInFlight = false;
     }
   }
 
@@ -160,6 +167,7 @@ export default function DevicesTab() {
   });
 
   onCleanup(() => {
+    disposed = true;
     if (pollTimer) window.clearInterval(pollTimer);
   });
 

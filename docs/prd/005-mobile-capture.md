@@ -106,14 +106,14 @@ PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
 **Description:** 作为用户，我希望在设置中清楚看到当前配对的对端设备信息，并能一键解除配对。
 
 **Acceptance Criteria:**
-- [ ] 设置页 / Devices section 显示：对端 fingerprint（前 8 位 + 后 4 位缩略）、对端 device_type、`paired_at` 相对时间、Spine URL、最后一次成功 Spine 联系时间（`last_seen_at`）。
-- [ ] "Unpair" 按钮触发：
+- [x] 设置页 / Devices section 显示：对端 fingerprint（前 8 位 + 后 4 位缩略）、对端 device_type、`paired_at` 相对时间、Spine URL、最后一次成功 Spine 联系时间（`last_seen_at`）。
+- [x] "Unpair" 按钮触发：
   1. 调用 Spine `POST /v1/devices/{self}/revoke` 撤销自身设备并解除 paired 关系。
   2. 清除所有 `expo-secure-store` 同步键。
   3. **保留** Ed25519 身份密钥（不重置身份），允许后续重新配对。
   4. 清空发送队列；正在发送的 in-flight 请求 abort。
-- [ ] 解除配对后 UI 回到"未配对"空状态；底部 tab 中的搜索 / 列表入口变灰并提示需要配对。
-- [ ] 若 Spine 返回 401（token 失效）/ 404（device 已被对端 revoke），客户端进入 `Unpaired` 状态而不是无限重试。
+- [x] 解除配对后 UI 回到"未配对"空状态；底部 tab 中的搜索 / 列表入口变灰并提示需要配对。
+- [x] 若 Spine 返回 401（token 失效）/ 404（device 已被对端 revoke），客户端进入 `Unpaired` 状态而不是无限重试。
 
 ### US-043: 文本捕获主屏
 **Description:** 作为用户，我希望打开 App 就是一个空白文本框，键盘自动弹出，写完点发送即可。
@@ -219,20 +219,23 @@ PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
 - [ ] **不在移动端预抓取 URL 内容**——这是桌面端 RAG engine 的工作（PRD 001 已有 fetcher）。
 
 ### US-047: Bundle 加密、离线队列与上传
+
+> **Status:** ✅ Implemented via OpenSpec change [`mobile-capture-outbox-upload`](../../openspec/changes/archive/2026-06-05-mobile-capture-outbox-upload/). Smoke tests 7.4-7.6 passed manually on 2026-06-05.
+
 **Description:** 作为系统，我需要把所有 capture 编码成 Spine envelope，加密、本地排队、按序上传，离线时缓存、上线后续传。
 
 **Acceptance Criteria:**
-- [ ] 加密层完全复用 PRD 004 的协议：
+- [x] 加密层完全复用 PRD 004 的协议：
   - AES-256-GCM with 96-bit random nonce。
   - Envelope plaintext = `JSON.stringify(payload)` 的 UTF-8 字节。
-  - `payload_hash = SHA-256(plaintext)`，作为完整性校验。
+  - Envelope `sha256 = SHA-256(content_utf8 bytes)`，与桌面端 `BundleEnvelope::validate()` 一致；Spine relay 层的 `payload_hash` 仍为 SHA-256(encrypted blob)。
   - Envelope 外层结构与桌面端 `core/storage/src/spine/envelope.rs` **完全一致**（确保桌面端 ingestion 不需要改 envelope 解析代码）。
-- [ ] 离线队列：使用 `expo-sqlite` 持久化（一张 `outbox` 表），字段 `id`, `created_at`, `state: pending|sending|failed|done`, `attempts`, `last_error`, `encrypted_blob`。
-- [ ] 加密后立即删除明文：payload object 被 GC 前不进入任何 console.log / sentry breadcrumb；包一层 `secureSerialize()` 在 dev 模式下 panic 阻止 stringify。
-- [ ] 上传：HTTP POST `/bundles` 到 Spine，带 `Idempotency-Key: <bundle.id>`，遵循 PRD 002 §US-008 的协议（最大 3 次重试，指数退避 1s/4s/16s）。
-- [ ] 杀进程 / 切后台时正在 `sending` 的 bundle 自动回退到 `pending`，下次启动从队列头部继续。
-- [ ] iOS 后台任务：使用 `expo-task-manager` 的 background fetch（间隔由 OS 决定，约 15min~hours）尝试 flush 队列；Android 使用 `expo-background-fetch`。**不承诺** 后台秒级上传——这是 OS 的限制。
-- [ ] 队列长度上限 1000 条；超过时拒绝新 capture 并提示"请先连接网络"。
+- [x] 离线队列：使用 `expo-sqlite` 持久化（一张 `outbox` 表），字段 `id`, `created_at`, `state: pending|sending|failed|done`, `attempts`, `last_error`, `encrypted_blob`。
+- [x] 加密后立即删除明文：payload object 被 GC 前不进入任何 console.log / sentry breadcrumb；包一层 `secureSerialize()` 在 dev 模式下 panic 阻止 stringify。
+- [x] 上传：HTTP POST `/v1/sync/bundle` 到 Spine，带 `Idempotency-Key: <bundle.id>`，遵循 PRD 002 §US-014 的协议（最大 3 次重试，指数退避 1s/4s/16s）。
+- [x] 杀进程 / 切后台时正在 `sending` 的 bundle 自动回退到 `pending`，下次启动从队列头部继续。
+- [x] iOS 后台任务：使用 `expo-task-manager` 的 background fetch（间隔由 OS 决定，约 15min~hours）尝试 flush 队列；Android 使用 `expo-background-fetch`。**不承诺** 后台秒级上传——这是 OS 的限制。
+- [x] 队列长度上限 1000 条，仅统计 `pending|sending|failed`；`done` 不计入容量。超过时拒绝新 capture 并提示"Capture queue is full - connect to upload or retry failed captures"。
 
 ### US-048: Capture 发送状态 UI 与重试
 **Description:** 作为用户，我希望每条 capture 旁边能看到它的状态（已发送 / 队列中 / 失败），失败的可以一键重试。
@@ -394,7 +397,7 @@ US-052 至 US-054 涉及桌面端 `apps/desktop/` 与 `core/`，**不属于 mobi
 ## Technical Considerations
 
 - **WebSocket on mobile**：MVP **不启用** WS 长连接。原因：iOS 后台限制 + 电量成本 + 当前 use case（用户主动查询）不需要秒级 push。改为：
-  - 用户在 App 前台时，10s 短轮询 `/bundles?since=...`（仅用于 search response）。
+  - 用户在 App 前台时，10s 短轮询 `/v1/sync/bundles?limit=20`（仅用于 search response）。
   - 后台时不轮询；OS-scheduled background fetch 触发时拉一次。
 - **Search request 与 outbox 的优先级**：search-request 在 outbox 中标 `priority: high`，跳过普通 capture 的 FIFO 顺序立即上传。
 - **Hermes 兼容性**：所有 JS crypto 库必须经过 Hermes JS engine 验证；US-040 身份密钥不再依赖 JS crypto，而是通过 native `SyncMindDeviceIdentity` module 使用 Keychain / Keystore-backed storage。
