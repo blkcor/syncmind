@@ -83,13 +83,69 @@ describe("Capture screen send behavior", () => {
     expect(source).not.toContain("encrypted_blob");
   });
 
-  it("keeps US-044 audio capture out of the text capture screen", () => {
+  it("wires US-044 voice mode entry with swipe threshold and toggle button", () => {
     const source = fs.readFileSync(
       path.join(__dirname, "../app/(tabs)/index.tsx"),
       "utf8",
     );
 
-    expect(source).not.toContain("Audio.Recording");
-    expect(source).not.toContain("requestPermissionsAsync");
+    expect(source).toContain("VOICE_SWIPE_THRESHOLD_PX = 48");
+    expect(source).toContain("handleVoiceSwipeStart");
+    expect(source).toContain("handleVoiceSwipeEnd");
+    expect(source).toContain('accessibilityLabel="Toggle capture mode"');
+    expect(source).toContain("setCaptureMode((m) => (m === 'voice' ? 'text' : 'voice'))");
+    expect(source).toContain("<VoiceRecorder onEnqueueClip={enqueueAudioClip} />");
+  });
+
+  it("wires press-and-hold plus accessibility action recording controls in VoiceRecorder", () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, "../src/capture/VoiceRecorder.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("onPressIn={handleVoicePressIn}");
+    expect(source).toContain("onPressOut={handleVoicePressOut}");
+    expect(source).toContain("accessibilityActions");
+    expect(source).toContain("onAccessibilityAction={handleVoiceAccessibilityAction}");
+    expect(source).toContain("requestRecordingPermissionsAsync");
+    expect(source).toContain("setAudioModeAsync");
+  });
+
+  it("statically imports expo-audio in VoiceRecorder for native module bundling", () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, "../src/capture/VoiceRecorder.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("from 'expo-audio'");
+    expect(source).not.toContain("import('expo-audio')");
+  });
+
+  it("encrypts and enqueues capture-audio bundles with audio content type", () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, "../app/(tabs)/index.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("createCaptureAudioPayload");
+    expect(source).toContain("encryptCaptureAudio");
+    expect(source).toContain("CAPTURE_AUDIO_CONTENT_TYPE");
+    expect(source).toContain("audioBase64");
+    expect(source).toContain("durationMs");
+    expect(source).toContain("Clip too long");
+  });
+
+  it("handles background interruption with keep and discard choices in VoiceRecorder", () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, "../src/capture/VoiceRecorder.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("BACKGROUND_INTERRUPT_MS = 30_000");
+    expect(source).toContain("AppState.addEventListener('change'");
+    expect(source).toContain("handleInterruptedRecording");
+    expect(source).toContain("keepInterruptedClip");
+    expect(source).toContain("discardInterruptedClip");
+    expect(source).toContain("setInterruptedClip");
   });
 });

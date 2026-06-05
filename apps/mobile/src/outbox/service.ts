@@ -18,6 +18,7 @@ export interface OutboxRow {
   attempts: number;
   last_error: string | null;
   encrypted_blob: Uint8Array;
+  content_type: string;
 }
 
 export interface OutboxStatusRow {
@@ -40,6 +41,7 @@ interface OutboxDbRow {
   attempts: number;
   last_error: string | null;
   encrypted_blob: number[] | Uint8Array;
+  content_type?: string | null;
 }
 
 const WHITELISTED_ERRORS = [
@@ -65,7 +67,8 @@ function httpStatusToLastError(status: number): WhitelistedError {
 
 const MAX_UNFINISHED = 1000;
 const DONE_RETENTION_DAYS = 7;
-const CAPTURE_TEXT_CONTENT_TYPE = "application/syncmind.capture-text+json";
+export const CAPTURE_TEXT_CONTENT_TYPE = "application/syncmind.capture-text+json";
+export const CAPTURE_AUDIO_CONTENT_TYPE = "application/syncmind.capture-audio+json";
 
 let db: SQLite.SQLiteDatabase | null = null;
 const outboxListeners = new Set<() => void>();
@@ -104,6 +107,13 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
     if (!cols.some((c) => c.name === "preview_text")) {
       await db.execAsync("ALTER TABLE outbox ADD COLUMN preview_text TEXT");
     }
+    if (!cols.some((c) => c.name === "content_type")) {
+      await db.execAsync(
+        `ALTER TABLE outbox
+         ADD COLUMN content_type TEXT NOT NULL
+         DEFAULT 'application/syncmind.capture-text+json'`,
+      );
+    }
   }
   return db;
 }
@@ -112,7 +122,11 @@ function rowFromDb(r: OutboxDbRow): OutboxRow {
   const blob = Array.isArray(r.encrypted_blob)
     ? new Uint8Array(r.encrypted_blob)
     : r.encrypted_blob;
-  return { ...r, encrypted_blob: blob };
+  return {
+    ...r,
+    encrypted_blob: blob,
+    content_type: r.content_type ?? CAPTURE_TEXT_CONTENT_TYPE,
+  };
 }
 
 export async function initOutbox(): Promise<void> {
@@ -133,6 +147,7 @@ export async function enqueueOutboxItem(
   id: string,
   blob: Uint8Array,
   preview?: string,
+  contentType = CAPTURE_TEXT_CONTENT_TYPE,
 ): Promise<void> {
   const d = await getDb();
 
@@ -146,11 +161,12 @@ export async function enqueueOutboxItem(
   const previewText = preview ? preview.slice(0, 100) : null;
   const createdAt = new Date().toISOString();
   await d.runAsync(
-    "INSERT INTO outbox (id, created_at, state, attempts, last_error, encrypted_blob, preview_text) VALUES (?, ?, 'pending', 0, NULL, ?, ?)",
+    "INSERT INTO outbox (id, created_at, state, attempts, last_error, encrypted_blob, preview_text, content_type) VALUES (?, ?, 'pending', 0, NULL, ?, ?, ?)",
     id,
     createdAt,
     blob,
     previewText,
+    contentType,
   );
   notifyOutboxChanged();
 }
@@ -297,7 +313,7 @@ async function tryUploadRow(
           method: "POST",
           headers: {
             "Content-Type": "application/octet-stream",
-            "X-Syncmind-Content-Type": CAPTURE_TEXT_CONTENT_TYPE,
+            "X-Syncmind-Content-Type": row.content_type,
             "Idempotency-Key": row.id,
           },
           body: row.encrypted_blob as unknown as BodyInit,

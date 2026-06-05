@@ -36,10 +36,10 @@ func setupSyncIntegrationTestDB(t *testing.T) (*pgxpool.Pool, *redis.Client) {
 
 	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
-		rdb = nil
-	} else {
-		_ = rdb.FlushDB(context.Background()).Err()
+		rdb.Close()
+		t.Skipf("Skipping test: redis unreachable: %v", err)
 	}
+	_ = rdb.FlushDB(context.Background()).Err()
 
 	return pool, rdb
 }
@@ -66,9 +66,12 @@ func TestFullSyncFlow(t *testing.T) {
 		t.Fatalf("failed to generate responder key: %v", err)
 	}
 	respPubkey := respPriv.Public().(ed25519.PublicKey)
+	initiatorUUID := uuid.New()
+	responderUUID := uuid.New()
 
 	// Pair devices via pairing handlers
 	reqBody, _ := json.Marshal(map[string]string{
+		"device_uuid":      initiatorUUID.String(),
 		"initiator_pubkey": base64.RawURLEncoding.EncodeToString(initPubkey),
 		"device_type":      "desktop",
 	})
@@ -85,6 +88,7 @@ func TestFullSyncFlow(t *testing.T) {
 	}
 
 	completeBody, _ := json.Marshal(map[string]string{
+		"device_uuid":      responderUUID.String(),
 		"session_id":       initResp.SessionID,
 		"responder_pubkey": base64.RawURLEncoding.EncodeToString(respPubkey),
 		"device_type":      "mobile",
@@ -119,6 +123,7 @@ func TestFullSyncFlow(t *testing.T) {
 	authMW := middleware.AuthMiddleware(cfg, db, rdb)
 
 	// Device 1 (initiator) uploads a bundle via syncHandler.Upload
+	captureAudioContentType := "application/syncmind.capture-audio+json"
 	payload := []byte("hello sync bundle payload")
 	initToken, err := crypto.SignDeviceJWT(initPriv, initDeviceID, cfg.JWTIssuer, cfg.JWTAudience, time.Hour)
 	if err != nil {
@@ -128,7 +133,7 @@ func TestFullSyncFlow(t *testing.T) {
 	ctxUpload := app.NewContext(0)
 	ctxUpload.Request.SetBody(payload)
 	ctxUpload.Request.Header.Set("Authorization", "Bearer "+initToken)
-	ctxUpload.Request.Header.Set("X-Syncmind-Content-Type", "application/octet-stream")
+	ctxUpload.Request.Header.Set("X-Syncmind-Content-Type", captureAudioContentType)
 	ctxUpload.Request.Header.Set("Content-Type", "application/octet-stream")
 
 	// Run auth middleware then upload handler
@@ -169,6 +174,9 @@ func TestFullSyncFlow(t *testing.T) {
 	if bundle.ToDeviceID != respDeviceID {
 		t.Fatal("bundle to_device_id mismatch")
 	}
+	if bundle.ContentType != captureAudioContentType {
+		t.Fatalf("expected content type %s, got %s", captureAudioContentType, bundle.ContentType)
+	}
 
 	// Device 2 (responder) lists bundles via syncHandler.List
 	respToken, err := crypto.SignDeviceJWT(respPriv, respDeviceID, cfg.JWTIssuer, cfg.JWTAudience, time.Hour)
@@ -202,6 +210,9 @@ func TestFullSyncFlow(t *testing.T) {
 	if listResp[0]["bundle_id"] != bundleID {
 		t.Fatalf("expected bundle_id %s, got %v", bundleID, listResp[0]["bundle_id"])
 	}
+	if listResp[0]["content_type"] != captureAudioContentType {
+		t.Fatalf("expected content_type %s, got %v", captureAudioContentType, listResp[0]["content_type"])
+	}
 
 	// Device 2 downloads the bundle via syncHandler.Download
 	ctxDownload := app.NewContext(0)
@@ -223,6 +234,9 @@ func TestFullSyncFlow(t *testing.T) {
 	}
 	if !bytes.Equal(ctxDownload.Response.Body(), payload) {
 		t.Fatal("downloaded payload mismatch")
+	}
+	if got := string(ctxDownload.Response.Header.Peek("X-Syncmind-Content-Type")); got != captureAudioContentType {
+		t.Fatalf("expected download content type %s, got %s", captureAudioContentType, got)
 	}
 
 	// Device 2 acks the bundle via syncHandler.Ack

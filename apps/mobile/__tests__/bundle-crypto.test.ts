@@ -25,9 +25,12 @@ import {
   secureSerialize,
   peerFingerprintToAAD,
   createCaptureTextPayload,
+  createCaptureAudioPayload,
   buildCaptureTextEnvelope,
+  buildCaptureAudioEnvelope,
   encryptBundle,
   encryptCaptureText,
+  encryptCaptureAudio,
 } from "../src/crypto/bundle";
 import type { PersistedPairingState } from "../src/spine/session";
 
@@ -118,6 +121,29 @@ describe("secureSerialize", () => {
       client_device_fingerprint: buildFingerprint(VALID_HEX_64),
     });
   });
+
+  it("creates the US-044 capture-audio payload schema", () => {
+    const payload = createCaptureAudioPayload({
+      id: "audio-us-044",
+      audio_base64: "ZmFrZS1tNGE=",
+      duration_ms: 12_345,
+      client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+    });
+
+    expect(payload).toMatchObject({
+      v: 1,
+      kind: "capture-audio",
+      id: "audio-us-044",
+      audio_base64: "ZmFrZS1tNGE=",
+      audio_mime: "audio/mp4",
+      duration_ms: 12_345,
+      client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+    });
+    expect(() => JSON.stringify(payload)).toThrow("secureSerialize");
+    expect(() => secureSerialize(payload)).not.toThrow();
+  });
 });
 
 // ── peerFingerprintToAAD ─────────────────────────────────────────────
@@ -191,6 +217,34 @@ describe("buildCaptureTextEnvelope", () => {
     });
 
     expect(e1.sha256).not.toBe(e2.sha256);
+  });
+});
+
+// ── buildCaptureAudioEnvelope ────────────────────────────────────────
+
+describe("buildCaptureAudioEnvelope", () => {
+  it("constructs a valid capture-audio envelope with correct sha256", () => {
+    const payload = {
+      id: "audio-1",
+      audio_base64: "ZmFrZS1tNGE=",
+      duration_ms: 5000,
+      client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+    };
+
+    const envelope = buildCaptureAudioEnvelope(payload);
+
+    expect(envelope.schema_version).toBe(1);
+    expect(envelope.kind).toBe("capture-audio");
+    expect(envelope.filename).toBe("capture-audio-1.json");
+    expect(envelope.captured_at).toBeTruthy();
+    expect(JSON.parse(envelope.content_utf8)).toEqual({
+      v: 1,
+      kind: "capture-audio",
+      ...payload,
+      audio_mime: "audio/mp4",
+    });
+    expect(envelope.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 });
 
@@ -332,6 +386,27 @@ describe("encryptCaptureText", () => {
 
     expect(result.id).toBe("cap-1");
     expect(result.blob).toBeInstanceOf(Uint8Array);
+    expect(result.payloadHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// ── encryptCaptureAudio ──────────────────────────────────────────────
+
+describe("encryptCaptureAudio", () => {
+  it("encrypts a capture audio payload end-to-end", async () => {
+    const payload = createCaptureAudioPayload({
+      id: "audio-1",
+      audio_base64: "ZmFrZS1tNGE=",
+      duration_ms: 5000,
+      client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+    });
+
+    const result = await encryptCaptureAudio(payload, testPairingState);
+
+    expect(result.id).toBe("audio-1");
+    expect(result.blob).toBeInstanceOf(Uint8Array);
+    expect(result.blob.length).toBeGreaterThanOrEqual(28);
     expect(result.payloadHash).toMatch(/^[0-9a-f]{64}$/);
   });
 });

@@ -879,11 +879,14 @@ mod tests {
     fn capture_audio_json(id: &str) -> String {
         let audio_b64 = base64::engine::general_purpose::STANDARD.encode(b"fake-wav-bytes-minimal");
         serde_json::json!({
+            "v": 1,
+            "kind": "capture-audio",
             "id": id,
             "audio_base64": audio_b64,
-            "audio_mime": "audio/m4a",
+            "audio_mime": "audio/mp4",
             "duration_ms": 5000,
             "client_ts": chrono::Utc::now().to_rfc3339(),
+            "client_device_fingerprint": "test-mobile-fingerprint",
         })
         .to_string()
     }
