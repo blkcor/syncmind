@@ -9,7 +9,10 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.blkcor.syncmind"
+      "bundleIdentifier": "com.blkcor.syncmind",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "SyncMind uses the microphone to record audio captures you send to your paired desktop."
+      }
     },
     "android": {
       "package": "com.blkcor.syncmind",
@@ -44,7 +47,14 @@
           "backgroundColor": "#ffffff"
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "SyncMind uses the microphone to record audio captures you send to your paired desktop.",
+          "recordAudioAndroid": true
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

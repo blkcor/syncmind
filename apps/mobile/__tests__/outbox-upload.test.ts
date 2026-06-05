@@ -14,6 +14,7 @@ jest.mock("expo-sqlite", () => {
     last_error: string | null;
     preview_text: string | null;
     encrypted_blob: Uint8Array;
+    content_type: string;
   }
 
   const tables = new Map<string, MockRow[]>();
@@ -75,6 +76,8 @@ jest.mock("expo-sqlite", () => {
             last_error: lastError,
             preview_text: (params[3] as string) ?? null,
             encrypted_blob: params[2] as Uint8Array,
+            content_type:
+              (params[4] as string) ?? "application/syncmind.capture-text+json",
           });
           return { lastInsertRowId: table.length, changes: 1 };
         }
@@ -153,6 +156,7 @@ jest.mock("expo-sqlite", () => {
           attempts: row.attempts,
           last_error: row.last_error,
           encrypted_blob: Array.from(row.encrypted_blob),
+          content_type: row.content_type,
         };
       }
 
@@ -190,6 +194,7 @@ jest.mock("expo-sqlite", () => {
             attempts: row.attempts,
             last_error: row.last_error,
             encrypted_blob: Array.from(row.encrypted_blob),
+            content_type: row.content_type,
           }));
       }
       return [];
@@ -652,6 +657,38 @@ describe("flushOutbox — success", () => {
     );
     expect(init.headers["Idempotency-Key"]).toBe("cap-1");
     expect(init.headers.Authorization).toMatch(/^Bearer /);
+  });
+
+  it("sends capture-audio content type for audio rows", async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 201 })) as typeof fetch;
+
+    const blob = await createEncryptedFixture("audio-1", "audio-placeholder");
+    const enqueueWithContentType = enqueueOutboxItem as unknown as (
+      id: string,
+      blob: Uint8Array,
+      preview?: string,
+      contentType?: string,
+    ) => Promise<void>;
+
+    await enqueueWithContentType(
+      "audio-1",
+      blob,
+      undefined,
+      "application/syncmind.capture-audio+json",
+    );
+
+    await flushOutbox();
+
+    const calls = (global.fetch as jest.Mock).mock.calls;
+    const bundleCall = calls.find((c: [string]) =>
+      c[0].includes("/v1/sync/bundle"),
+    );
+    expect(bundleCall).toBeDefined();
+    expect(bundleCall[1].headers["X-Syncmind-Content-Type"]).toBe(
+      "application/syncmind.capture-audio+json",
+    );
   });
 
   it("uploads rows in FIFO order", async () => {

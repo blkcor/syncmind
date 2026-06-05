@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Component, useCallback, useEffect, useRef, useState } from 'react';
 import * as Crypto from 'expo-crypto';
 import {
   Alert,
+  type GestureResponderEvent,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -13,13 +14,20 @@ import {
   TouchableWithoutFeedback,
   View,
 } from 'react-native';
+import { VoiceRecorder } from '@/src/capture/VoiceRecorder';
 
 import { PairingScanner } from '@/src/pairing/scanner';
 import { useAppStore } from '@/src/store';
 import { ensureIdentity } from '@/src/crypto/identity';
-import { createCaptureTextPayload, encryptCaptureText } from '@/src/crypto/bundle';
+import {
+  createCaptureAudioPayload,
+  createCaptureTextPayload,
+  encryptCaptureAudio,
+  encryptCaptureText,
+} from '@/src/crypto/bundle';
 import { getRestoredPairingState } from '@/src/spine/session';
 import {
+  CAPTURE_AUDIO_CONTENT_TYPE,
   enqueueOutboxItem,
   flushOutbox,
   getRecentOutboxStatuses,
@@ -28,8 +36,48 @@ import {
   QueueFullError,
   subscribeToOutboxChanges,
 } from '@/src/outbox/service';
+import {
+  type AudioCaptureReadResult,
+} from '@/src/capture/audio';
+
+class CaptureErrorBoundary extends Component<
+  { children: React.ReactNode },
+  { hasError: boolean; errorDump: string }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, errorDump: '' };
+  }
+
+  static getDerivedStateFromError(err: Error) {
+    return { hasError: true, errorDump: `${err.name}: ${err.message}\n${err.stack ?? ''}` };
+  }
+
+  componentDidCatch(err: Error) {
+    console.error('CaptureScreen error boundary caught:', err);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24, backgroundColor: '#fff' }}>
+          <Text style={{ fontSize: 18, fontWeight: '700', color: '#dc2626', marginBottom: 12 }}>
+            Capture Error
+          </Text>
+          <Text style={{ fontSize: 12, color: '#6b7280', textAlign: 'center', fontFamily: 'monospace' }}>
+            {this.state.errorDump}
+          </Text>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const MAX_CAPTURE_TEXT_CHARS = 50_000;
+const VOICE_SWIPE_THRESHOLD_PX = 48;
+
+type CaptureMode = 'text' | 'voice';
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -88,8 +136,10 @@ export default function CaptureScreen() {
     (state) => state.dismissFirstCaptureGuide,
   );
   const [note, setNote] = useState('');
+  const [captureMode, setCaptureMode] = useState<CaptureMode>('text');
   const [outboxStatusRows, setOutboxStatusRows] = useState<OutboxStatusRow[]>([]);
   const textInputRef = useRef<TextInput>(null);
+  const voiceSwipeStartY = useRef<number | null>(null);
   const isTooLong = note.length > MAX_CAPTURE_TEXT_CHARS;
   const canSend = note.trim().length > 0 && !isTooLong;
   const hasQueuedRows = outboxStatusRows.some((row) =>
@@ -140,7 +190,7 @@ export default function CaptureScreen() {
   }, [isPaired, refreshOutboxStatuses]);
 
   useEffect(() => {
-    if (!isPaired) {
+    if (!isPaired || captureMode !== 'text') {
       return;
     }
 
@@ -149,18 +199,7 @@ export default function CaptureScreen() {
     }, 100);
 
     return () => clearTimeout(timer);
-  }, [isPaired]);
-
-  if (!isPaired) {
-    return (
-      <View style={styles.unpairedContainer}>
-        <Text style={styles.unpairedHint}>
-          Pair with a desktop to start capturing
-        </Text>
-        <PairingScanner />
-      </View>
-    );
-  }
+  }, [isPaired, captureMode]);
 
   const handleSend = async () => {
     const trimmed = note.trim();
@@ -199,7 +238,78 @@ export default function CaptureScreen() {
       });
   };
 
+  const enqueueAudioClip = useCallback(async (clip: AudioCaptureReadResult) => {
+    if (clip.status === 'clip-too-long') {
+      Alert.alert('Clip too long', 'Try a shorter recording.');
+      return;
+    }
+    if (clip.status === 'missing-uri') {
+      Alert.alert('Recording Error', 'Could not read the audio capture.');
+      return;
+    }
+
+    const state = getRestoredPairingState();
+    if (!state) return;
+    const clientDeviceFingerprint = await ensureIdentity();
+    const payload = createCaptureAudioPayload({
+      id: Crypto.randomUUID(),
+      audio_base64: clip.audioBase64,
+      duration_ms: clip.durationMs,
+      client_ts: new Date().toISOString(),
+      client_device_fingerprint: clientDeviceFingerprint,
+    });
+
+    try {
+      const encrypted = await encryptCaptureAudio(payload, state);
+      await enqueueOutboxItem(
+        encrypted.id,
+        encrypted.blob,
+        'Audio capture',
+        CAPTURE_AUDIO_CONTENT_TYPE,
+      );
+    } catch (err) {
+      if (err instanceof QueueFullError) {
+        Alert.alert('Queue Full', err.message);
+      }
+      return;
+    }
+
+    void refreshOutboxStatuses();
+    void flushOutbox()
+      .catch(() => {})
+      .finally(() => {
+        void refreshOutboxStatuses();
+      });
+  }, [refreshOutboxStatuses]);
+
+  const handleVoiceSwipeStart = (event: GestureResponderEvent) => {
+    voiceSwipeStartY.current = event.nativeEvent.pageY;
+  };
+
+  const handleVoiceSwipeEnd = (event: GestureResponderEvent) => {
+    const startY = voiceSwipeStartY.current;
+    voiceSwipeStartY.current = null;
+    if (startY == null) return;
+    if (startY - event.nativeEvent.pageY >= VOICE_SWIPE_THRESHOLD_PX) {
+      setCaptureMode('voice');
+    }
+  };
+
+  if (!isPaired) {
+    return (
+      <CaptureErrorBoundary>
+        <View style={styles.unpairedContainer}>
+          <Text style={styles.unpairedHint}>
+            Pair with a desktop to start capturing
+          </Text>
+          <PairingScanner />
+        </View>
+      </CaptureErrorBoundary>
+    );
+  }
+
   return (
+    <CaptureErrorBoundary>
     <KeyboardAvoidingView
       style={styles.flex}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -237,31 +347,58 @@ export default function CaptureScreen() {
                 {shortFingerprint(peerDeviceFingerprint)}
               </Text>
             </View>
-            <TextInput
-              ref={textInputRef}
-              autoFocus
-              multiline
-              placeholder="Capture a note"
-              style={styles.input}
-              textAlignVertical="top"
-              value={note}
-              onChangeText={setNote}
-              returnKeyType="default"
-              blurOnSubmit={false}
-            />
+            {captureMode === 'text' ? (
+              <TextInput
+                ref={textInputRef}
+                autoFocus
+                multiline
+                placeholder="Capture a note"
+                style={styles.input}
+                textAlignVertical="top"
+                value={note}
+                onChangeText={setNote}
+                returnKeyType="default"
+                blurOnSubmit={false}
+              />
+            ) : (
+              <VoiceRecorder onEnqueueClip={enqueueAudioClip} />
+            )}
           </ScrollView>
 
-          {isTooLong ? (
+          {isTooLong && captureMode === 'text' ? (
             <Text style={styles.limitError}>Too long - try splitting</Text>
           ) : null}
 
-          <TouchableOpacity
-            style={[styles.sendButton, !canSend && styles.sendButtonDisabled]}
-            onPress={handleSend}
-            disabled={!canSend}
+          <View
+            style={styles.actionRow}
+            onTouchStart={handleVoiceSwipeStart}
+            onTouchEnd={handleVoiceSwipeEnd}
           >
-            <Text style={styles.sendButtonText}>Send</Text>
-          </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.modeButton,
+                captureMode === 'voice' && styles.modeButtonActive,
+              ]}
+              onPress={() =>
+                setCaptureMode((m) => (m === 'voice' ? 'text' : 'voice'))
+              }
+              accessibilityRole="button"
+              accessibilityLabel="Toggle capture mode"
+            >
+              <Text style={styles.modeButtonText}>
+                {captureMode === 'voice' ? 'Text' : 'Voice'}
+              </Text>
+            </TouchableOpacity>
+            {captureMode === 'text' ? (
+              <TouchableOpacity
+                style={[styles.sendButton, !canSend && styles.sendButtonDisabled]}
+                onPress={handleSend}
+                disabled={!canSend}
+              >
+                <Text style={styles.sendButtonText}>Send</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
 
           {outboxStatusRows.length > 0 ? (
             <View style={styles.outboxPanel}>
@@ -291,6 +428,7 @@ export default function CaptureScreen() {
         </View>
       </TouchableWithoutFeedback>
     </KeyboardAvoidingView>
+    </CaptureErrorBoundary>
   );
 }
 
@@ -372,6 +510,7 @@ const styles = StyleSheet.create({
     color: "#b91c1c",
   },
   sendButton: {
+    flex: 1,
     alignItems: 'center',
     borderRadius: 6,
     backgroundColor: '#1f6feb',
@@ -384,6 +523,31 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
+  },
+  actionRow: {
+    minHeight: 50,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 10,
+  },
+  modeButton: {
+    minWidth: 76,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#ccd1d8',
+    borderRadius: 6,
+    backgroundColor: '#fff',
+    paddingHorizontal: 12,
+  },
+  modeButtonActive: {
+    borderColor: '#1f6feb',
+    backgroundColor: '#eff6ff',
+  },
+  modeButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#111827',
   },
   outboxPanel: {
     borderTopWidth: 1,

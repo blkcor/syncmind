@@ -118,7 +118,7 @@ PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
 ### US-043: 文本捕获主屏
 **Description:** 作为用户，我希望打开 App 就是一个空白文本框，键盘自动弹出，写完点发送即可。
 
-> **Status:** ✅ Implemented via OpenSpec change [`mobile-text-capture-home`](../../openspec/changes/archive/2026-06-04-mobile-text-capture-home/). Text capture now uses the paired default Capture tab, auto-focused multiline input, local status row, 50,000-character limit, optimistic encrypted outbox enqueue, and the US-043 `capture-text` plaintext schema before encryption. Voice-mode capture remains deferred to US-044.
+> **Status:** ✅ Implemented via OpenSpec change [`mobile-text-capture-home`](../../openspec/changes/archive/2026-06-04-mobile-text-capture-home/). Text capture now uses the paired default Capture tab, auto-focused multiline input, local status row, 50,000-character limit, optimistic encrypted outbox enqueue, and the US-043 `capture-text` plaintext schema before encryption. Voice-mode capture is implemented by US-044.
 
 **Acceptance Criteria:**
 - [x] App 启动后默认进入 `CaptureScreen`（已配对状态下）；`autoFocus={true}` 的多行 `TextInput`。
@@ -126,7 +126,7 @@ PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
 - [x] 底部一个明显的 "Send" 按钮 + 一行最近 3 条 capture 的迷你预览（完整列表仍归 §US-049）。
 - [x] 输入字数 ≤ 50,000 字符（envelope 限制）；超过时按钮变灰并显示 "Too long — try splitting"。
 - [x] Send 触发后 `TextInput` 立即清空（乐观更新）；后台进入 §US-047 的加密队列。
-- [ ] 支持下拉关闭键盘 / 上滑切到语音模式（§US-044）。下拉/拖动/点击关闭键盘已实现；上滑语音模式仍归 US-044。
+- [x] 支持下拉关闭键盘 / 上滑切到语音模式（§US-044）。下拉/拖动/点击关闭键盘由 US-043 实现；上滑语音模式由 US-044 实现。
 - [x] Capture payload schema（明文，加密前）：
   ```json
   {
@@ -141,17 +141,20 @@ PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
   ```
 
 ### US-044: 语音捕获（原始音频上传，不本地转写）
+
+> **Status:** ✅ Implemented via OpenSpec change [`mobile-audio-capture`](../../openspec/changes/archive/2026-06-06-mobile-audio-capture/). Voice capture uses Expo SDK 56 `expo-audio`, encrypts `capture-audio` bundles into the existing outbox, uploads through `/v1/sync/bundle`, and was verified against Spine relay plus desktop `capture-audio` dispatch. iOS microphone permission requires a rebuilt native app because `NSMicrophoneUsageDescription` is bundle metadata, not a Metro-reloadable JS change.
+
 **Description:** 作为用户，我希望长按一个按钮就开始录音，松开自动发送，桌面端会替我转写成文字并索引。
 
 **Acceptance Criteria:**
-- [ ] 使用 `expo-av` 的 `Audio.Recording`，录音参数：
+- [x] 使用 Expo SDK 56 `expo-audio` 录音 API，录音参数：
   - 编码：AAC LC，sample rate 16000Hz，单声道，bit rate 32 kbps（Whisper 的最优输入参数）。
   - 容器格式：`.m4a`。
-- [ ] 麦克风权限通过 `Audio.requestPermissionsAsync()` 申请，拒绝时引导到系统设置。
-- [ ] UI：CaptureScreen 上向上滑切换到语音模式，出现一个圆形按钮，**按住录音 / 松开发送**，录音时显示实时音量波形（`recordingStatus.metering`）。
-- [ ] 最长单次录音 **60 秒**，到点强制停止并提示用户。
-- [ ] 录音结束后立即读取 m4a 字节，base64 编码塞进 payload；本地临时文件用 `expo-file-system` 写入加密目录，发送成功后删除。
-- [ ] Capture payload schema：
+- [x] 麦克风权限通过 `expo-audio` 权限 API 申请，拒绝时引导到系统设置。
+- [x] UI：CaptureScreen 上向上滑切换到语音模式，出现一个圆形按钮，**按住录音 / 松开发送**，录音时显示实时音量波形。
+- [x] 最长单次录音 **60 秒**，到点强制停止并提示用户。
+- [x] 录音结束后立即读取 m4a 字节，base64 编码塞进 payload；录音器临时文件在加密入队、校验拒绝、丢弃或取消路径 best-effort 删除。
+- [x] Capture payload schema：
   ```json
   {
     "v": 1,
@@ -164,8 +167,8 @@ PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
     "client_device_fingerprint": "..."
   }
   ```
-- [ ] 单 bundle 大小 hard cap：**8 MB 原始字节 / 11 MB base64**；超过时拒绝发送并提示"片段过长"。
-- [ ] 录音中断（来电、App 切后台超过 30s）自动停止并保留已录制片段，弹"保留 / 丢弃"两选。
+- [x] 单 bundle 大小 hard cap：**8 MB 原始字节 / 11 MB base64**；超过时拒绝发送并提示"片段过长"。
+- [x] 录音中断（来电、App 切后台超过 30s）自动停止并保留已录制片段，弹"保留 / 丢弃"两选。
 
 ### US-045: 照片捕获（相机 + 相册）
 **Description:** 作为用户，我希望从相机或相册选一张图片直接 capture，桌面端会做 OCR 把文字部分加入索引。

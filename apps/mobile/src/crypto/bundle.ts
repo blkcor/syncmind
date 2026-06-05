@@ -18,6 +18,22 @@ export type CaptureTextPayloadInput = Omit<
   "v" | "kind" | "source"
 >;
 
+export interface CaptureAudioPayload {
+  v: 1;
+  kind: "capture-audio";
+  id: string;
+  audio_base64: string;
+  audio_mime: "audio/mp4";
+  duration_ms: number;
+  client_ts: string;
+  client_device_fingerprint: string;
+}
+
+export type CaptureAudioPayloadInput = Omit<
+  CaptureAudioPayload,
+  "v" | "kind" | "audio_mime"
+>;
+
 export interface BundleEnvelope {
   schema_version: number;
   kind: string;
@@ -66,6 +82,17 @@ export function createCaptureTextPayload(
     kind: "capture-text",
     ...payload,
     source: "typed",
+  });
+}
+
+export function createCaptureAudioPayload(
+  payload: CaptureAudioPayloadInput,
+): CaptureAudioPayload {
+  return withSecureSerializeGuard({
+    v: 1,
+    kind: "capture-audio",
+    ...payload,
+    audio_mime: "audio/mp4",
   });
 }
 
@@ -128,6 +155,26 @@ export function buildCaptureTextEnvelope(
 }
 
 /**
+ * Build the inner capture audio payload and outer BundleEnvelope.
+ */
+export function buildCaptureAudioEnvelope(
+  payload: CaptureAudioPayloadInput,
+): BundleEnvelope {
+  const capturePayload = createCaptureAudioPayload(payload);
+  const contentUtf8 = new TextDecoder().decode(secureSerialize(capturePayload));
+  const sha256 = computeLowerHexSha256(new TextEncoder().encode(contentUtf8));
+
+  return {
+    schema_version: 1,
+    kind: "capture-audio",
+    filename: `capture-${payload.id}.json`,
+    content_utf8: contentUtf8,
+    captured_at: new Date().toISOString(),
+    sha256,
+  };
+}
+
+/**
  * Encrypt a bundle envelope using AES-256-GCM with the paired sync key.
  * Returns nonce(12) | ciphertext_and_tag blob and SHA-256 of the encrypted blob.
  */
@@ -168,6 +215,23 @@ export async function encryptCaptureText(
     peerFingerprintAAD: aad,
   });
   return { ...result, id: textPayload.id };
+}
+
+/**
+ * Encrypt a capture audio payload into a bundle-ready encrypted blob.
+ */
+export async function encryptCaptureAudio(
+  audioPayload: CaptureAudioPayload,
+  state: PersistedPairingState,
+): Promise<EncryptedBundle & { id: string }> {
+  const envelope = buildCaptureAudioEnvelope(createCaptureAudioPayload(audioPayload));
+  const aad = peerFingerprintToAAD(state.pairedPeerFingerprint);
+  const result = await encryptBundle({
+    envelope,
+    syncKey: state.syncKey,
+    peerFingerprintAAD: aad,
+  });
+  return { ...result, id: audioPayload.id };
 }
 
 function computeLowerHexSha256(data: Uint8Array): string {

@@ -29,3 +29,60 @@ jest.mock("expo-background-fetch", () => ({
   registerTaskAsync: jest.fn(async () => {}),
   unregisterTaskAsync: jest.fn(async () => {}),
 }));
+
+// Mock expo-audio
+jest.mock("expo-audio", () => {
+  const recorder = {
+    uri: "file:///tmp/syncmind-test.m4a",
+    prepareToRecordAsync: jest.fn(async () => {}),
+    record: jest.fn(),
+    stop: jest.fn(async () => {}),
+    getStatus: jest.fn(() => ({
+      canRecord: true,
+      isRecording: false,
+      durationMillis: 0,
+      mediaServicesDidReset: false,
+      metering: -40,
+      url: "file:///tmp/syncmind-test.m4a",
+    })),
+  };
+
+  return {
+    __esModule: true,
+    requestRecordingPermissionsAsync: jest.fn(async () => ({ granted: true })),
+    setAudioModeAsync: jest.fn(async () => {}),
+    useAudioRecorder: jest.fn(() => recorder),
+    useAudioRecorderState: jest.fn(() => recorder.getStatus()),
+    RecordingPresets: {
+      HIGH_QUALITY: {},
+      LOW_QUALITY: {},
+    },
+  };
+});
+
+// Mock expo-file-system
+jest.mock("expo-file-system", () => {
+  class File {
+    uri: string;
+
+    constructor(uri: string) {
+      this.uri = uri;
+    }
+
+    async bytes(): Promise<Uint8Array> {
+      return new Uint8Array([1, 2, 3, 4]);
+    }
+
+    async base64(): Promise<string> {
+      return "AQIDBA==";
+    }
+
+    info(): { exists: boolean; size: number } {
+      return { exists: true, size: 4 };
+    }
+
+    delete(): void {}
+  }
+
+  return { __esModule: true, File };
+});

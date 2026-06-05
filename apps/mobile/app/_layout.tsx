@@ -2,7 +2,26 @@ import { useFonts } from 'expo-font';
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect, useState } from 'react';
+import { Alert } from 'react-native';
 import 'react-native-reanimated';
+
+// Global error handler to surface JS errors to the user instead of crashing.
+// ErrorBoundary only catches render-phase errors. Async callbacks, native
+// module event listeners, and microtask rejections all escape it. This handler
+// catches *everything* so the error stays visible on screen.
+const _prevGlobalHandler = (globalThis as any).ErrorUtils?.getGlobalHandler?.();
+(globalThis as any).ErrorUtils?.setGlobalHandler?.((error: Error, isFatal: boolean) => {
+  const message = `${error.name ?? 'Error'}: ${error.message ?? String(error)}\n\n${error.stack ?? ''}`;
+  // Show via Alert so the user can read it, then rethrow into the default
+  // handler to let the RN redbox / Expo error screen appear as well.
+  Alert.alert(
+    isFatal ? 'Fatal Error' : 'Unhandled Error',
+    message.length > 2000 ? message.slice(0, 1997) + '...' : message,
+  );
+  if (_prevGlobalHandler) {
+    _prevGlobalHandler(error, isFatal);
+  }
+});
 
 import { useColorScheme } from '@/components/useColorScheme';
 import { checkCurrentDevicePairing, UnpairedError } from '@/src/spine/client';

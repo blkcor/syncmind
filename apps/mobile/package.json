@@ -8,10 +8,12 @@
     "@noble/hashes": "^2.2.0",
     "@syncmind/types": "workspace:*",
     "expo": "~56.0.5",
+    "expo-audio": "~56.0.11",
     "expo-background-fetch": "~56.0.4",
     "expo-camera": "~56.0.7",
     "expo-constants": "~56.0.16",
     "expo-crypto": "~56.0.4",
+    "expo-file-system": "~56.0.7",
     "expo-font": "~56.0.5",
     "expo-linking": "~56.0.12",
     "expo-modules-core": "~56.0.13",
@@ -19,9 +21,9 @@
     "expo-secure-store": "~56.0.4",
     "expo-splash-screen": "~56.0.10",
     "expo-sqlite": "~56.0.3",
-    "expo-task-manager": "~56.0.4",
     "expo-status-bar": "~56.0.4",
     "expo-symbols": "~56.0.5",
+    "expo-task-manager": "~56.0.4",
     "expo-web-browser": "~56.0.5",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -59,7 +61,9 @@
   },
   "jest": {
     "preset": "jest-expo",
-    "setupFiles": ["<rootDir>/jest.setup.ts"],
+    "setupFiles": [
+      "<rootDir>/jest.setup.ts"
+    ],
     "transformIgnorePatterns": [
       "/node_modules/(?!(.pnpm|react-native|@react-native|@react-native-community|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry/react-native|native-base|@noble/curves|@noble/hashes|@noble/ciphers))",
       "/node_modules/react-native-reanimated/plugin/",
