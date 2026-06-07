@@ -34,6 +34,24 @@ export type CaptureAudioPayloadInput = Omit<
   "v" | "kind" | "audio_mime"
 >;
 
+export interface CaptureImagePayload {
+  v: 1;
+  kind: "capture-image";
+  id: string;
+  image_base64: string;
+  image_mime: "image/jpeg";
+  width: number;
+  height: number;
+  caption: string | null;
+  client_ts: string;
+  client_device_fingerprint: string;
+}
+
+export type CaptureImagePayloadInput = Omit<
+  CaptureImagePayload,
+  "v" | "kind" | "image_mime"
+>;
+
 export interface BundleEnvelope {
   schema_version: number;
   kind: string;
@@ -93,6 +111,17 @@ export function createCaptureAudioPayload(
     kind: "capture-audio",
     ...payload,
     audio_mime: "audio/mp4",
+  });
+}
+
+export function createCaptureImagePayload(
+  payload: CaptureImagePayloadInput,
+): CaptureImagePayload {
+  return withSecureSerializeGuard({
+    v: 1,
+    kind: "capture-image",
+    ...payload,
+    image_mime: "image/jpeg",
   });
 }
 
@@ -175,6 +204,26 @@ export function buildCaptureAudioEnvelope(
 }
 
 /**
+ * Build the inner capture image payload and outer BundleEnvelope.
+ */
+export function buildCaptureImageEnvelope(
+  payload: CaptureImagePayloadInput,
+): BundleEnvelope {
+  const capturePayload = createCaptureImagePayload(payload);
+  const contentUtf8 = new TextDecoder().decode(secureSerialize(capturePayload));
+  const sha256 = computeLowerHexSha256(new TextEncoder().encode(contentUtf8));
+
+  return {
+    schema_version: 1,
+    kind: "capture-image",
+    filename: `capture-${payload.id}.json`,
+    content_utf8: contentUtf8,
+    captured_at: new Date().toISOString(),
+    sha256,
+  };
+}
+
+/**
  * Encrypt a bundle envelope using AES-256-GCM with the paired sync key.
  * Returns nonce(12) | ciphertext_and_tag blob and SHA-256 of the encrypted blob.
  */
@@ -232,6 +281,23 @@ export async function encryptCaptureAudio(
     peerFingerprintAAD: aad,
   });
   return { ...result, id: audioPayload.id };
+}
+
+/**
+ * Encrypt a capture image payload into a bundle-ready encrypted blob.
+ */
+export async function encryptCaptureImage(
+  imagePayload: CaptureImagePayload,
+  state: PersistedPairingState,
+): Promise<EncryptedBundle & { id: string }> {
+  const envelope = buildCaptureImageEnvelope(createCaptureImagePayload(imagePayload));
+  const aad = peerFingerprintToAAD(state.pairedPeerFingerprint);
+  const result = await encryptBundle({
+    envelope,
+    syncKey: state.syncKey,
+    peerFingerprintAAD: aad,
+  });
+  return { ...result, id: imagePayload.id };
 }
 
 function computeLowerHexSha256(data: Uint8Array): string {

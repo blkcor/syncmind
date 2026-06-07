@@ -11,6 +11,8 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.blkcor.syncmind",
       "infoPlist": {
+        "NSCameraUsageDescription": "SyncMind uses the camera to scan desktop pairing QR codes and take photo captures you send to your paired desktop.",
+        "NSPhotoLibraryUsageDescription": "SyncMind uses your photo library to pick image captures you send to your paired desktop.",
         "NSMicrophoneUsageDescription": "SyncMind uses the microphone to record audio captures you send to your paired desktop."
       }
     },
@@ -34,11 +36,20 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "SyncMind uses the camera to scan desktop pairing QR codes.",
-          "microphonePermission": false,
+          "cameraPermission": "SyncMind uses the camera to scan desktop pairing QR codes and take photo captures you send to your paired desktop.",
+          "microphonePermission": "SyncMind uses the microphone to record audio captures you send to your paired desktop.",
           "recordAudioAndroid": false
         }
       ],
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "SyncMind uses the camera to take photo captures you send to your paired desktop.",
+          "photosPermission": "SyncMind uses your photo library to pick image captures you send to your paired desktop.",
+          "microphonePermission": "SyncMind uses the microphone to record audio captures you send to your paired desktop."
+        }
+      ],
+      "./plugins/with-expo-image-picker-linker-fix.cjs",
       [
         "expo-splash-screen",
         {

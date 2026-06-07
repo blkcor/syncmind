@@ -51,6 +51,9 @@ pub const RECOGNIZED_KINDS: &[&str] = &[
 /// Wire content-type sent in `X-Syncmind-Content-Type` for v1 note bundles.
 pub const CONTENT_TYPE_NOTE: &str = "application/syncmind.note+json";
 pub const CONTENT_TYPE_CAPTURE_TEXT: &str = "application/syncmind.capture-text+json";
+pub const CONTENT_TYPE_CAPTURE_AUDIO: &str = "application/syncmind.capture-audio+json";
+pub const CONTENT_TYPE_CAPTURE_IMAGE: &str = "application/syncmind.capture-image+json";
+pub const CONTENT_TYPE_CAPTURE_LINK: &str = "application/syncmind.capture-link+json";
 
 /// Plaintext bundle envelope. Serialized as JSON before encryption.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

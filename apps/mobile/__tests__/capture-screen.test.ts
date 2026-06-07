@@ -135,6 +135,146 @@ describe("Capture screen send behavior", () => {
     expect(source).toContain("Clip too long");
   });
 
+  it("exposes US-045 photo capture from the paired capture toolbar only", () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, "../app/(tabs)/index.tsx"),
+      "utf8",
+    );
+
+    const unpairedBranch = source.slice(
+      source.indexOf("if (!isPaired)"),
+      source.indexOf("return (", source.indexOf("if (!isPaired)") + 1),
+    );
+
+    expect(source).toContain("from 'expo-symbols'");
+    expect(source).toContain('accessibilityLabel="Add photo"');
+    expect(source).toContain("camera.fill");
+    expect(unpairedBranch).not.toContain('accessibilityLabel="Add photo"');
+  });
+
+  it("does not load native image modules while evaluating the capture route", () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, "../app/(tabs)/index.tsx"),
+      "utf8",
+    );
+
+    expect(source).not.toContain("from 'expo-image-picker'");
+    expect(source).not.toContain('from "expo-image-picker"');
+    expect(source).not.toContain("from '@/src/capture/image'");
+    expect(source).toContain("import('expo-image-picker')");
+    expect(source).toContain("import('@/src/capture/image')");
+  });
+
+  it("wires the US-045 ActionSheet-style photo source choices", () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, "../app/(tabs)/index.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("showPhotoSourcePicker");
+    expect(source).toContain("ActionSheetIOS.showActionSheetWithOptions");
+    expect(source).toContain("Take Photo");
+    expect(source).toContain("Pick from Library");
+    expect(source).toContain("Cancel");
+  });
+
+  it("requests camera and library permissions only inside their selected source handlers", () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, "../app/(tabs)/index.tsx"),
+      "utf8",
+    );
+
+    const takePhotoHandler = source.slice(
+      source.indexOf("const handleTakePhoto"),
+      source.indexOf("const handlePickFromLibrary"),
+    );
+    const libraryHandler = source.slice(
+      source.indexOf("const handlePickFromLibrary"),
+      source.indexOf("const showPhotoSourcePicker"),
+    );
+
+    expect(takePhotoHandler).toContain("requestCameraPermissionsAsync");
+    expect(takePhotoHandler).toContain("launchCameraAsync");
+    expect(takePhotoHandler).not.toContain("requestMediaLibraryPermissionsAsync");
+    expect(libraryHandler).toContain("requestMediaLibraryPermissionsAsync");
+    expect(libraryHandler).toContain("launchImageLibraryAsync");
+    expect(libraryHandler).not.toContain("requestCameraPermissionsAsync");
+  });
+
+  it("surfaces US-045 photo failure feedback without logging image plaintext", () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, "../app/(tabs)/index.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("Enable camera access to take photos.");
+    expect(source).toContain("Enable photo library access to pick images.");
+    expect(source).toContain("Image too large - try a smaller photo.");
+    expect(source).toContain("Could not select image.");
+    expect(source).toContain("Could not prepare image.");
+    expect(source).toContain("Capture queue is full - connect to upload or retry failed captures");
+    expect(source).not.toContain("console.log(imageBase64");
+    expect(source).not.toContain("console.error(imageBase64");
+  });
+
+  it("wires caption review and image enqueue through encrypted capture-image bundles", () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, "../app/(tabs)/index.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("photoCaptionModalVisible");
+    expect(source).toContain("photoCaption.trim()");
+    expect(source).toContain("handleSendImageCapture(null)");
+    expect(source).toContain("handleCancelPhotoCaption");
+    expect(source).toContain("preprocessSelectedImage");
+    expect(source).toContain("validateCaptureImageSerializedSize");
+    expect(source).toContain("createCaptureImagePayload");
+    expect(source).toContain("encryptCaptureImage");
+    expect(source).toContain("CAPTURE_IMAGE_CONTENT_TYPE");
+    expect(source).toContain("Image capture");
+    expect(source).not.toContain("/v1/media/upload");
+  });
+
+  it("keeps the photo caption modal usable while the keyboard is open", () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, "../app/(tabs)/index.tsx"),
+      "utf8",
+    );
+
+    const captionModal = source.slice(
+      source.indexOf('visible={photoCaptionModalVisible}'),
+      source.indexOf('</Modal>', source.indexOf('visible={photoCaptionModalVisible}')),
+    );
+
+    expect(captionModal).toContain('style={styles.photoCaptionKeyboardAvoidingView}');
+    expect(captionModal).toContain("behavior={Platform.OS === 'ios' ? 'padding' : 'height'}");
+    expect(captionModal).toContain('testID="photo-caption-keyboard-dismiss-backdrop"');
+    expect(captionModal).toContain("onPress={Keyboard.dismiss}");
+    expect(captionModal).toContain('accessibilityLabel="Photo caption"');
+    expect(captionModal).toContain('returnKeyType="done"');
+    expect(captionModal).toContain("blurOnSubmit");
+  });
+
+  it("dismisses the keyboard before closing or sending the photo caption modal", () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, "../app/(tabs)/index.tsx"),
+      "utf8",
+    );
+
+    const cancelHandler = source.slice(
+      source.indexOf("const handleCancelPhotoCaption"),
+      source.indexOf("const handleSendImageCapture"),
+    );
+    const sendHandler = source.slice(
+      source.indexOf("const handleSendImageCapture"),
+      source.indexOf("const handleVoiceSwipeStart"),
+    );
+
+    expect(cancelHandler).toContain("Keyboard.dismiss()");
+    expect(sendHandler).toContain("Keyboard.dismiss()");
+  });
+
   it("handles background interruption with keep and discard choices in VoiceRecorder", () => {
     const source = fs.readFileSync(
       path.join(__dirname, "../src/capture/VoiceRecorder.tsx"),
