@@ -69,6 +69,7 @@ const MAX_UNFINISHED = 1000;
 const DONE_RETENTION_DAYS = 7;
 export const CAPTURE_TEXT_CONTENT_TYPE = "application/syncmind.capture-text+json";
 export const CAPTURE_AUDIO_CONTENT_TYPE = "application/syncmind.capture-audio+json";
+export const CAPTURE_IMAGE_CONTENT_TYPE = "application/syncmind.capture-image+json";
 
 let db: SQLite.SQLiteDatabase | null = null;
 const outboxListeners = new Set<() => void>();

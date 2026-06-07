@@ -1095,7 +1095,11 @@ async fn process_inbound_bundle(
 fn is_supported_inbound_content_type(content_type: &str) -> bool {
     matches!(
         content_type,
-        bundle::CONTENT_TYPE_NOTE | bundle::CONTENT_TYPE_CAPTURE_TEXT
+        bundle::CONTENT_TYPE_NOTE
+            | bundle::CONTENT_TYPE_CAPTURE_TEXT
+            | bundle::CONTENT_TYPE_CAPTURE_AUDIO
+            | bundle::CONTENT_TYPE_CAPTURE_IMAGE
+            | bundle::CONTENT_TYPE_CAPTURE_LINK
     )
 }
 
@@ -1249,10 +1253,18 @@ mod tests {
     }
 
     #[test]
-    fn inbound_content_type_accepts_mobile_capture_text_bundles() {
-        assert!(is_supported_inbound_content_type(
-            bundle::CONTENT_TYPE_CAPTURE_TEXT
-        ));
+    fn inbound_content_type_accepts_mobile_capture_bundles() {
+        for content_type in [
+            bundle::CONTENT_TYPE_CAPTURE_TEXT,
+            bundle::CONTENT_TYPE_CAPTURE_AUDIO,
+            bundle::CONTENT_TYPE_CAPTURE_IMAGE,
+            bundle::CONTENT_TYPE_CAPTURE_LINK,
+        ] {
+            assert!(
+                is_supported_inbound_content_type(content_type),
+                "expected {content_type} to be accepted"
+            );
+        }
     }
 
     #[test]

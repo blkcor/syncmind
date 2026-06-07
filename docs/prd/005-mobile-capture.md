@@ -171,18 +171,21 @@ PRD 004 终止于 US-038，本 PRD 从 **US-039** 开始连号。
 - [x] 录音中断（来电、App 切后台超过 30s）自动停止并保留已录制片段，弹"保留 / 丢弃"两选。
 
 ### US-045: 照片捕获（相机 + 相册）
+
+> **Status:** ✅ Implemented and accepted on 2026-06-07 via OpenSpec change [`mobile-photo-capture`](../../openspec/changes/archive/2026-06-07-mobile-photo-capture/). Verification passed: OpenSpec strict validation, focused mobile photo/bundle/outbox/capture tests, mobile typecheck, mobile lint, and desktop spine dispatch tests.
+
 **Description:** 作为用户，我希望从相机或相册选一张图片直接 capture，桌面端会做 OCR 把文字部分加入索引。
 
 **Acceptance Criteria:**
-- [ ] 入口：CaptureScreen 工具栏的相机图标；点击弹 ActionSheet 选 "Take Photo" / "Pick from Library"。
-- [ ] 使用 `expo-image-picker`；相机权限 + 相册权限按需申请。
-- [ ] 图像预处理：
+- [x] 入口：CaptureScreen 工具栏的相机图标；点击弹 ActionSheet 选 "Take Photo" / "Pick from Library"。
+- [x] 使用 `expo-image-picker`；相机权限 + 相册权限按需申请。
+- [x] 图像预处理：
   - 长边超过 2048px 时按比例缩到 2048px（节省带宽 & OCR 准确率边际收益已饱和）。
   - 重新编码为 JPEG quality 85，与原始格式无关（消除 HEIC / RAW 在桌面端的解码依赖）。
   - **不去除 EXIF**——这是 capture 用户的素材，方位/时间 metadata 可能有语义价值；如果未来 Privacy review 否决再调整。
-- [ ] 单图 hard cap：5 MB 编码后；超过时压缩 quality 到 70 重试，仍超过则拒绝。
-- [ ] 可选附加文字 caption（与图片同一 bundle，桌面端会在索引时拼接）。
-- [ ] Capture payload schema：
+- [x] 单图 hard cap：5 MB 编码后；超过时压缩 quality 到 70 重试，仍超过则拒绝。
+- [x] 可选附加文字 caption（与图片同一 bundle，桌面端会在索引时拼接）。
+- [x] Capture payload schema：
   ```json
   {
     "v": 1,

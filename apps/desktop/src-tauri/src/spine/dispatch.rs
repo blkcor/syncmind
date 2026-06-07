@@ -51,6 +51,7 @@ pub enum DispatchOutcome {
 
 /// Maximum decoded (plaintext) bundle payload size. 12 MB.
 pub const MAX_DECODED_BUNDLE_BYTES: usize = 12 * 1024 * 1024;
+const IMAGE_OCR_PENDING_MARKER: &str = "[image OCR pending]";
 
 pub type PostprocessIndexer = Arc<
     dyn Fn(PathBuf) -> Pin<Box<dyn Future<Output = anyhow::Result<usize>> + Send>> + Send + Sync,
@@ -211,9 +212,21 @@ struct CaptureImagePayload {
     image_mime: String,
     width: u32,
     height: u32,
+    #[serde(default)]
+    caption: Option<String>,
     client_ts: String,
     #[serde(default)]
     client_device_fingerprint: Option<String>,
+}
+
+struct CaptureImageMarkdownParams<'a> {
+    id: &'a str,
+    width: u32,
+    height: u32,
+    captured_at: &'a str,
+    caption: Option<&'a str>,
+    ocr_text: &'a str,
+    image_file: &'a str,
 }
 
 // ---------------------------------------------------------------------------
@@ -533,21 +546,13 @@ where
             let binary_path = images_dir.join(format!("{}.jpg", payload.id));
             write_binary_atomically(&binary_path, &binary).await?;
 
-            // Write placeholder markdown (frontmatter + pending-OCR body).
-            let markdown = format!(
-                "---\n\
-                 source: mobile-capture\n\
-                 kind: capture-image\n\
-                 image_file: ../images/{id}.jpg\n\
-                 width: {w}\n\
-                 height: {h}\n\
-                 captured_at: {ts}\n\
-                 ---\n\n\
-                 [mobile image capture \u{2014} OCR pending]\n",
-                id = payload.id,
-                w = payload.width,
-                h = payload.height,
-                ts = payload.client_ts,
+            let caption = normalized_caption(payload.caption.as_deref());
+            let markdown = build_capture_image_placeholder_markdown(
+                &payload.id,
+                payload.width,
+                payload.height,
+                &payload.client_ts,
+                caption,
             );
 
             let captures_dir = ensure_subdir(data_dir, "captures")?;
@@ -566,6 +571,7 @@ where
                 payload.width,
                 payload.height,
                 payload.client_ts.clone(),
+                payload.caption.clone(),
                 postprocess_indexer,
             );
 
@@ -682,6 +688,7 @@ fn spawn_image_postprocess(
     width: u32,
     height: u32,
     captured_at: String,
+    caption: Option<String>,
     indexer: Option<PostprocessIndexer>,
 ) {
     tokio::spawn(async move {
@@ -698,21 +705,15 @@ fn spawn_image_postprocess(
                     .and_then(|name| name.to_str())
                     .map(|name| format!("../images/{name}"))
                     .unwrap_or_else(|| format!("../images/{id}.jpg"));
-                let markdown = format!(
-                    "---\n\
-                     source: mobile-capture\n\
-                     kind: capture-image\n\
-                     id: {id}\n\
-                     ocr_engine: ocrs\n\
-                     ocr_languages: en\n\
-                     width: {width}\n\
-                     height: {height}\n\
-                     captured_at: {captured_at}\n\
-                     ---\n\n\
-                     {body}\n\n\
-                     image_file: {image_file}\n",
-                    body = text.trim()
-                );
+                let markdown = build_capture_image_ocr_markdown(CaptureImageMarkdownParams {
+                    id: &id,
+                    width,
+                    height,
+                    captured_at: &captured_at,
+                    caption: normalized_caption(caption.as_deref()),
+                    ocr_text: text.trim(),
+                    image_file: &image_file,
+                });
                 if let Err(error) = write_text_atomically(&markdown_path, &markdown).await {
                     warn!(path = %markdown_path.display(), error = %error, "failed to write OCR markdown");
                     return;
@@ -725,7 +726,7 @@ fn spawn_image_postprocess(
             }
             Ok(Ok(_)) => {
                 if let Err(error) =
-                    append_to_markdown(&markdown_path, "[image: no text detected]").await
+                    replace_image_ocr_marker(&markdown_path, "[image: no text detected]").await
                 {
                     warn!(path = %markdown_path.display(), error = %error, "failed to append no-text OCR marker");
                 }
@@ -733,7 +734,7 @@ fn spawn_image_postprocess(
             Ok(Err(syncmind_rag_engine::ocr::OcrError::Decode(error))) => {
                 warn!(path = %image_path.display(), error = %error, "image decode failed");
                 if let Err(error) =
-                    append_to_markdown(&markdown_path, "[image decode failed - OCR unavailable]")
+                    replace_image_ocr_marker(&markdown_path, "[image decode failed - OCR unavailable]")
                         .await
                 {
                     warn!(path = %markdown_path.display(), error = %error, "failed to append decode OCR marker");
@@ -741,9 +742,19 @@ fn spawn_image_postprocess(
             }
             Ok(Err(error)) => {
                 warn!(path = %image_path.display(), error = %error, "image OCR unavailable");
+                if let Err(error) =
+                    replace_image_ocr_marker(&markdown_path, "[image OCR unavailable]").await
+                {
+                    warn!(path = %markdown_path.display(), error = %error, "failed to append OCR unavailable marker");
+                }
             }
             Err(error) => {
                 warn!(path = %image_path.display(), error = %error, "image OCR task failed");
+                if let Err(error) =
+                    replace_image_ocr_marker(&markdown_path, "[image OCR unavailable]").await
+                {
+                    warn!(path = %markdown_path.display(), error = %error, "failed to append OCR task marker");
+                }
             }
         }
     });
@@ -766,20 +777,88 @@ fn ensure_subdir(data_dir: &Path, name: &str) -> Result<PathBuf, SpineError> {
     Ok(subdir)
 }
 
+fn normalized_caption(caption: Option<&str>) -> Option<&str> {
+    caption.map(str::trim).filter(|caption| !caption.is_empty())
+}
+
+fn build_capture_image_placeholder_markdown(
+    id: &str,
+    width: u32,
+    height: u32,
+    captured_at: &str,
+    caption: Option<&str>,
+) -> String {
+    let image_file = format!("../images/{id}.jpg");
+    let image_ref = markdown_image_ref(&image_file);
+    let body = match caption {
+        Some(caption) => format!("{caption}\n\n{image_ref}\n\n{IMAGE_OCR_PENDING_MARKER}"),
+        None => format!("{image_ref}\n\n{IMAGE_OCR_PENDING_MARKER}"),
+    };
+
+    format!(
+        "---\n\
+         source: mobile-capture\n\
+         kind: capture-image\n\
+         image_file: {image_file}\n\
+         width: {width}\n\
+         height: {height}\n\
+         captured_at: {captured_at}\n\
+         ---\n\n\
+         {body}\n",
+        image_file = image_file
+    )
+}
+
+fn build_capture_image_ocr_markdown(params: CaptureImageMarkdownParams<'_>) -> String {
+    let image_ref = markdown_image_ref(params.image_file);
+    let body = match normalized_caption(params.caption) {
+        Some(caption) => format!("{caption}\n\n{image_ref}\n\n{}", params.ocr_text),
+        None => format!("{image_ref}\n\n{}", params.ocr_text),
+    };
+
+    format!(
+        "---\n\
+         source: mobile-capture\n\
+         kind: capture-image\n\
+         id: {id}\n\
+         ocr_engine: ocrs\n\
+         ocr_languages: en\n\
+         width: {width}\n\
+         height: {height}\n\
+         captured_at: {captured_at}\n\
+         ---\n\n\
+         {body}\n\n\
+         image_file: {image_file}\n",
+        id = params.id,
+        width = params.width,
+        height = params.height,
+        captured_at = params.captured_at,
+        image_file = params.image_file,
+    )
+}
+
+fn markdown_image_ref(image_file: &str) -> String {
+    format!("![captured image]({image_file})")
+}
+
 /// Write `content` to `path` atomically (tmp -> fsync -> rename).
 async fn write_text_atomically(path: &Path, content: &str) -> Result<(), SpineError> {
     write_binary_atomically(path, content.as_bytes()).await
 }
 
-async fn append_to_markdown(path: &Path, marker: &str) -> Result<(), SpineError> {
+async fn replace_image_ocr_marker(path: &Path, marker: &str) -> Result<(), SpineError> {
     let mut content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| SpineError::new(SpineErrorCode::Internal, e.to_string()))?;
-    if !content.ends_with('\n') {
+    if content.contains(IMAGE_OCR_PENDING_MARKER) {
+        content = content.replace(IMAGE_OCR_PENDING_MARKER, marker);
+    } else {
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(marker);
         content.push('\n');
     }
-    content.push_str(marker);
-    content.push('\n');
     write_text_atomically(path, &content).await
 }
 
@@ -893,16 +972,23 @@ mod tests {
 
     /// Construct a valid `capture-image` JSON payload body (small base64 string).
     fn capture_image_json(id: &str) -> String {
+        capture_image_json_with_caption(id, None)
+    }
+
+    fn capture_image_json_with_caption(id: &str, caption: Option<&str>) -> String {
         let img_b64 = base64::engine::general_purpose::STANDARD.encode(b"fake-jpeg-bytes-minimal");
-        serde_json::json!({
+        let mut payload = serde_json::json!({
             "id": id,
             "image_base64": img_b64,
             "image_mime": "image/jpeg",
             "width": 1920,
             "height": 1080,
             "client_ts": chrono::Utc::now().to_rfc3339(),
-        })
-        .to_string()
+        });
+        if let Some(caption) = caption {
+            payload["caption"] = serde_json::json!(caption);
+        }
+        payload.to_string()
     }
 
     /// Construct a valid `search-request` JSON payload body.
@@ -1089,8 +1175,9 @@ mod tests {
             |path| async move {
                 let content = std::fs::read_to_string(&path).unwrap();
                 assert!(content.contains("kind: capture-image"));
-                assert!(content.contains("image_file"));
-                assert!(content.contains("[mobile image capture"));
+                assert!(content.contains("image_file: ../images/im-004.jpg"));
+                assert!(content.contains("![captured image](../images/im-004.jpg)"));
+                assert!(content.contains(IMAGE_OCR_PENDING_MARKER));
                 assert!(content.contains("width: 1920"));
                 assert!(content.contains("height: 1080"));
                 Ok::<_, anyhow::Error>(0usize)
@@ -1114,6 +1201,121 @@ mod tests {
             }
             other => panic!("expected BinaryStored, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn dispatch_capture_image_writes_non_empty_caption_into_markdown() {
+        let dir = TempDir::new().unwrap();
+        let id = "im-captioned";
+        let caption = "whiteboard plan for offline search";
+        let body = capture_image_json_with_caption(id, Some(caption));
+        let envelope = make_envelope("capture-image", &body);
+        let captured = Arc::new(std::sync::Mutex::new(None::<String>));
+        let captured_clone = captured.clone();
+
+        let outcome = dispatch_bundle(
+            dir.path(),
+            &envelope,
+            "bid-im-captioned",
+            "peer-fp",
+            |path| async move {
+                let content = std::fs::read_to_string(&path).unwrap();
+                *captured_clone.lock().unwrap() = Some(content);
+                Ok::<_, anyhow::Error>(0usize)
+            },
+            |_payload| async move { Ok::<_, anyhow::Error>(()) },
+        )
+        .await
+        .unwrap();
+
+        let md = captured.lock().unwrap().take().unwrap();
+        assert!(md.contains(caption));
+        assert!(md.contains(&format!("![captured image](../images/{id}.jpg)")));
+        assert!(md.contains(IMAGE_OCR_PENDING_MARKER));
+        match outcome {
+            DispatchOutcome::BinaryStored {
+                binary_path,
+                markdown_path,
+            } => {
+                assert!(binary_path.ends_with(format!("sync-inbox/images/{id}.jpg")));
+                assert!(markdown_path.ends_with(format!("sync-inbox/captures/{id}.md")));
+            }
+            other => panic!("expected BinaryStored, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_capture_image_omits_blank_caption_body() {
+        let dir = TempDir::new().unwrap();
+        let id = "im-blank";
+        let body = capture_image_json_with_caption(id, Some("   "));
+        let envelope = make_envelope("capture-image", &body);
+        let captured = Arc::new(std::sync::Mutex::new(None::<String>));
+        let captured_clone = captured.clone();
+
+        dispatch_bundle(
+            dir.path(),
+            &envelope,
+            "bid-im-blank-caption",
+            "peer-fp",
+            |path| async move {
+                let content = std::fs::read_to_string(&path).unwrap();
+                *captured_clone.lock().unwrap() = Some(content);
+                Ok::<_, anyhow::Error>(0usize)
+            },
+            |_payload| async move { Ok::<_, anyhow::Error>(()) },
+        )
+        .await
+        .unwrap();
+
+        let md = captured.lock().unwrap().take().unwrap();
+        assert!(!md.contains("caption"));
+        assert!(md.contains(&format!("![captured image](../images/{id}.jpg)")));
+        assert!(md.contains(IMAGE_OCR_PENDING_MARKER));
+    }
+
+    #[tokio::test]
+    async fn capture_image_ocr_fallback_marker_replaces_pending_and_preserves_caption() {
+        let dir = TempDir::new().unwrap();
+        let markdown_path = dir.path().join("captioned-image.md");
+        let caption = "caption that must survive fallback";
+        let markdown = build_capture_image_placeholder_markdown(
+            "im-fallback",
+            100,
+            80,
+            "2026-06-02T00:00:00Z",
+            Some(caption),
+        );
+        write_text_atomically(&markdown_path, &markdown).await.unwrap();
+
+        replace_image_ocr_marker(&markdown_path, "[image OCR unavailable]")
+            .await
+            .unwrap();
+
+        let updated = std::fs::read_to_string(&markdown_path).unwrap();
+        assert!(updated.contains(caption));
+        assert!(updated.contains("![captured image](../images/im-fallback.jpg)"));
+        assert!(updated.contains("[image OCR unavailable]"));
+        assert!(!updated.contains(IMAGE_OCR_PENDING_MARKER));
+    }
+
+    #[test]
+    fn capture_image_ocr_markdown_preserves_caption_and_image_file() {
+        let markdown = build_capture_image_ocr_markdown(CaptureImageMarkdownParams {
+            id: "im-ocr",
+            width: 1920,
+            height: 1080,
+            captured_at: "2026-06-02T00:00:00Z",
+            caption: Some("whiteboard plan"),
+            ocr_text: "recognized OCR text from board",
+            image_file: "../images/im-ocr.jpg",
+        });
+
+        assert!(markdown.contains("whiteboard plan"));
+        assert!(markdown.contains("![captured image](../images/im-ocr.jpg)"));
+        assert!(markdown.contains("recognized OCR text from board"));
+        assert!(markdown.contains("image_file: ../images/im-ocr.jpg"));
+        assert!(markdown.contains("ocr_engine: ocrs"));
     }
 
     #[tokio::test]

@@ -86,3 +86,28 @@ jest.mock("expo-file-system", () => {
 
   return { __esModule: true, File };
 });
+
+// Mock expo-image-picker
+jest.mock("expo-image-picker", () => ({
+  __esModule: true,
+  requestCameraPermissionsAsync: jest.fn(async () => ({ granted: true })),
+  requestMediaLibraryPermissionsAsync: jest.fn(async () => ({ granted: true })),
+  launchCameraAsync: jest.fn(async () => ({ canceled: true, assets: null })),
+  launchImageLibraryAsync: jest.fn(async () => ({ canceled: true, assets: null })),
+}));
+
+// Mock expo-image-manipulator
+jest.mock("expo-image-manipulator", () => ({
+  __esModule: true,
+  SaveFormat: {
+    JPEG: "jpeg",
+    PNG: "png",
+    WEBP: "webp",
+  },
+  manipulateAsync: jest.fn(async () => ({
+    uri: "file:///tmp/syncmind-processed.jpg",
+    width: 1,
+    height: 1,
+    base64: "AQIDBA==",
+  })),
+}));

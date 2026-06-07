@@ -1,10 +1,12 @@
 import { Component, useCallback, useEffect, useRef, useState } from 'react';
 import * as Crypto from 'expo-crypto';
 import {
+  ActionSheetIOS,
   Alert,
   type GestureResponderEvent,
   Keyboard,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   ScrollView,
   StyleSheet,
@@ -14,6 +16,7 @@ import {
   TouchableWithoutFeedback,
   View,
 } from 'react-native';
+import { SymbolView } from 'expo-symbols';
 import { VoiceRecorder } from '@/src/capture/VoiceRecorder';
 
 import { PairingScanner } from '@/src/pairing/scanner';
@@ -21,13 +24,16 @@ import { useAppStore } from '@/src/store';
 import { ensureIdentity } from '@/src/crypto/identity';
 import {
   createCaptureAudioPayload,
+  createCaptureImagePayload,
   createCaptureTextPayload,
   encryptCaptureAudio,
+  encryptCaptureImage,
   encryptCaptureText,
 } from '@/src/crypto/bundle';
 import { getRestoredPairingState } from '@/src/spine/session';
 import {
   CAPTURE_AUDIO_CONTENT_TYPE,
+  CAPTURE_IMAGE_CONTENT_TYPE,
   enqueueOutboxItem,
   flushOutbox,
   getRecentOutboxStatuses,
@@ -39,6 +45,10 @@ import {
 import {
   type AudioCaptureReadResult,
 } from '@/src/capture/audio';
+import {
+  PHOTO_NATIVE_MODULE_UNAVAILABLE_MESSAGE,
+  isMissingPhotoNativeModuleError,
+} from '@/src/capture/photoErrors';
 
 class CaptureErrorBoundary extends Component<
   { children: React.ReactNode },
@@ -78,6 +88,60 @@ const MAX_CAPTURE_TEXT_CHARS = 50_000;
 const VOICE_SWIPE_THRESHOLD_PX = 48;
 
 type CaptureMode = 'text' | 'voice';
+
+type PhotoPickerAsset = {
+  uri: string;
+  width: number;
+  height: number;
+  type?: 'image' | 'video' | 'livePhoto' | 'pairedVideo' | null;
+  mimeType?: string;
+  base64?: string | null;
+  exif?: Record<string, unknown> | null;
+};
+
+type PhotoPickerResult =
+  | { canceled: true; assets?: null }
+  | { canceled: false; assets: PhotoPickerAsset[] };
+
+type PhotoPickerModule = {
+  requestCameraPermissionsAsync(): Promise<{ granted: boolean }>;
+  requestMediaLibraryPermissionsAsync(): Promise<{ granted: boolean }>;
+  launchCameraAsync(options: PhotoPickerOptions): Promise<PhotoPickerResult>;
+  launchImageLibraryAsync(options: PhotoPickerOptions): Promise<PhotoPickerResult>;
+};
+
+type PhotoPickerOptions = {
+  mediaTypes: ['images'];
+  allowsMultipleSelection: false;
+  allowsEditing: false;
+  quality: 1;
+  exif: true;
+  base64: false;
+};
+
+type PendingPhotoCapture = {
+  status: 'ready';
+  imageBase64: string;
+  imageMime: 'image/jpeg';
+  width: number;
+  height: number;
+  byteLength: number;
+  quality: 0.85 | 0.7;
+  exifPreservation: 'picker-exif-read-manipulator-reencode-unsupported';
+};
+
+const IMAGE_PICKER_OPTIONS: PhotoPickerOptions = {
+  mediaTypes: ['images'],
+  allowsMultipleSelection: false,
+  allowsEditing: false,
+  quality: 1,
+  exif: true,
+  base64: false,
+};
+
+async function loadPhotoPicker(): Promise<PhotoPickerModule> {
+  return import('expo-image-picker') as Promise<PhotoPickerModule>;
+}
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -138,6 +202,9 @@ export default function CaptureScreen() {
   const [note, setNote] = useState('');
   const [captureMode, setCaptureMode] = useState<CaptureMode>('text');
   const [outboxStatusRows, setOutboxStatusRows] = useState<OutboxStatusRow[]>([]);
+  const [pendingPhotoCapture, setPendingPhotoCapture] = useState<PendingPhotoCapture | null>(null);
+  const [photoCaption, setPhotoCaption] = useState('');
+  const [photoCaptionModalVisible, setPhotoCaptionModalVisible] = useState(false);
   const textInputRef = useRef<TextInput>(null);
   const voiceSwipeStartY = useRef<number | null>(null);
   const isTooLong = note.length > MAX_CAPTURE_TEXT_CHARS;
@@ -282,6 +349,191 @@ export default function CaptureScreen() {
       });
   }, [refreshOutboxStatuses]);
 
+  const handleSelectedPhotoAsset = useCallback(async (asset: PhotoPickerAsset) => {
+    let processed: PendingPhotoCapture | { status: 'image-too-large' } | { status: 'preprocessing-failed' };
+
+    try {
+      const { preprocessSelectedImage } = await import('@/src/capture/image');
+      processed = await preprocessSelectedImage(asset);
+    } catch (err) {
+      Alert.alert(
+        'Image Error',
+        isMissingPhotoNativeModuleError(err)
+          ? PHOTO_NATIVE_MODULE_UNAVAILABLE_MESSAGE
+          : 'Could not prepare image.',
+      );
+      return;
+    }
+
+    if (processed.status === 'image-too-large') {
+      Alert.alert('Image Too Large', 'Image too large - try a smaller photo.');
+      return;
+    }
+
+    if (processed.status === 'preprocessing-failed') {
+      Alert.alert('Image Error', 'Could not prepare image.');
+      return;
+    }
+
+    setPendingPhotoCapture(processed);
+    setPhotoCaption('');
+    setPhotoCaptionModalVisible(true);
+  }, []);
+
+  const handleTakePhoto = useCallback(async () => {
+    try {
+      const imagePicker = await loadPhotoPicker();
+      const permission = await imagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Camera Access Needed', 'Enable camera access to take photos.');
+        return;
+      }
+
+      const result = await imagePicker.launchCameraAsync(IMAGE_PICKER_OPTIONS);
+      if (result.canceled || !result.assets?.[0]) {
+        return;
+      }
+      await handleSelectedPhotoAsset(result.assets[0]);
+    } catch (err) {
+      Alert.alert(
+        'Image Error',
+        isMissingPhotoNativeModuleError(err)
+          ? PHOTO_NATIVE_MODULE_UNAVAILABLE_MESSAGE
+          : 'Could not select image.',
+      );
+    }
+  }, [handleSelectedPhotoAsset]);
+
+  const handlePickFromLibrary = useCallback(async () => {
+    try {
+      const imagePicker = await loadPhotoPicker();
+      const permission = await imagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Photo Library Access Needed', 'Enable photo library access to pick images.');
+        return;
+      }
+
+      const result = await imagePicker.launchImageLibraryAsync(IMAGE_PICKER_OPTIONS);
+      if (result.canceled || !result.assets?.[0]) {
+        return;
+      }
+      await handleSelectedPhotoAsset(result.assets[0]);
+    } catch (err) {
+      Alert.alert(
+        'Image Error',
+        isMissingPhotoNativeModuleError(err)
+          ? PHOTO_NATIVE_MODULE_UNAVAILABLE_MESSAGE
+          : 'Could not select image.',
+      );
+    }
+  }, [handleSelectedPhotoAsset]);
+
+  const showPhotoSourcePicker = useCallback(() => {
+    Keyboard.dismiss();
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options: ['Take Photo', 'Pick from Library', 'Cancel'],
+          cancelButtonIndex: 2,
+        },
+        (buttonIndex) => {
+          if (buttonIndex === 0) void handleTakePhoto();
+          if (buttonIndex === 1) void handlePickFromLibrary();
+        },
+      );
+      return;
+    }
+
+    Alert.alert('Add Photo', undefined, [
+      { text: 'Take Photo', onPress: () => void handleTakePhoto() },
+      { text: 'Pick from Library', onPress: () => void handlePickFromLibrary() },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [handlePickFromLibrary, handleTakePhoto]);
+
+  const handleCancelPhotoCaption = useCallback(() => {
+    Keyboard.dismiss();
+    setPendingPhotoCapture(null);
+    setPhotoCaption('');
+    setPhotoCaptionModalVisible(false);
+  }, []);
+
+  const handleSendImageCapture = useCallback(async (captionOverride?: string | null) => {
+    Keyboard.dismiss();
+    if (!pendingPhotoCapture) return;
+
+    const state = getRestoredPairingState();
+    if (!state) return;
+
+    const clientDeviceFingerprint = await ensureIdentity();
+    const id = Crypto.randomUUID();
+    const caption =
+      captionOverride === null
+        ? null
+        : (captionOverride ?? photoCaption).trim() || null;
+    const clientTs = new Date().toISOString();
+    let sizeValidation: { ok: true } | { ok: false; reason: 'image-too-large' };
+    try {
+      const { validateCaptureImageSerializedSize } = await import('@/src/capture/image');
+      sizeValidation = validateCaptureImageSerializedSize({
+        id,
+        imageBase64: pendingPhotoCapture.imageBase64,
+        width: pendingPhotoCapture.width,
+        height: pendingPhotoCapture.height,
+        caption,
+        clientTs,
+        clientDeviceFingerprint,
+      });
+    } catch (err) {
+      Alert.alert(
+        'Image Error',
+        isMissingPhotoNativeModuleError(err)
+          ? PHOTO_NATIVE_MODULE_UNAVAILABLE_MESSAGE
+          : 'Could not prepare image.',
+      );
+      return;
+    }
+
+    if (!sizeValidation.ok) {
+      Alert.alert('Image Too Large', 'Image too large - try a smaller photo.');
+      handleCancelPhotoCaption();
+      return;
+    }
+
+    const payload = createCaptureImagePayload({
+      id,
+      image_base64: pendingPhotoCapture.imageBase64,
+      width: pendingPhotoCapture.width,
+      height: pendingPhotoCapture.height,
+      caption,
+      client_ts: clientTs,
+      client_device_fingerprint: clientDeviceFingerprint,
+    });
+
+    try {
+      const encrypted = await encryptCaptureImage(payload, state);
+      await enqueueOutboxItem(
+        encrypted.id,
+        encrypted.blob,
+        caption ?? 'Image capture',
+        CAPTURE_IMAGE_CONTENT_TYPE,
+      );
+    } catch (err) {
+      if (err instanceof QueueFullError) {
+        Alert.alert('Queue Full', 'Capture queue is full - connect to upload or retry failed captures');
+      }
+      return;
+    }
+
+    handleCancelPhotoCaption();
+    void refreshOutboxStatuses();
+    void flushOutbox()
+      .catch(() => {})
+      .finally(() => {
+        void refreshOutboxStatuses();
+      });
+  }, [handleCancelPhotoCaption, pendingPhotoCapture, photoCaption, refreshOutboxStatuses]);
+
   const handleVoiceSwipeStart = (event: GestureResponderEvent) => {
     voiceSwipeStartY.current = event.nativeEvent.pageY;
   };
@@ -375,6 +627,18 @@ export default function CaptureScreen() {
             onTouchEnd={handleVoiceSwipeEnd}
           >
             <TouchableOpacity
+              style={styles.photoButton}
+              onPress={showPhotoSourcePicker}
+              accessibilityRole="button"
+              accessibilityLabel="Add photo"
+            >
+              <SymbolView
+                name={{ ios: 'camera.fill', android: 'camera', web: 'camera' }}
+                size={22}
+                tintColor="#111827"
+              />
+            </TouchableOpacity>
+            <TouchableOpacity
               style={[
                 styles.modeButton,
                 captureMode === 'voice' && styles.modeButtonActive,
@@ -425,6 +689,62 @@ export default function CaptureScreen() {
               ))}
             </View>
           ) : null}
+          <Modal
+            animationType="slide"
+            transparent
+            visible={photoCaptionModalVisible}
+            onRequestClose={handleCancelPhotoCaption}
+          >
+            <KeyboardAvoidingView
+              style={styles.photoCaptionKeyboardAvoidingView}
+              behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            >
+              <TouchableWithoutFeedback
+                onPress={Keyboard.dismiss}
+                accessible={false}
+                testID="photo-caption-keyboard-dismiss-backdrop"
+              >
+                <View style={styles.modalBackdrop}>
+                  <TouchableWithoutFeedback onPress={() => undefined} accessible={false}>
+                    <View style={styles.captionPanel} testID="photo-caption-panel">
+                      <Text style={styles.captionTitle}>Add caption</Text>
+                      <TextInput
+                        accessibilityLabel="Photo caption"
+                        multiline
+                        placeholder="Optional caption"
+                        returnKeyType="done"
+                        blurOnSubmit
+                        style={styles.captionInput}
+                        value={photoCaption}
+                        onChangeText={setPhotoCaption}
+                        textAlignVertical="top"
+                      />
+                      <View style={styles.captionActions}>
+                        <TouchableOpacity
+                          style={styles.captionSecondaryButton}
+                          onPress={handleCancelPhotoCaption}
+                        >
+                          <Text style={styles.captionSecondaryText}>Cancel</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.captionSecondaryButton}
+                          onPress={() => void handleSendImageCapture(null)}
+                        >
+                          <Text style={styles.captionSecondaryText}>Skip</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.captionPrimaryButton}
+                          onPress={() => void handleSendImageCapture(photoCaption.trim())}
+                        >
+                          <Text style={styles.captionPrimaryText}>Send</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </TouchableWithoutFeedback>
+                </View>
+              </TouchableWithoutFeedback>
+            </KeyboardAvoidingView>
+          </Modal>
         </View>
       </TouchableWithoutFeedback>
     </KeyboardAvoidingView>
@@ -530,6 +850,15 @@ const styles = StyleSheet.create({
     alignItems: 'stretch',
     gap: 10,
   },
+  photoButton: {
+    width: 50,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#ccd1d8',
+    borderRadius: 6,
+    backgroundColor: '#fff',
+  },
   modeButton: {
     minWidth: 76,
     alignItems: 'center',
@@ -605,5 +934,66 @@ const styles = StyleSheet.create({
     paddingTop: 60,
     paddingBottom: 12,
     fontWeight: "500",
+  },
+  modalBackdrop: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(17, 24, 39, 0.35)',
+  },
+  photoCaptionKeyboardAvoidingView: {
+    flex: 1,
+  },
+  captionPanel: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+    maxHeight: '80%',
+    padding: 20,
+    gap: 12,
+  },
+  captionTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#111827',
+  },
+  captionInput: {
+    minHeight: 92,
+    borderWidth: 1,
+    borderColor: '#ccd1d8',
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 15,
+  },
+  captionActions: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 10,
+  },
+  captionSecondaryButton: {
+    minWidth: 78,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#ccd1d8',
+    borderRadius: 6,
+    backgroundColor: '#fff',
+  },
+  captionSecondaryText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#111827',
+  },
+  captionPrimaryButton: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 6,
+    backgroundColor: '#1f6feb',
+  },
+  captionPrimaryText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#fff',
   },
 });

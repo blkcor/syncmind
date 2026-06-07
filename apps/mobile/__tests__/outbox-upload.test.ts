@@ -262,6 +262,7 @@ jest.mock("../src/crypto/native-device-identity", () => ({
 }));
 
 import {
+  CAPTURE_IMAGE_CONTENT_TYPE,
   initOutbox,
   enqueueOutboxItem,
   clearOutbox,
@@ -689,6 +690,33 @@ describe("flushOutbox — success", () => {
     expect(bundleCall[1].headers["X-Syncmind-Content-Type"]).toBe(
       "application/syncmind.capture-audio+json",
     );
+  });
+
+  it("sends capture-image content type for image rows without decrypting blobs", async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 201 })) as typeof fetch;
+
+    const opaqueImageBlob = new Uint8Array([9, 8, 7, 6, 5]);
+
+    await enqueueOutboxItem(
+      "image-1",
+      opaqueImageBlob,
+      "Image capture",
+      CAPTURE_IMAGE_CONTENT_TYPE,
+    );
+
+    await flushOutbox();
+
+    const calls = (global.fetch as jest.Mock).mock.calls;
+    const bundleCall = calls.find((c: [string]) =>
+      c[0].includes("/v1/sync/bundle"),
+    );
+    expect(bundleCall).toBeDefined();
+    expect(bundleCall[1].headers["X-Syncmind-Content-Type"]).toBe(
+      "application/syncmind.capture-image+json",
+    );
+    expect(bundleCall[1].body).toStrictEqual(opaqueImageBlob);
   });
 
   it("uploads rows in FIFO order", async () => {

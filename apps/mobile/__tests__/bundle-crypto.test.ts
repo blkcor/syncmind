@@ -26,11 +26,14 @@ import {
   peerFingerprintToAAD,
   createCaptureTextPayload,
   createCaptureAudioPayload,
+  createCaptureImagePayload,
   buildCaptureTextEnvelope,
   buildCaptureAudioEnvelope,
+  buildCaptureImageEnvelope,
   encryptBundle,
   encryptCaptureText,
   encryptCaptureAudio,
+  encryptCaptureImage,
 } from "../src/crypto/bundle";
 import type { PersistedPairingState } from "../src/spine/session";
 
@@ -144,6 +147,49 @@ describe("secureSerialize", () => {
     expect(() => JSON.stringify(payload)).toThrow("secureSerialize");
     expect(() => secureSerialize(payload)).not.toThrow();
   });
+
+  it("creates the US-045 capture-image payload schema with null caption", () => {
+    const payload = createCaptureImagePayload({
+      id: "image-us-045-null",
+      image_base64: "SlBFRw==",
+      width: 2048,
+      height: 1536,
+      caption: null,
+      client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+    });
+
+    expect(payload).toMatchObject({
+      v: 1,
+      kind: "capture-image",
+      id: "image-us-045-null",
+      image_base64: "SlBFRw==",
+      image_mime: "image/jpeg",
+      width: 2048,
+      height: 1536,
+      caption: null,
+      client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+    });
+    expect(() => JSON.stringify(payload)).toThrow("secureSerialize");
+    expect(() => secureSerialize(payload)).not.toThrow();
+  });
+
+  it("creates the US-045 capture-image payload schema with non-empty caption", () => {
+    const payload = createCaptureImagePayload({
+      id: "image-us-045-caption",
+      image_base64: "SlBFRw==",
+      width: 1600,
+      height: 900,
+      caption: "whiteboard plan",
+      client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+    });
+
+    const serialized = JSON.parse(new TextDecoder().decode(secureSerialize(payload)));
+    expect(serialized.caption).toBe("whiteboard plan");
+    expect(serialized.image_base64).toBe("SlBFRw==");
+  });
 });
 
 // ── peerFingerprintToAAD ─────────────────────────────────────────────
@@ -243,6 +289,36 @@ describe("buildCaptureAudioEnvelope", () => {
       kind: "capture-audio",
       ...payload,
       audio_mime: "audio/mp4",
+    });
+    expect(envelope.sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// ── buildCaptureImageEnvelope ────────────────────────────────────────
+
+describe("buildCaptureImageEnvelope", () => {
+  it("constructs a valid capture-image envelope with deterministic filename and sha256", () => {
+    const payload = {
+      id: "image-1",
+      image_base64: "SlBFRw==",
+      width: 1024,
+      height: 768,
+      caption: null,
+      client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+    };
+
+    const envelope = buildCaptureImageEnvelope(payload);
+
+    expect(envelope.schema_version).toBe(1);
+    expect(envelope.kind).toBe("capture-image");
+    expect(envelope.filename).toBe("capture-image-1.json");
+    expect(envelope.captured_at).toBeTruthy();
+    expect(JSON.parse(envelope.content_utf8)).toEqual({
+      v: 1,
+      kind: "capture-image",
+      ...payload,
+      image_mime: "image/jpeg",
     });
     expect(envelope.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -405,6 +481,29 @@ describe("encryptCaptureAudio", () => {
     const result = await encryptCaptureAudio(payload, testPairingState);
 
     expect(result.id).toBe("audio-1");
+    expect(result.blob).toBeInstanceOf(Uint8Array);
+    expect(result.blob.length).toBeGreaterThanOrEqual(28);
+    expect(result.payloadHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// ── encryptCaptureImage ──────────────────────────────────────────────
+
+describe("encryptCaptureImage", () => {
+  it("encrypts a capture image payload with nonce | ciphertext_and_tag wire shape", async () => {
+    const payload = createCaptureImagePayload({
+      id: "image-1",
+      image_base64: "SlBFRw==",
+      width: 1024,
+      height: 768,
+      caption: "receipt",
+      client_ts: "2026-06-02T00:00:00.000Z",
+      client_device_fingerprint: buildFingerprint(VALID_HEX_64),
+    });
+
+    const result = await encryptCaptureImage(payload, testPairingState);
+
+    expect(result.id).toBe("image-1");
     expect(result.blob).toBeInstanceOf(Uint8Array);
     expect(result.blob.length).toBeGreaterThanOrEqual(28);
     expect(result.payloadHash).toMatch(/^[0-9a-f]{64}$/);
